@@ -1,0 +1,31 @@
+.image-viewer {
+  width: 100vw;
+  max-width: none;
+  height: 100dvh;
+  max-height: none;
+  margin: 0;
+  padding: max(52px, env(safe-area-inset-top)) 14px max(14px, env(safe-area-inset-bottom));
+  border: 0;
+  background: rgba(3, 5, 9, .96);
+  color: var(--text);
+}
+.image-viewer::backdrop { background: rgba(3, 5, 9, .88); }
+.image-viewer[open] { display: grid; place-items: center; }
+.image-viewer img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.image-viewer-close {
+  position: fixed;
+  z-index: 1;
+  top: max(10px, env(safe-area-inset-top));
+  right: 12px;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 1px solid var(--line-bright);
+  border-radius: 50%;
+  background: var(--panel-solid);
+  color: var(--text);
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
+}
+.message-attachments a, .attachment-preview { cursor: zoom-in; }

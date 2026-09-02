@@ -135,7 +135,9 @@ export default function ompDeck(pi: ExtensionAPI) {
 
   async function ensureServer(ctx: ExtensionContext) {
     const session = `${ctx.sessionManager.getSessionId()}\0${ctx.sessionManager.getSessionFile() || ""}`;
-    if (server?.listening && session === registeredSession) return;
+    const registrationExists = socketPath && metadataPath
+      && fs.existsSync(socketPath) && fs.existsSync(metadataPath);
+    if (server?.listening && registrationExists && session === registeredSession) return;
     await startServer(ctx);
   }
 

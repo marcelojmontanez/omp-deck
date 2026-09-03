@@ -187,6 +187,7 @@ h1 { font-size: 18px; letter-spacing: -.02em; }
 }
 .agent-card:active { transform: scale(.992); }
 .agent-card-top { display: grid; grid-template-columns: 9px minmax(0, 1fr) auto; gap: 9px; align-items: start; }
+.agent-card-top > :nth-child(2) { min-width: 0; }
 .status-dot { display: block; width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; background: var(--muted); }
 .status-dot.working { background: var(--green); box-shadow: 0 0 12px rgba(84,230,162,.6); animation: pulse 1.8s ease-in-out infinite; }
 .status-dot.needs-input, .status-dot.attention { background: var(--amber); box-shadow: 0 0 12px rgba(255,199,107,.48); }
@@ -204,7 +205,9 @@ h1 { font-size: 18px; letter-spacing: -.02em; }
 .subagent strong { font-size: 11px; }.subagent small { color: var(--muted); font-size: 10px; }
 @keyframes pulse { 50% { opacity: .48; } }
 .agent-name {
+  display: block;
   min-width: 0;
+  overflow-wrap: anywhere;
   font-size: 16px;
   font-weight: 820;
   line-height: 1.2;
@@ -220,6 +223,7 @@ h1 { font-size: 18px; letter-spacing: -.02em; }
   -webkit-line-clamp: 2;
   overflow: hidden;
 }
+.agent-project, .activity-summary { overflow-wrap: anywhere; }
 .agent-age { color: var(--muted); font-size: 10px; white-space: nowrap; }
 
 .detail { position: relative; display: flex; flex-direction: column; overflow: hidden; }
@@ -242,6 +246,12 @@ h1 { font-size: 18px; letter-spacing: -.02em; }
   scrollbar-width: none;
 }
 .chips::-webkit-scrollbar { display: none; }
+.detail-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+}
 .chip {
   padding: 5px 8px;
   border: 0;

@@ -65,12 +65,15 @@
       <section class="detail" id="detail" aria-live="polite">
         <header class="detail-header">
           <div class="chips" id="detail-chips"></div>
-          <button class="overflow-button" id="overflow-button" type="button" aria-label="Session actions" aria-expanded="false" aria-controls="session-menu">⋮</button>
-          <div class="session-menu" id="session-menu" role="menu" hidden>
-            <button type="button" role="menuitem" data-session-action="clear">Clear context</button>
-            <button type="button" role="menuitem" data-session-action="interrupt">Interrupt</button>
-            <button type="button" role="menuitem" data-session-action="quit">Quit</button>
-            <button type="button" role="menuitem" data-session-action="copy">Copy link</button>
+          <div class="detail-actions">
+            <div id="task-control"></div>
+            <button class="overflow-button" id="overflow-button" type="button" aria-label="Session actions" aria-expanded="false" aria-controls="session-menu">⋮</button>
+            <div class="session-menu" id="session-menu" role="menu" hidden>
+              <button type="button" role="menuitem" data-session-action="clear">Clear context</button>
+              <button type="button" role="menuitem" data-session-action="interrupt">Interrupt</button>
+              <button type="button" role="menuitem" data-session-action="quit">Quit</button>
+              <button type="button" role="menuitem" data-session-action="copy">Copy link</button>
+            </div>
           </div>
         </header>
         <div class="activity" id="activity"><p class="activity-empty">Waiting for structured OMP events.</p></div>

@@ -27,9 +27,9 @@ el['session-menu'].addEventListener('click', async event => {
   if (action === 'copy') {
     try {
       await navigator.clipboard.writeText(location.href);
-      showToast('Session link copied');
+      showToast('Session link copied', 'success');
     } catch {
-      showToast('Could not copy the session link');
+      showToast('Could not copy the session link', 'error');
     }
     return;
   }
@@ -46,10 +46,10 @@ el['session-menu'].addEventListener('click', async event => {
       const payload = await response.json().catch(() => ({}));
       throw new Error(payload.error || `Action failed (${response.status})`);
     }
-    showToast(`${action[0].toUpperCase()}${action.slice(1)} requested`);
+    showToast(`${action[0].toUpperCase()}${action.slice(1)} requested`, 'success');
     await refresh();
   } catch (error) {
-    showToast(error.message);
+    showToast(error.message, 'error');
   }
 });
 

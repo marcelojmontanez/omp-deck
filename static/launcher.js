@@ -48,19 +48,19 @@ el['project-launch'].addEventListener('click', async () => {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({project, create: creating}),
     });
+    const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
       throw new Error(payload.error || `Launch failed (${response.status})`);
     }
     let launched = null;
     for (let attempt = 0; attempt < 20 && !launched; attempt += 1) {
       await new Promise(resolve => setTimeout(resolve, 500));
       await refresh();
-      launched = state.agents.find(agent => !previousIds.has(agent.id) && agent.project === project);
+      launched = state.agents.find(agent => !previousIds.has(agent.id) && agent.cwd === payload.cwd);
     }
     if (!launched) throw new Error('OMP started but did not appear in the roster');
     el['launch-state'].textContent = '';
-    showToast(`Started OMP in ${project}`);
+    showToast(`Started OMP in ${project}`, 'success');
     if (creating) await loadLaunchableProjects();
     selectAgent(launched.id);
   } catch (error) {

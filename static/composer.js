@@ -12,6 +12,7 @@ function createComposer({
   const attachments = new Map();
   const pendingMessages = new Map();
   const sending = new Set();
+  const outboundQueues = new Map();
   const revokedAttachmentUrls = new Set();
   let sessionId = null;
   const commands = [
@@ -126,12 +127,12 @@ function createComposer({
     const current = attachmentsFor(sessionId);
     const incoming = [...files];
     if (current.length + incoming.length > 4) {
-      showToast('Attach at most 4 files.');
+      showToast('Attach at most 4 files.', 'error');
       return;
     }
     const total = [...current, ...incoming].reduce((bytes, item) => bytes + item.size, 0);
     if (total > 12 * 1024 * 1024) {
-      showToast('Files must total 12 MB or less.');
+      showToast('Files must total 12 MB or less.', 'error');
       return;
     }
     current.push(...await Promise.all(incoming.map(readAttachment)));
@@ -157,35 +158,8 @@ function createComposer({
     }
   }
 
-  async function submit(event) {
-    event.preventDefault();
-    const agent = selectedAgent();
-    const id = agent?.id;
-    if (!agent || sending.has(id)) return;
-    const outgoingAttachments = [...attachmentsFor(id)];
-    const typedMessage = elements.message.value.trim();
-    const message = typedMessage || (outgoingAttachments.length ? 'Files attached.' : '');
-    if (!message) return;
-    const isCommand = message.startsWith('/') && !outgoingAttachments.length;
-
-    const pending = isCommand ? null : {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      text: message,
-      attachments: outgoingAttachments,
-      createdAt: Date.now(),
-      accepted: false,
-    };
-    if (pending) pendingFor(id).push(pending);
-    saveDraft(id, '');
-    attachments.set(id, []);
-    elements.message.value = '';
-    renderAttachments();
-    sending.add(id);
-    elements.send.disabled = true;
-    elements['send-state'].textContent = isCommand ? `Running ${message.split(/\s/, 1)[0]}…` : '';
-    touchRender();
-    renderDetail();
-
+  async function deliver(job) {
+    const {agent, id, message, outgoingAttachments, pending, isCommand} = job;
     try {
       const response = await fetch('/api/message', {
         method: 'POST',
@@ -218,16 +192,16 @@ function createComposer({
           '/help': 'Command help opened',
         }[command] || `${command} completed`;
         elements['send-state'].textContent = feedback;
-        showToast(feedback);
+        showToast(feedback, 'success');
       }
-      await refresh();
+      void refresh();
     } catch (error) {
       if (pending) pendingMessages.set(id, pendingFor(id).filter(item => item.id !== pending.id));
       const currentDraft = loadDraft(id);
       saveDraft(id, currentDraft ? `${message}\n${currentDraft}` : message);
       attachments.set(id, mergeAttachments(outgoingAttachments, attachmentsFor(id)));
       elements['send-state'].textContent = '';
-      showToast(`Message not sent: ${error.message}`);
+      showToast(`Message not sent: ${error.message}`, 'error');
       touchRender();
       if (sessionId === id) {
         elements.message.value = loadDraft(id);
@@ -235,13 +209,51 @@ function createComposer({
         elements.message.focus();
       }
       renderDetail();
+    }
+  }
+
+  async function drain(id) {
+    if (sending.has(id)) return;
+    sending.add(id);
+    try {
+      const queue = outboundQueues.get(id);
+      while (queue?.length) await deliver(queue.shift());
     } finally {
       sending.delete(id);
-      if (sessionId === id) {
-        elements.send.disabled = false;
-        updateCommandMode();
-      }
+      if (!outboundQueues.get(id)?.length) outboundQueues.delete(id);
     }
+  }
+
+  function submit(event) {
+    event.preventDefault();
+    const agent = selectedAgent();
+    const id = agent?.id;
+    if (!agent) return;
+    const outgoingAttachments = [...attachmentsFor(id)];
+    const typedMessage = elements.message.value.trim();
+    const message = typedMessage || (outgoingAttachments.length ? 'Files attached.' : '');
+    if (!message) return;
+    const isCommand = message.startsWith('/') && !outgoingAttachments.length;
+
+    const pending = isCommand ? null : {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      text: message,
+      attachments: outgoingAttachments,
+      createdAt: Date.now(),
+      accepted: false,
+    };
+    if (pending) pendingFor(id).push(pending);
+    saveDraft(id, '');
+    attachments.set(id, []);
+    elements.message.value = '';
+    renderAttachments();
+    elements['send-state'].textContent = isCommand ? `Queued ${message.split(/\s/, 1)[0]}…` : '';
+    touchRender();
+    renderDetail();
+
+    if (!outboundQueues.has(id)) outboundQueues.set(id, []);
+    outboundQueues.get(id).push({agent, id, message, outgoingAttachments, pending, isCommand});
+    void drain(id);
   }
 
   elements.message.addEventListener('input', () => {
@@ -305,7 +317,6 @@ function createComposer({
   elements.composer.addEventListener('submit', submit);
 
   return {
-    isSending: id => sending.has(id),
     pendingFor,
     reconcile,
     select,

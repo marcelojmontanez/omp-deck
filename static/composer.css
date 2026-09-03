@@ -127,11 +127,21 @@ textarea::placeholder { color: #667187; }
   bottom: 82px;
   left: 12px;
   padding: 10px 12px;
-  border: 1px solid rgba(255,113,133,.45);
+  border: 1px solid rgba(125,155,255,.38);
   border-radius: 11px;
-  background: #27131a;
-  color: #ffd7dd;
+  background: #151b2b;
+  color: #e5ecff;
   box-shadow: 0 12px 35px rgba(0,0,0,.35);
   font-size: 12px;
+}
+.toast.success {
+  border-color: rgba(80,210,145,.42);
+  background: #10251d;
+  color: #c9f7df;
+}
+.toast.error {
+  border-color: rgba(255,113,133,.45);
+  background: #27131a;
+  color: #ffd7dd;
 }
 .toast[hidden] { display: none; }

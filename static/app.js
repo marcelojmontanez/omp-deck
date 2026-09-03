@@ -20,7 +20,7 @@ const state = {
 const el = Object.fromEntries([
   'connection', 'connection-text', 'working-count', 'attention-count', 'unread-count',
   'idle-count', 'usage-list', 'agent-list', 'app', 'workspace', 'detail',
-  'detail-chips', 'activity', 'scroll-newest', 'composer', 'attachments', 'attach', 'gallery',
+  'detail-chips', 'task-control', 'activity', 'scroll-newest', 'composer', 'attachments', 'attach', 'gallery',
   'attachment-input', 'gallery-input', 'message', 'send', 'send-state', 'toast',
   'overflow-button', 'session-menu', 'command-menu', 'command-mode',
   'project-select', 'project-new', 'project-launch', 'launch-state'
@@ -121,9 +121,10 @@ function touchRender() {
   state.renderRevision += 1;
 }
 let toastTimer;
-function showToast(message) {
+function showToast(message, tone = 'neutral') {
   clearTimeout(toastTimer);
   el.toast.textContent = message;
+  el.toast.className = `toast ${['success', 'error'].includes(tone) ? tone : 'neutral'}`;
   el.toast.hidden = false;
   toastTimer = setTimeout(() => { el.toast.hidden = true; }, 5000);
 }
@@ -197,8 +198,8 @@ function renderList() {
   el['agent-list'].innerHTML = visible.length ? visible.map(agent => {
     const session = agent.session || {};
     const status = displayStatus(agent);
-    const children = agent.subagents || [];
-    const activeChildren = children.filter(subagent => subagent.executionState === 'working').length;
+    const children = (agent.subagents || [])
+      .filter(subagent => subagent.executionState === 'working');
     const subagents = children.map(subagent =>
       `<span class="subagent"><i class="status-dot ${escapeHtml(subagent.executionState)}"></i><span><strong>${escapeHtml(subagent.label)}</strong><small>${escapeHtml(subagent.activitySummary || subagent.executionState)}</small></span></span>`
     ).join('');
@@ -212,7 +213,7 @@ function renderList() {
         </span>
         <span class="agent-age">${relativeTime(session.updatedMs)}</span>
       </span>
-      ${subagents ? `<span class="subagent-progress">${children.length} subagent${children.length === 1 ? '' : 's'} · ${activeChildren} working · ${children.length - activeChildren} waiting or done</span><span class="subagents" aria-label="Subagents">${subagents}</span>` : ''}
+      ${subagents ? `<span class="subagent-progress">${children.length} working subagent${children.length === 1 ? '' : 's'}</span><span class="subagents" aria-label="Working subagents">${subagents}</span>` : ''}
     </button>`;
   }).join('') : '<div class="empty-card">No OMPs match this filter.</div>';
 }
@@ -229,10 +230,6 @@ function renderDetail({selectionChanged = false} = {}) {
   state.renderedUpdatedMs = renderKey;
   state.renderedRevision = state.renderRevision;
   const chips = [];
-  if (session.todo) {
-    const taskCount = TodoUI.parse(session.todo).reduce((count, phase) => count + phase.tasks.length, 0);
-    chips.push(`<button class="task-toggle ${state.showTodo ? 'active' : ''}" type="button" data-toggle-todo aria-label="${taskCount} tasks" aria-expanded="${state.showTodo}" aria-controls="todo-panel"><span class="task-toggle-icon">☑</span><span>${taskCount}</span></button>`);
-  }
   if (session.model) chips.push(`<span class="chip">${escapeHtml(session.model)}</span>`);
   if (agent) {
     const level = thinkingLevel(agent);
@@ -247,6 +244,12 @@ function renderDetail({selectionChanged = false} = {}) {
   if (agent?.bridgeConnected === false || executionState === 'disconnected') {
     chips.push('<span class="bridge-warning" role="status">Disconnected · reconnect with /reload-plugins then /omp-deck</span>');
   }
+  let taskControl = '';
+  if (session.todo) {
+    const taskCount = TodoUI.parse(session.todo).reduce((count, phase) => count + phase.tasks.length, 0);
+    taskControl = `<button class="task-toggle ${state.showTodo ? 'active' : ''}" type="button" data-toggle-todo aria-label="${taskCount} tasks" aria-expanded="${state.showTodo}" aria-controls="todo-panel"><span class="task-toggle-icon">☑</span><span>${taskCount}</span></button>`;
+  }
+  el['task-control'].innerHTML = taskControl;
   el['detail-chips'].innerHTML = chips.join('');
 
   const currentEvents = (session.activity || [])
@@ -268,6 +271,7 @@ function renderDetail({selectionChanged = false} = {}) {
     time: new Date(item.createdAt).toISOString(),
     attachments: item.attachments,
   })) : [];
+  events.unshift(...pending);
   if (executionState === 'working' || pending.length) {
     const workingOn = pending.length ? 'Preparing a response' : (agent?.activitySummary || session.workingOn || 'Preparing a response');
     events.unshift({kind: 'thinking', title: `OMP · ${workingOn}`, time: null});
@@ -293,7 +297,7 @@ function renderDetail({selectionChanged = false} = {}) {
     requestAnimationFrame(() => { el.activity.scrollTop = 0; });
   }
   const canMessage = Boolean(agent?.bridgeConnected);
-  const composerEnabled = canMessage && !composer.isSending(agent?.id);
+  const composerEnabled = canMessage;
   el.message.setAttribute('aria-label', agent ? `Message ${agent.label}` : 'Message selected OMP');
   el.message.placeholder = agent && !canMessage ? 'Run /reload-plugins, then /omp-deck…' : 'Message this OMP…';
   el.message.disabled = !canMessage;
@@ -409,7 +413,7 @@ composer = createComposer({
   refresh,
   escapeHtml,
 });
-el['detail-chips'].addEventListener('click', event => {
+document.querySelector('.detail-header').addEventListener('click', event => {
   const todoButton = event.target.closest('[data-toggle-todo]');
   if (todoButton) {
     state.showTodo = !state.showTodo;

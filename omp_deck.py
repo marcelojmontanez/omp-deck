@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parent
 RUNTIME_FILES = (
     "attachments.py",
     "process_discovery.py",
+    "projects.py",
     "read_cursors.py",
     "server.py",
     "session_projection.py",

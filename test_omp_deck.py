@@ -60,6 +60,7 @@ class InstallerTests(unittest.TestCase):
             unit = home / "config/systemd/user/omp-deck.service"
             command = home / "bin/omp-deck"
             self.assertTrue((home / "data/omp-deck/server.py").is_file())
+            self.assertTrue((home / "data/omp-deck/projects.py").is_file())
             self.assertTrue((home / "omp-agent/extensions/omp-deck.ts").is_file())
             self.assertFalse(legacy_extension.exists())
             self.assertIn(str(home / "data/omp-deck/server.py"), unit.read_text())

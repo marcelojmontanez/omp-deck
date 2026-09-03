@@ -137,7 +137,8 @@ def install():
         )),
     )
     run(["systemctl", "--user", "daemon-reload"])
-    run(["systemctl", "--user", "enable", "--now", "omp-deck.service"])
+    run(["systemctl", "--user", "enable", "omp-deck.service"])
+    run(["systemctl", "--user", "restart", "omp-deck.service"])
     phone_url = enable_tailscale()
     print(f"OMP Deck is running at {phone_url or f'http://{SETTINGS.host}:{SETTINGS.port}'}")
     if phone_url is None and shutil.which("tailscale") is None:

@@ -669,7 +669,7 @@ class LifecycleActionTests(unittest.TestCase):
 
         pane.assert_not_called()
 
-    def test_interrupt_types_control_c_only_for_working_session(self):
+    def test_interrupt_types_double_escape_only_for_working_session(self):
         handler = object.__new__(server.Handler)
         agent = {"pid": 123, "sessionHeader": {"path": None}}
         completed = SimpleNamespace(returncode=0, stderr="")
@@ -681,7 +681,7 @@ class LifecycleActionTests(unittest.TestCase):
         ):
             result = handler.perform_action("session-1", "interrupt")
 
-        self.assertEqual(run.call_args.args[0], ["tmux", "send-keys", "-t", "%7", "C-c"])
+        self.assertEqual(run.call_args.args[0], ["tmux", "send-keys", "-t", "%7", "Escape", "Escape"])
         self.assertEqual(result["action"], "interrupt")
 
 
@@ -695,6 +695,48 @@ class ProjectLauncherTests(unittest.TestCase):
             (root / "notes.txt").write_text("")
             with patch.object(server, "DEV_ROOT", root):
                 self.assertEqual(server.launchable_projects(), ["alpha", "Zulu"])
+
+    def test_projects_include_nested_directories_and_prune_generated_trees(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "active/omp-deck").mkdir(parents=True)
+            (root / "active/omp-deck/src").mkdir()
+            (root / "active/omp-deck/.git").write_text("")
+            (root / "active/omp-deck/node_modules/dependency").mkdir(parents=True)
+            with patch.object(server, "DEV_ROOT", root):
+                projects = server.launchable_projects()
+
+            self.assertIn("active", projects)
+            self.assertIn("active/omp-deck", projects)
+            self.assertNotIn("active/omp-deck/src", projects)
+            self.assertFalse(any("node_modules" in project for project in projects))
+
+    def test_nested_project_launch_uses_resolved_directory(self):
+        completed = SimpleNamespace(returncode=0, stderr="")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "active/my-project"
+            project.mkdir(parents=True)
+            with (
+                patch.object(server, "DEV_ROOT", root),
+                patch.object(server, "OMP_BIN", "/usr/bin/omp"),
+                patch.object(server.subprocess, "run", return_value=completed) as run,
+            ):
+                result = server.launch_project("active/my-project")
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[5:], ["-c", str(project), "/usr/bin/omp", "--cwd", str(project)])
+        self.assertEqual(result["cwd"], str(project))
+
+    def test_projects_reject_symlinks_outside_project_root(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            root = Path(directory)
+            (root / "active").mkdir()
+            (root / "active/external").symlink_to(outside, target_is_directory=True)
+            with patch.object(server, "DEV_ROOT", root):
+                self.assertNotIn("active/external", server.launchable_projects())
+                with self.assertRaisesRegex(ValueError, "invalid project"):
+                    server.launch_project("active/external")
 
     def test_launch_uses_validated_project_without_a_shell(self):
         completed = SimpleNamespace(returncode=0, stderr="")

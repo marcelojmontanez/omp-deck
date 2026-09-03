@@ -8,6 +8,7 @@ MAINTAINED_SOURCES = (
     "attachments.py",
     "omp_deck.py",
     "process_discovery.py",
+    "projects.py",
     "server.py",
     "settings.py",
     "session_state.py",

@@ -65,7 +65,8 @@ class InstallerTests(unittest.TestCase):
             self.assertIn(str(home / "data/omp-deck/server.py"), unit.read_text())
             self.assertTrue(command.stat().st_mode & 0o100)
             self.assertEqual(config.stat().st_mode & 0o777, 0o600)
-            self.assertIn(["systemctl", "--user", "enable", "--now", "omp-deck.service"], calls)
+            self.assertIn(["systemctl", "--user", "enable", "omp-deck.service"], calls)
+            self.assertIn(["systemctl", "--user", "restart", "omp-deck.service"], calls)
 
     def test_tailscale_is_enabled_only_when_unconfigured(self):
         results = [

@@ -11,6 +11,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 from attachments import blob_path, cleanup_paths, save_attachments
+from projects import list_launchable_projects, resolve_project_path
 from session_state import execution_state
 from session_projection import (
     MAX_CHAT_MESSAGES,
@@ -242,31 +243,26 @@ def usage_snapshot():
             value = {"generatedAt": int(time.time() * 1000), "reports": [], "error": str(error)}
         _usage_cache.update(at=now, value=value)
         return value
+
+
+def project_path(project, *, must_exist=True):
+    return resolve_project_path(DEV_ROOT, project, must_exist=must_exist)
+
+
 def launchable_projects():
-    try:
-        projects = [
-            path for path in DEV_ROOT.iterdir()
-            if path.is_dir() and not path.name.startswith(".")
-        ]
-    except OSError:
-        return []
-    return sorted((path.name for path in projects), key=str.casefold)
+    return list_launchable_projects(DEV_ROOT)
 
 
 def launch_project(project, create=False):
     if not isinstance(project, str):
         raise ValueError("invalid project")
     project = project.strip()
-    if (
-        not project or len(project) > 80 or project.startswith(".")
-        or Path(project).name != project or project in {".", ".."}
-    ):
-        raise ValueError("invalid project")
-    path = DEV_ROOT / project
+    path = project_path(project, must_exist=not create)
     created = False
     if create:
         try:
             path.mkdir()
+            path = project_path(project)
             created = True
         except FileExistsError as error:
             raise ValueError("project already exists") from error
@@ -292,7 +288,7 @@ def launch_project(project, create=False):
             path.rmdir()
         raise RuntimeError(result.stderr.strip() or "could not start OMP")
     _snapshot_cache.update(at=0, value=None)
-    return {"ok": True, "delivery": "accepted", "project": project, "created": created}
+    return {"ok": True, "delivery": "accepted", "project": project, "cwd": str(path), "created": created}
 
 
 
@@ -349,7 +345,7 @@ class Handler(SimpleHTTPRequestHandler):
             if not pane:
                 raise ConnectionError("interrupt requires OMP to run inside tmux")
             result = subprocess.run(
-                ["tmux", "send-keys", "-t", pane, "C-c"],
+                ["tmux", "send-keys", "-t", pane, "Escape", "Escape"],
                 capture_output=True,
                 text=True,
                 timeout=3,

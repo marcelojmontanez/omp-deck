@@ -58,7 +58,7 @@ def main():
         print("\n".join(failures), file=sys.stderr)
         return 1
     checks = [
-        [sys.executable, "-m", "py_compile", "attachments.py", "omp_deck.py", "server.py", "settings.py", "session_state.py", "test_server.py"],
+        [sys.executable, "-m", "py_compile", "attachments.py", "omp_deck.py", "projects.py", "server.py", "settings.py", "session_state.py", "test_server.py"],
         [sys.executable, "-m", "unittest", "test_server.py", "test_omp_deck.py"],
         [sys.executable, "tools/metrics.py"],
     ]

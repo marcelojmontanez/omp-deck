@@ -1,0 +1,391 @@
+"""Durable storage for Deck's non-secret session registry."""
+
+from __future__ import annotations
+
+import copy
+import fcntl
+import json
+import os
+import re
+import math
+import threading
+import uuid
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Iterator, Mapping
+
+SCHEMA_VERSION = 1
+DEFAULT_MAX_RECORDS = 1_000
+_ADAPTER_KINDS = frozenset({"rpc", "collab", "extension"})
+_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_FORBIDDEN_METADATA_MARKERS = (
+    "authorization",
+    "content",
+    "cookie",
+    "credential",
+    "message",
+    "password",
+    "secret",
+    "token",
+    "transcript",
+)
+_RECORD_KEYS = frozenset(
+    {
+        "id",
+        "adapterKind",
+        "ompSessionId",
+        "project",
+        "title",
+        "desiredRpcRunning",
+        "recoveryMetadata",
+        "generation",
+        "createdAt",
+        "updatedAt",
+    }
+)
+_UNSET = object()
+
+
+class RegistryError(Exception):
+    """Base class for registry failures."""
+
+
+class RegistryValidationError(RegistryError, ValueError):
+    """A requested or persisted registry value violates the schema."""
+
+
+class RegistryCapacityError(RegistryError):
+    """The configured record bound has been reached."""
+
+
+class RegistryCorruptionError(RegistryError):
+    """The persisted registry was invalid and moved aside for recovery."""
+
+    def __init__(self, message: str, quarantine_path: Path):
+        super().__init__(message)
+        self.quarantine_path = quarantine_path
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _normalized_key(key: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", key.lower())
+
+
+def _validate_text(value: Any, name: str, *, nullable: bool = False) -> str | None:
+    if nullable and value is None:
+        return None
+    if not isinstance(value, str) or not value or len(value) > 4096 or "\x00" in value:
+        raise RegistryValidationError(f"{name} must be a non-empty bounded string")
+    return value
+
+
+def _validate_safe_metadata(value: Any, *, depth: int = 0) -> None:
+    if depth > 8:
+        raise RegistryValidationError("recoveryMetadata is too deeply nested")
+    if value is None or isinstance(value, (bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise RegistryValidationError("recoveryMetadata numbers must be finite")
+        return
+    if isinstance(value, str):
+        if len(value) > 16_384 or "\x00" in value:
+            raise RegistryValidationError("recoveryMetadata contains an invalid string")
+        return
+    if isinstance(value, list):
+        if len(value) > 256:
+            raise RegistryValidationError("recoveryMetadata list is too large")
+        for item in value:
+            _validate_safe_metadata(item, depth=depth + 1)
+        return
+    if isinstance(value, dict):
+        if len(value) > 256:
+            raise RegistryValidationError("recoveryMetadata object is too large")
+        for key, item in value.items():
+            if not isinstance(key, str) or not key or len(key) > 128:
+                raise RegistryValidationError("recoveryMetadata keys must be bounded strings")
+            normalized = _normalized_key(key)
+            if (
+                any(marker in normalized for marker in _FORBIDDEN_METADATA_MARKERS)
+                or normalized.endswith("link")
+                or normalized.endswith("url")
+            ):
+                raise RegistryValidationError(f"recoveryMetadata field {key!r} is secret or unsafe")
+            _validate_safe_metadata(item, depth=depth + 1)
+        return
+    raise RegistryValidationError("recoveryMetadata must contain only JSON values")
+
+
+class RegistryStore:
+    """Versioned, bounded and atomic persistent session registry.
+
+    The in-process lock protects threads, while the adjacent advisory lock avoids
+    lost updates when multiple store instances address the same registry.
+    """
+
+    def __init__(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        max_records: int = DEFAULT_MAX_RECORDS,
+        clock: Callable[[], datetime | str] = _utc_now,
+        id_factory: Callable[[], str] = lambda: uuid.uuid4().hex,
+    ) -> None:
+        if not isinstance(max_records, int) or isinstance(max_records, bool) or max_records < 1:
+            raise ValueError("max_records must be a positive integer")
+        self.path = Path(path)
+        self.max_records = max_records
+        self._clock = clock
+        self._id_factory = id_factory
+        self._lock = threading.RLock()
+        self._lock_path = self.path.with_name(f".{self.path.name}.lock")
+
+    def load(self) -> list[dict[str, Any]]:
+        """Return an isolated snapshot ordered by creation/insertion order."""
+        with self._locked():
+            data = self._read_or_quarantine()
+            return copy.deepcopy(data["sessions"])
+
+    def create(
+        self,
+        *,
+        adapter_kind: str,
+        project_name: str,
+        project_path: str,
+        title: str,
+        omp_session_id: str | None = None,
+        desired_rpc_running: bool = False,
+        recovery_metadata: Mapping[str, Any] | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        with self._locked():
+            data = self._read_or_quarantine()
+            if len(data["sessions"]) >= self.max_records:
+                raise RegistryCapacityError(f"registry is limited to {self.max_records} records")
+            candidate_id = session_id if session_id is not None else self._new_unique_id(data)
+            now = self._timestamp()
+            record = {
+                "id": candidate_id,
+                "adapterKind": adapter_kind,
+                "ompSessionId": omp_session_id,
+                "project": {"name": project_name, "path": project_path},
+                "title": title,
+                "desiredRpcRunning": desired_rpc_running,
+                "recoveryMetadata": dict(recovery_metadata or {}),
+                "generation": data["generation"] + 1,
+                "createdAt": now,
+                "updatedAt": now,
+            }
+            self._validate_record(record)
+            if any(existing["id"] == candidate_id for existing in data["sessions"]):
+                raise RegistryValidationError(f"duplicate session id: {candidate_id}")
+            data["generation"] += 1
+            data["sessions"].append(record)
+            self._write(data)
+            return copy.deepcopy(record)
+
+    def update(
+        self,
+        session_id: str,
+        *,
+        adapter_kind: str | object = _UNSET,
+        project_name: str | object = _UNSET,
+        project_path: str | object = _UNSET,
+        title: str | object = _UNSET,
+        omp_session_id: str | None | object = _UNSET,
+        desired_rpc_running: bool | object = _UNSET,
+        recovery_metadata: Mapping[str, Any] | object = _UNSET,
+    ) -> dict[str, Any]:
+        with self._locked():
+            data = self._read_or_quarantine()
+            record = next((item for item in data["sessions"] if item["id"] == session_id), None)
+            if record is None:
+                raise KeyError(session_id)
+            if adapter_kind is not _UNSET:
+                record["adapterKind"] = adapter_kind
+            if project_name is not _UNSET:
+                record["project"]["name"] = project_name
+            if project_path is not _UNSET:
+                record["project"]["path"] = project_path
+            if title is not _UNSET:
+                record["title"] = title
+            if omp_session_id is not _UNSET:
+                record["ompSessionId"] = omp_session_id
+            if desired_rpc_running is not _UNSET:
+                record["desiredRpcRunning"] = desired_rpc_running
+            if recovery_metadata is not _UNSET:
+                if not isinstance(recovery_metadata, Mapping):
+                    raise RegistryValidationError("recoveryMetadata must be an object")
+                record["recoveryMetadata"] = dict(recovery_metadata)
+            next_generation = data["generation"] + 1
+            record["generation"] = next_generation
+            record["updatedAt"] = self._timestamp()
+            self._validate_record(record)
+            data["generation"] = next_generation
+            self._write(data)
+            return copy.deepcopy(record)
+
+    def remove(self, session_id: str) -> bool:
+        with self._locked():
+            data = self._read_or_quarantine()
+            remaining = [record for record in data["sessions"] if record["id"] != session_id]
+            if len(remaining) == len(data["sessions"]):
+                return False
+            data["sessions"] = remaining
+            data["generation"] += 1
+            self._write(data)
+            return True
+
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(self._lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                os.fchmod(fd, 0o600)
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
+    def _empty(self) -> dict[str, Any]:
+        return {"version": SCHEMA_VERSION, "generation": 0, "sessions": []}
+
+    def _read_or_quarantine(self) -> dict[str, Any]:
+        if not self.path.exists():
+            return self._empty()
+        try:
+            raw = self.path.read_bytes()
+            if len(raw) > 8 * 1024 * 1024:
+                raise RegistryValidationError("registry file is too large")
+            data = json.loads(raw)
+            self._validate_store(data)
+            os.chmod(self.path, 0o600)
+            return data
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, RegistryValidationError) as exc:
+            if isinstance(exc, OSError) and not self.path.exists():
+                raise
+            quarantine = self._quarantine()
+            raise RegistryCorruptionError(
+                f"invalid registry quarantined at {quarantine}", quarantine
+            ) from exc
+
+    def _validate_store(self, data: Any) -> None:
+        if not isinstance(data, dict) or set(data) != {"version", "generation", "sessions"}:
+            raise RegistryValidationError("invalid registry envelope")
+        if data["version"] != SCHEMA_VERSION:
+            raise RegistryValidationError("unsupported registry version")
+        if not isinstance(data["generation"], int) or isinstance(data["generation"], bool) or data["generation"] < 0:
+            raise RegistryValidationError("invalid registry generation")
+        sessions = data["sessions"]
+        if not isinstance(sessions, list) or len(sessions) > self.max_records:
+            raise RegistryValidationError("invalid registry session count")
+        seen: set[str] = set()
+        max_generation = 0
+        for record in sessions:
+            self._validate_record(record)
+            if record["id"] in seen:
+                raise RegistryValidationError("duplicate persisted session id")
+            seen.add(record["id"])
+            max_generation = max(max_generation, record["generation"])
+        if max_generation > data["generation"]:
+            raise RegistryValidationError("record generation exceeds registry generation")
+
+    def _validate_record(self, record: Any) -> None:
+        if not isinstance(record, dict) or set(record) != _RECORD_KEYS:
+            raise RegistryValidationError("invalid registry record shape")
+        session_id = _validate_text(record["id"], "id")
+        if not _ID_RE.fullmatch(session_id):
+            raise RegistryValidationError("id contains unsupported characters")
+        if record["adapterKind"] not in _ADAPTER_KINDS:
+            raise RegistryValidationError("invalid adapterKind")
+        _validate_text(record["ompSessionId"], "ompSessionId", nullable=True)
+        project = record["project"]
+        if not isinstance(project, dict) or set(project) != {"name", "path"}:
+            raise RegistryValidationError("invalid project")
+        _validate_text(project["name"], "project.name")
+        _validate_text(project["path"], "project.path")
+        _validate_text(record["title"], "title")
+        if not isinstance(record["desiredRpcRunning"], bool):
+            raise RegistryValidationError("desiredRpcRunning must be boolean")
+        if not isinstance(record["recoveryMetadata"], dict):
+            raise RegistryValidationError("recoveryMetadata must be an object")
+        _validate_safe_metadata(record["recoveryMetadata"])
+        if not isinstance(record["generation"], int) or isinstance(record["generation"], bool) or record["generation"] < 1:
+            raise RegistryValidationError("invalid record generation")
+        for field in ("createdAt", "updatedAt"):
+            timestamp = _validate_text(record[field], field)
+            try:
+                parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise RegistryValidationError(f"invalid {field}") from exc
+            if parsed.tzinfo is None:
+                raise RegistryValidationError(f"{field} must include a timezone")
+
+    def _timestamp(self) -> str:
+        value = self._clock()
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        if isinstance(value, str):
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise RegistryValidationError("clock returned an invalid timestamp") from exc
+            if parsed.tzinfo is None:
+                raise RegistryValidationError("clock timestamp must include a timezone")
+            return value
+        raise RegistryValidationError("clock must return datetime or RFC3339 string")
+
+    def _new_unique_id(self, data: dict[str, Any]) -> str:
+        existing = {record["id"] for record in data["sessions"]}
+        for _ in range(128):
+            candidate = self._id_factory()
+            if isinstance(candidate, str) and _ID_RE.fullmatch(candidate) and candidate not in existing:
+                return candidate
+        raise RegistryValidationError("id factory did not produce a unique valid id")
+
+    def _quarantine(self) -> Path:
+        stamp = re.sub(r"[^0-9]", "", self._timestamp()) or "unknown"
+        base = self.path.with_name(f"{self.path.name}.corrupt.{stamp}")
+        quarantine = base
+        suffix = 0
+        while quarantine.exists():
+            suffix += 1
+            quarantine = base.with_name(f"{base.name}.{suffix}")
+        os.replace(self.path, quarantine)
+        self._fsync_directory()
+        return quarantine
+
+    def _write(self, data: dict[str, Any]) -> None:
+        self._validate_store(data)
+        payload = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.path)
+            os.chmod(self.path, 0o600)
+            self._fsync_directory()
+        except BaseException:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+
+    def _fsync_directory(self) -> None:
+        directory_fd = os.open(self.path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)

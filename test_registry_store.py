@@ -1,0 +1,156 @@
+import json
+import os
+import tempfile
+import unittest
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from pathlib import Path
+
+from omp_deck.registry_store import (
+    RegistryCapacityError,
+    RegistryCorruptionError,
+    RegistryStore,
+    RegistryValidationError,
+)
+
+
+NOW = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
+
+
+class RegistryStoreTests(unittest.TestCase):
+    def setUp(self):
+        self._temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temporary_directory.cleanup)
+        self.tmp_path = Path(self._temporary_directory.name)
+
+    def make_store(self, **overrides):
+        ids = iter(f"deck-{number}" for number in range(100))
+        options = {"clock": lambda: NOW, "id_factory": lambda: next(ids)}
+        options.update(overrides)
+        return RegistryStore(self.tmp_path / "registry.json", **options)
+
+    def create_session(self, store, **overrides):
+        values = {
+            "adapter_kind": "rpc",
+            "omp_session_id": "omp-7",
+            "project_name": "deck",
+            "project_path": "/work/deck",
+            "title": "Build Deck",
+            "desired_rpc_running": True,
+            "recovery_metadata": {"argv": ["omp", "--mode", "rpc"], "attempt": 2},
+        }
+        values.update(overrides)
+        return store.create(**values)
+
+    def test_restart_preserves_stable_identity_and_updates_generation(self):
+        store = self.make_store()
+        created = self.create_session(store)
+
+        restarted = RegistryStore(self.tmp_path / "registry.json")
+        self.assertEqual(restarted.load(), [created])
+
+        updated = restarted.update(
+            created["id"], title="Resumed", omp_session_id="omp-8", desired_rpc_running=False
+        )
+        self.assertEqual(updated["id"], created["id"])
+        self.assertGreater(updated["generation"], created["generation"])
+        self.assertEqual(RegistryStore(self.tmp_path / "registry.json").load(), [updated])
+        self.assertTrue(restarted.remove(created["id"]))
+        self.assertFalse(restarted.remove(created["id"]))
+        self.assertEqual(RegistryStore(self.tmp_path / "registry.json").load(), [])
+
+    def test_registry_and_lock_are_owner_only(self):
+        store = self.make_store()
+        self.create_session(store)
+        os.chmod(store.path, 0o644)
+
+        store.load()
+
+        self.assertEqual(store.path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(store._lock_path.stat().st_mode & 0o777, 0o600)
+
+    def test_invalid_persisted_schema_is_quarantined_with_explicit_error(self):
+        path = self.tmp_path / "registry.json"
+        path.write_text(json.dumps({"version": 99, "generation": 0, "sessions": []}))
+        store = RegistryStore(path, clock=lambda: NOW)
+
+        with self.assertRaises(RegistryCorruptionError) as raised:
+            store.load()
+
+        self.assertFalse(path.exists())
+        self.assertTrue(raised.exception.quarantine_path.exists())
+        self.assertTrue(raised.exception.quarantine_path.read_text().startswith('{"version": 99'))
+
+    def test_malformed_json_is_quarantined_and_not_silently_reset(self):
+        path = self.tmp_path / "registry.json"
+        path.write_text("not-json")
+
+        with self.assertRaises(RegistryCorruptionError):
+            RegistryStore(path, clock=lambda: NOW).load()
+
+        self.assertFalse(path.exists())
+        self.assertTrue(list(self.tmp_path.glob("registry.json.corrupt.*")))
+
+    def test_record_bound_is_enforced_without_changing_disk(self):
+        store = self.make_store(max_records=1)
+        first = self.create_session(store)
+
+        with self.assertRaises(RegistryCapacityError):
+            self.create_session(store, title="Too many")
+
+        self.assertEqual(store.load(), [first])
+
+    def test_secret_and_transcript_fields_are_rejected(self):
+        metadata_values = [
+            {"collabWriteLink": "https://example.invalid/write"},
+            {"nested": {"transcript": "private conversation"}},
+            {"credentials": {"token": "private"}},
+            {"messages": []},
+            {"content": "conversation text"},
+        ]
+        for metadata in metadata_values:
+            with self.subTest(metadata=metadata):
+                store = self.make_store()
+                with self.assertRaises(RegistryValidationError):
+                    self.create_session(store, recovery_metadata=metadata)
+                self.assertEqual(store.load(), [])
+
+    def test_invalid_requested_schema_is_rejected_without_corrupting_registry(self):
+        store = self.make_store()
+        first = self.create_session(store)
+
+        with self.assertRaises(RegistryValidationError):
+            store.update(first["id"], adapter_kind="terminal")
+
+        self.assertEqual(RegistryStore(self.tmp_path / "registry.json").load(), [first])
+
+    def test_duplicate_injected_ids_are_rejected(self):
+        store = self.make_store()
+        self.create_session(store, session_id="stable")
+
+        with self.assertRaisesRegex(RegistryValidationError, "duplicate"):
+            self.create_session(store, session_id="stable")
+
+    def test_concurrent_store_instances_do_not_lose_updates(self):
+        initial = self.make_store()
+        records = [
+            self.create_session(initial, session_id=f"stable-{index}") for index in range(20)
+        ]
+
+        def update(index):
+            independent_store = RegistryStore(self.tmp_path / "registry.json", clock=lambda: NOW)
+            return independent_store.update(f"stable-{index}", title=f"updated-{index}")
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            updated = list(executor.map(update, range(20)))
+
+        loaded = RegistryStore(self.tmp_path / "registry.json").load()
+        self.assertEqual(
+            {record["title"] for record in loaded},
+            {f"updated-{index}" for index in range(20)},
+        )
+        self.assertEqual(len({record["generation"] for record in updated}), 20)
+        self.assertGreater(
+            min(record["generation"] for record in updated),
+            max(record["generation"] for record in records),
+        )

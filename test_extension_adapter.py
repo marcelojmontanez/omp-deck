@@ -1,0 +1,369 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import socket
+import threading
+import time
+from types import MappingProxyType
+
+import unittest
+
+from omp_deck.extension_adapter import (
+    PROTOCOL,
+    ExtensionAdapter,
+    ExtensionAdapterError,
+    ExtensionDisconnected,
+    ExtensionProtocolError,
+    ExtensionRequestTimeout,
+)
+
+
+SESSION = "session-1"
+CONNECTION = "connection-1"
+PATH = f"/tmp/{hashlib.sha256(SESSION.encode()).hexdigest()[:24]}.123.{CONNECTION}.sock"
+
+
+def registration(**changes):
+    value = {
+        "protocol": PROTOCOL,
+        "version": 1,
+        "type": "registration",
+        "ompVersion": "9.8.7",
+        "compatible": True,
+        "connectionId": CONNECTION,
+        "session": {"id": SESSION, "file": None, "title": "Title"},
+        "sessionId": SESSION,
+        "title": "Title",
+        "project": "/project",
+        "capabilities": {
+            "sendMessage": True,
+            "followUp": True,
+            "interrupt": True,
+            "shutdown": True,
+            "todos": True,
+            "subagents": True,
+            "answerUiRequest": False,
+            "answer_ui_request": False,
+        },
+    }
+    value.update(changes)
+    return value
+
+
+def event(sequence=1, kind="snapshot", data=None):
+    if data is None:
+        data = {"idle": True, "pendingMessages": False, "model": {"provider": "p", "id": "m"}, "async": [{"id": "job"}]}
+    return {"protocol": PROTOCOL, "type": "event", "sequence": sequence, "kind": kind, "data": data}
+
+
+def line(value):
+    return json.dumps(value, separators=(",", ":")).encode() + b"\n"
+
+
+class Peer:
+    def __init__(self, initial=(registration(), event())):
+        self.client, self.server = socket.socketpair()
+        self.server.sendall(b"".join(line(item) for item in initial))
+        self.file = self.server.makefile("rb")
+
+    def connector(self, _path):
+        return self.client
+
+    def read(self):
+        return json.loads(self.file.readline())
+
+    def send(self, value):
+        self.server.sendall(line(value))
+
+    def close(self):
+        self.file.close()
+        self.server.close()
+
+
+def response(request, *, ok=True, result=None):
+    value = {"protocol": PROTOCOL, "type": "response", "id": request["id"], "ok": ok}
+    if ok and result is not None:
+        value["result"] = result
+    if not ok:
+        value["error"] = "private plugin details"
+    return value
+
+
+def _capture(errors, function):
+    try:
+        function()
+    except Exception as exc:
+        errors.append(exc)
+
+
+class ExtensionAdapterTests(unittest.TestCase):
+    def make_peer(self, initial=(registration(), event())):
+        peer = Peer(initial)
+        self.addCleanup(peer.close)
+        return peer
+
+    def make_adapter(self, peer=None, **options):
+        if peer is not None:
+            options["connector"] = peer.connector
+        adapter = ExtensionAdapter(PATH, **options)
+        self.addCleanup(adapter.close)
+        return adapter
+
+    def stop_and_join(self, adapter, thread):
+        adapter.close()
+        thread.join(1)
+
+
+    def test_registration_version_and_authoritative_snapshot(self):
+        peer = self.make_peer()
+        adapter = self.make_adapter(peer)
+        got = adapter.start()
+        try:
+            self.assertEqual(got.protocol_version, 1)
+            self.assertEqual(got.omp_version, "9.8.7")
+            self.assertEqual(got.session_id, SESSION)
+            self.assertEqual(got.connection_id, CONNECTION)
+            self.assertIsInstance(got.capabilities, MappingProxyType)
+            snapshot = adapter.snapshot()
+            self.assertIsNotNone(snapshot)
+            self.assertEqual((snapshot.idle, snapshot.pending_messages, snapshot.sequence), (True, False, 1))
+            self.assertEqual(snapshot.transport_status, "connected")
+        finally:
+            adapter.close()
+            peer.close()
+
+
+    def test_start_rejects_wrong_registration(self):
+        cases = [
+            (registration(version=2), "incompatible"),
+            (registration(connectionId="other"), "socket identity"),
+            (event(), "registration"),
+        ]
+        for first, match in cases:
+            with self.subTest(first=first, match=match):
+                peer = self.make_peer((first, event()))
+                with self.assertRaisesRegex(ExtensionProtocolError, match):
+                    self.make_adapter(peer).start()
+
+
+    def test_start_requires_snapshot_as_second_frame(self):
+        peer = self.make_peer((registration(), event(kind="heartbeat", data={"time": 1})))
+        with self.assertRaisesRegex(ExtensionProtocolError, "snapshot"):
+            self.make_adapter(peer).start()
+        peer.close()
+
+
+    def test_command_bytes_and_response_correlation(self):
+        peer = self.make_peer()
+        adapter = self.make_adapter(peer)
+        adapter.start()
+        results = {}
+
+        def invoke(name, function):
+            results[name] = function()
+
+        threads = [
+            threading.Thread(target=invoke, args=("message", lambda: adapter.send_message("hello"))),
+            threading.Thread(target=invoke, args=("follow", lambda: adapter.send_message("later", "followUp"))),
+            threading.Thread(target=invoke, args=("interrupt", adapter.interrupt)),
+            threading.Thread(target=invoke, args=("shutdown", adapter.shutdown_session)),
+        ]
+        for thread in threads:
+            thread.start()
+            self.addCleanup(self.stop_and_join, adapter, thread)
+        requests = [peer.read() for _ in threads]
+        self.assertEqual({item["action"] for item in requests}, {"sendMessage", "followUp", "interrupt", "shutdown"})
+        self.assertTrue(all(item["protocol"] == PROTOCOL and item["type"] == "request" and isinstance(item["id"], str) for item in requests))
+        by_action = {item["action"]: item for item in requests}
+        self.assertEqual(by_action["sendMessage"]["message"], "hello")
+        self.assertEqual(by_action["followUp"]["message"], "later")
+        for request in reversed(requests):
+            peer.send(response(request, result=request["action"]))
+        for thread in threads:
+            thread.join(1)
+        self.assertEqual(results, {"message": "sendMessage", "follow": "followUp", "interrupt": "interrupt", "shutdown": "shutdown"})
+        adapter.close()
+        peer.close()
+
+
+    def test_refresh_uses_snapshot_response(self):
+        peer = self.make_peer()
+        adapter = self.make_adapter(peer)
+        adapter.start()
+        holder = []
+        thread = threading.Thread(target=lambda: holder.append(adapter.refresh()))
+        thread.start()
+        self.addCleanup(self.stop_and_join, adapter, thread)
+        request = peer.read()
+        self.assertEqual(request["action"], "snapshot")
+        peer.send(response(request, result={"idle": False, "pendingMessages": True, "model": None, "async": [], "eventSequence": 1}))
+        thread.join(1)
+        self.assertTrue(holder[0].pending_messages)
+        adapter.close()
+        peer.close()
+
+
+    def test_malformed_event_degrades_connection(self):
+        cases = [
+            {"protocol": PROTOCOL, "type": "event", "sequence": "2", "kind": "x", "data": {}},
+            {"protocol": PROTOCOL, "type": "event", "sequence": 2, "kind": "x", "data": {}, "extra": 1},
+            {"protocol": PROTOCOL, "type": "event", "sequence": 2, "kind": "", "data": {}},
+        ]
+        for bad in cases:
+            with self.subTest(bad=bad):
+                peer = self.make_peer()
+                adapter = self.make_adapter(peer)
+                adapter.start()
+                peer.send(bad)
+                deadline = time.monotonic() + 1
+                while adapter.snapshot().transport_status == "connected" and time.monotonic() < deadline:
+                    time.sleep(0.005)
+                self.assertEqual(adapter.snapshot().transport_status, "degraded")
+                adapter.close()
+                peer.close()
+
+
+    def test_frame_bound_checked_and_sequence_gap_is_explicit(self):
+        peer = self.make_peer()
+        adapter = self.make_adapter(peer, frame_limit=1024)
+        adapter.start()
+        peer.send(event(3, "message", {}))
+        deadline = time.monotonic() + 1
+        while adapter.snapshot().transport_status == "connected" and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(adapter.snapshot().reason, "event sequence gap")
+        adapter.close()
+        peer.close()
+
+        oversized = self.make_peer(())
+        oversized.server.sendall(b"x" * 1024)
+        with self.assertRaisesRegex(ExtensionProtocolError, "exceeds"):
+            self.make_adapter(oversized, frame_limit=1024).start()
+        oversized.close()
+
+
+    def test_timeout_disconnect_and_stale_duplicate_response(self):
+        peer = self.make_peer()
+        adapter = self.make_adapter(peer, registration_timeout=0.03)
+        adapter.start()
+        with self.assertRaises(ExtensionRequestTimeout):
+            adapter.interrupt()
+        stale = peer.read()
+        peer.send(response(stale))
+
+        result = []
+        thread = threading.Thread(target=lambda: result.append(adapter.send_message("ok")))
+        thread.start()
+        self.addCleanup(self.stop_and_join, adapter, thread)
+        current = peer.read()
+        peer.send(response(current, result="accepted"))
+        peer.send(response(current, result="duplicate"))
+        thread.join(1)
+        self.assertEqual(result, ["accepted"])
+
+        adapter._registration_timeout = 0.2
+        errors = []
+        thread = threading.Thread(target=lambda: _capture(errors, adapter.shutdown_session))
+        thread.start()
+        self.addCleanup(self.stop_and_join, adapter, thread)
+        peer.read()
+        peer.close()
+        thread.join(1)
+        self.assertIsInstance(errors[0], ExtensionDisconnected)
+        adapter.close()
+
+
+    def test_failed_response_does_not_expose_remote_error(self):
+        peer = self.make_peer()
+        adapter = self.make_adapter(peer)
+        adapter.start()
+        errors = []
+        thread = threading.Thread(target=lambda: _capture(errors, adapter.interrupt))
+        thread.start()
+        self.addCleanup(self.stop_and_join, adapter, thread)
+        request = peer.read()
+        peer.send(response(request, ok=False))
+        thread.join(1)
+        self.assertIsInstance(errors[0], ExtensionAdapterError)
+        self.assertNotIn("private plugin details", str(errors[0]))
+        adapter.close()
+        peer.close()
+
+
+    def test_heartbeat_sends_pong_and_stale_heartbeat_disconnects(self):
+        peer = self.make_peer()
+        now = [0.0]
+        adapter = self.make_adapter(peer, clock=lambda: now[0], heartbeat_timeout=2)
+        adapter.start()
+        peer.send(event(2, "heartbeat", {"time": 10}))
+        pong = peer.read()
+        self.assertEqual(pong["action"], "pong")
+        peer.send(response(pong))
+        now[0] = 3.0
+        deadline = time.monotonic() + 2
+        while adapter.snapshot().transport_status == "connected" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(adapter.snapshot().reason, "stale heartbeat")
+        adapter.close()
+        peer.close()
+
+
+    def test_callback_errors_are_contained_and_values_deeply_immutable(self):
+        peer = self.make_peer()
+        seen = []
+
+        def callback(value):
+            seen.append(value)
+            raise RuntimeError("boom")
+
+        adapter = self.make_adapter(peer, on_event=callback)
+        adapter.start()
+        peer.send(event(2, "message", {"nested": [{"secret": "value"}]}))
+        deadline = time.monotonic() + 1
+        while len(seen) < 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        drained = adapter.drain_events()
+        self.assertEqual(len(drained), 2)
+        with self.assertRaises(TypeError):
+            drained[-1]["data"]["nested"][0]["secret"] = "changed"
+        snapshot = adapter.snapshot()
+        with self.assertRaises(TypeError):
+            snapshot.model["id"] = "changed"
+        with self.assertRaises(TypeError):
+            snapshot.async_jobs[0]["id"] = "changed"
+        adapter.close()
+        peer.close()
+
+
+    def test_event_queue_is_bounded_and_close_joins_non_daemon_reader(self):
+        peer = self.make_peer()
+        adapter = self.make_adapter(peer, event_limit=2)
+        adapter.start()
+        peer.send(event(2, "one", {}))
+        peer.send(event(3, "two", {}))
+        deadline = time.monotonic() + 1
+        while adapter.snapshot().sequence == 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        adapter.close()
+        self.assertIsNotNone(adapter._reader)
+        self.assertFalse(adapter._reader.daemon)
+        self.assertFalse(adapter._reader.is_alive())
+        self.assertEqual([item["sequence"] for item in adapter.drain_events()], [2, 3])
+        peer.close()
+
+
+    def test_strict_public_inputs(self):
+        with self.assertRaises(ValueError):
+            ExtensionAdapter("")
+        with self.assertRaises(TypeError):
+            ExtensionAdapter(PATH, on_event=object())
+        adapter = self.make_adapter()
+        with self.assertRaises(ValueError):
+            adapter.send_message("")
+        with self.assertRaises(ValueError):
+            adapter.send_message("x", "queue")
+
+
+if __name__ == "__main__":
+    unittest.main()

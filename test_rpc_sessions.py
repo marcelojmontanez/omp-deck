@@ -1,0 +1,412 @@
+from __future__ import annotations
+
+import dataclasses
+import enum
+import tempfile
+import unittest
+from pathlib import Path
+from threading import Event, Thread
+from unittest.mock import patch
+
+from omp_rpc import ReadyEvent, RpcProcessExitError
+
+from omp_deck.fleet_model import FleetModel
+from omp_deck.registry_store import RegistryStore
+from omp_deck.rpc_sessions import RpcSessionManager
+from omp_deck.settings import Settings
+
+
+@dataclasses.dataclass(frozen=True)
+class _OfficialState:
+    session_id: str = "omp-official-1"
+    session_file: str = "/sessions/omp-official-1.jsonl"
+    is_streaming: bool = False
+    is_compacting: bool = False
+    message_count: int = 1
+    queued_message_count: int = 0
+    thinking_level: str = "medium"
+
+
+class _Outcome(enum.Enum):
+    COMPLETE = "complete"
+
+
+@dataclasses.dataclass(frozen=True)
+class _Correlation:
+    session_id: str
+    outcome: _Outcome
+
+
+class FakeRpcClient:
+    instances: list["FakeRpcClient"] = []
+    fail_start = False
+
+    fail_get_state_once: BaseException | None = None
+    prompt_entered: dict[str, Event] = {}
+    prompt_release: dict[str, Event] = {}
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.listeners = {kind: [] for kind in ("ready", "event", "ui", "protocol", "extension")}
+        self.calls = []
+        self.stopped = False
+        self.state = _OfficialState()
+        type(self).instances.append(self)
+
+    def _on(self, kind, listener):
+        self.listeners[kind].append(listener)
+        return lambda: self.listeners[kind].remove(listener)
+
+    def on_ready(self, listener): return self._on("ready", listener)
+    def on_event(self, listener): return self._on("event", listener)
+    def on_ui_request(self, listener): return self._on("ui", listener)
+    def on_protocol_error(self, listener): return self._on("protocol", listener)
+    def on_extension_error(self, listener): return self._on("extension", listener)
+
+    def start(self):
+        if type(self).fail_start:
+            raise RuntimeError("launch failed")
+        ready = ReadyEvent(protocol_version=1, supported_protocol_versions=(1, 2))
+        for listener in tuple(self.listeners["ready"]):
+            listener(ready)
+        return self
+
+    def stop(self): self.stopped = True
+    def get_state(self):
+        failure = type(self).fail_get_state_once
+        if failure is not None:
+            type(self).fail_get_state_once = None
+            raise failure
+        return self.state
+    def get_messages(self): return ({"id": "message-1", "role": "assistant", "content": "ready"},)
+    def get_todos(self): return ()
+    def get_subagents(self): return ()
+
+    def _call(self, name, *args, **kwargs):
+        self.calls.append((name, args, kwargs))
+
+    def prompt(self, message, *args, **kwargs):
+        self._call("prompt", message, *args, **kwargs)
+        entered = type(self).prompt_entered.get(message)
+        if entered is not None:
+            entered.set()
+        release = type(self).prompt_release.get(message)
+        if release is not None:
+            release.wait(timeout=2)
+    def follow_up(self, *args, **kwargs): return self._call("follow_up", *args, **kwargs)
+    def abort(self): return self._call("abort")
+    def set_model(self, *args):
+        self._call("set_model", *args)
+        return _Correlation(self.state.session_id, _Outcome.COMPLETE)
+    def set_thinking_level(self, *args): return self._call("set_thinking_level", *args)
+    def branch(self, *args):
+        self._call("branch", *args)
+        self.state = dataclasses.replace(
+            self.state, session_id="omp-branched", session_file="/sessions/omp-branched.jsonl"
+        )
+        return _Correlation("omp-branched", _Outcome.COMPLETE)
+    def switch_session(self, *args):
+        self._call("switch_session", *args)
+        self.state = dataclasses.replace(
+            self.state, session_id="omp-switched", session_file="/sessions/omp-switched.jsonl"
+        )
+        return _Correlation("omp-switched", _Outcome.COMPLETE)
+    def compact(self, *args):
+        self._call("compact", *args)
+        return _Outcome.COMPLETE
+    def send_ui_value(self, *args): return self._call("send_ui_value", *args)
+    def send_ui_confirmation(self, *args): return self._call("send_ui_confirmation", *args)
+    def cancel_ui_request(self, *args, **kwargs): return self._call("cancel_ui_request", *args, **kwargs)
+
+    def emit_event(self, value):
+        for listener in tuple(self.listeners["event"]):
+            listener(value)
+
+
+class TestRpcSessionManager(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        root = Path(self.temporary.name)
+        self.project = root / "project"
+        self.project.mkdir()
+        self.settings = Settings(
+            host="127.0.0.1",
+            port=8787,
+            session_root=root / "sessions",
+            socket_root=root / "sockets",
+            state_root=root / "state",
+            project_root=root,
+            omp_bin="/not/a/real/omp",
+            allowed_hosts=("127.0.0.1",),
+        )
+        ids = iter(("deck-stable-id", "deck-second-id"))
+        self.registry = RegistryStore(
+            self.settings.state_root / "registry.json",
+            id_factory=lambda: next(ids),
+        )
+        self.model = FleetModel()
+        FakeRpcClient.instances.clear()
+        FakeRpcClient.fail_start = False
+        FakeRpcClient.fail_get_state_once = None
+        FakeRpcClient.prompt_entered.clear()
+        FakeRpcClient.prompt_release.clear()
+        self.rpc_patch = patch("omp_deck.rpc_sessions.RpcClient", FakeRpcClient)
+        self.rpc_patch.start()
+        self.manager = RpcSessionManager(self.settings, self.model, self.registry)
+
+    def tearDown(self):
+        self.manager.close()
+        self.rpc_patch.stop()
+        self.temporary.cleanup()
+
+    def launch(self):
+        return self.manager.launch("project", self.project, title="RPC test")
+
+    def test_launch_persists_stable_deck_id_and_official_rpc_identity(self):
+        session = self.launch()
+        record = self.registry.load()[0]
+
+        self.assertEqual(session["id"], "deck-stable-id")
+        self.assertEqual(session["ompSessionId"], "omp-official-1")
+        self.assertEqual(record["id"], "deck-stable-id")
+        self.assertEqual(record["ompSessionId"], "omp-official-1")
+        self.assertEqual(record["recoveryMetadata"], {"sessionFile": "/sessions/omp-official-1.jsonl"})
+        self.assertTrue(record["desiredRpcRunning"])
+        self.assertEqual(session["transport"]["status"], "connected")
+
+    def test_callback_updates_normalized_public_state(self):
+        session_id = self.launch()["id"]
+        FakeRpcClient.instances[-1].emit_event({"type": "turn_start", "turn": 4})
+
+        session = self.model.get(session_id)
+        self.assertEqual(session["state"], "working")
+        self.assertEqual(self.model.journal.replay_after(0)[-1].sequence, 2)
+
+    def test_commands_map_to_official_calls_and_plain_correlation_results(self):
+        session_id = self.launch()["id"]
+        client = FakeRpcClient.instances[-1]
+        commands = (
+            ("sendMessage", {"message": "hello", "images": [{"data": "x"}], "streamingBehavior": "steer"}),
+            ("followUp", {"message": "later", "images": []}),
+            ("interrupt", {}),
+            ("setModel", {"provider": "openai", "modelId": "gpt"}),
+            ("setThinking", {"level": "high"}),
+            ("branch", {"entryId": "entry-7"}),
+            ("switchSession", {"sessionPath": "/sessions/other.jsonl"}),
+            ("compact", {"customInstructions": "short"}),
+        )
+        results = {action: self.manager.command(session_id, action, payload) for action, payload in commands}
+
+        self.assertEqual([call[0] for call in client.calls], [
+            "prompt", "follow_up", "abort", "set_model", "set_thinking_level",
+            "branch", "switch_session", "compact",
+        ])
+        self.assertEqual(client.calls[0][2]["streaming_behavior"], "steer")
+        self.assertEqual(results["setModel"]["result"], {"session_id": "omp-official-1", "outcome": "complete"})
+        self.assertEqual(results["branch"]["result"]["session_id"], "omp-branched")
+        self.assertEqual(results["switchSession"]["result"]["session_id"], "omp-switched")
+        self.assertEqual(results["compact"]["result"], "complete")
+        self.assertTrue(all(result["accepted"] for result in results.values()))
+
+    def test_shutdown_clears_desired_state_and_disconnects(self):
+        session_id = self.launch()["id"]
+        client = FakeRpcClient.instances[-1]
+        result = self.manager.command(session_id, "shutdown", {})
+
+        self.assertEqual(result, {"accepted": True, "result": None})
+        self.assertTrue(client.stopped)
+        self.assertFalse(self.registry.load()[0]["desiredRpcRunning"])
+        self.assertEqual(self.model.get(session_id)["transport"]["status"], "disconnected")
+        self.assertEqual(self.model.get(session_id)["transport"]["reason"], "shut down")
+
+    def test_close_stops_transport_but_preserves_restart_intent(self):
+        session_id = self.launch()["id"]
+        client = FakeRpcClient.instances[-1]
+        self.manager.close()
+
+        self.assertTrue(client.stopped)
+        self.assertTrue(self.registry.load()[0]["desiredRpcRunning"])
+        self.assertEqual(self.model.get(session_id)["transport"]["status"], "disconnected")
+        self.assertEqual(self.model.get(session_id)["transport"]["reason"], "closed")
+
+    def test_startup_recovery_resumes_official_id_in_original_project(self):
+        original = self.launch()
+        self.manager.close()
+        recovering_model = FleetModel()
+        recovering = RpcSessionManager(self.settings, recovering_model, self.registry)
+        self.addCleanup(recovering.close)
+
+        self.assertEqual(recovering.recover_desired(), {})
+        client = FakeRpcClient.instances[-1]
+        self.assertEqual(client.kwargs["extra_args"], ("--resume", "omp-official-1"))
+        self.assertEqual(client.kwargs["cwd"], str(self.project))
+        self.assertEqual(recovering_model.get(original["id"])["id"], "deck-stable-id")
+        self.assertEqual(recovering_model.get(original["id"])["ompSessionId"], "omp-official-1")
+
+    def test_branch_identity_is_persisted_and_recovered(self):
+        session_id = self.launch()["id"]
+        self.manager.command(session_id, "branch", {"entryId": "entry-7"})
+        record = self.registry.load()[0]
+        self.assertEqual(record["ompSessionId"], "omp-branched")
+        self.assertEqual(
+            record["recoveryMetadata"], {"sessionFile": "/sessions/omp-branched.jsonl"}
+        )
+
+        self.manager.close()
+        recovering = RpcSessionManager(self.settings, FleetModel(), self.registry)
+        self.addCleanup(recovering.close)
+        self.assertEqual(recovering.recover_desired(), {})
+        self.assertEqual(
+            FakeRpcClient.instances[-1].kwargs["extra_args"],
+            ("--resume", "omp-branched"),
+        )
+
+    def test_switch_identity_is_persisted_and_recovered(self):
+        session_id = self.launch()["id"]
+        self.manager.command(
+            session_id, "switchSession", {"sessionPath": "/sessions/other.jsonl"}
+        )
+        record = self.registry.load()[0]
+        self.assertEqual(record["ompSessionId"], "omp-switched")
+        self.assertEqual(
+            record["recoveryMetadata"], {"sessionFile": "/sessions/omp-switched.jsonl"}
+        )
+
+        self.manager.close()
+        recovering = RpcSessionManager(self.settings, FleetModel(), self.registry)
+        self.addCleanup(recovering.close)
+        self.assertEqual(recovering.recover_desired(), {})
+        self.assertEqual(
+            FakeRpcClient.instances[-1].kwargs["extra_args"],
+            ("--resume", "omp-switched"),
+        )
+
+    def test_repeated_recovery_does_not_mutate_generation_or_spawn_again(self):
+        session_id = self.launch()["id"]
+        self.manager.close()
+        recovering_model = FleetModel()
+        recovering = RpcSessionManager(self.settings, recovering_model, self.registry)
+        self.addCleanup(recovering.close)
+
+        self.assertEqual(recovering.recover_desired(), {})
+        generation = self.registry.load()[0]["generation"]
+        child_count = len(FakeRpcClient.instances)
+        self.assertEqual(recovering.recover_desired(), {})
+
+        self.assertEqual(self.registry.load()[0]["generation"], generation)
+        self.assertEqual(len(FakeRpcClient.instances), child_count)
+        self.assertIsNotNone(recovering_model.get(session_id)["transport"]["instanceId"])
+
+    def test_recovery_start_failure_is_explicitly_disconnected(self):
+        session_id = self.launch()["id"]
+        self.manager.close()
+        FakeRpcClient.fail_start = True
+        recovering_model = FleetModel()
+        recovering = RpcSessionManager(self.settings, recovering_model, self.registry)
+        self.addCleanup(recovering.close)
+
+        self.assertEqual(recovering.recover_desired(), {session_id: "launch failed"})
+        transport = recovering_model.get(session_id)["transport"]
+        self.assertEqual(transport["status"], "disconnected")
+        self.assertEqual(transport["reason"], "recovery failed: launch failed")
+        self.assertTrue(FakeRpcClient.instances[-1].stopped)
+
+    def test_refresh_process_exit_reaps_and_replaces_child_under_same_deck_id(self):
+        session_id = self.launch()["id"]
+        original = FakeRpcClient.instances[-1]
+        FakeRpcClient.fail_get_state_once = RpcProcessExitError("RPC process exited")
+
+        self.manager.refresh_connected()
+
+        self.assertTrue(original.stopped)
+        self.assertEqual(len(FakeRpcClient.instances), 2)
+        replacement = FakeRpcClient.instances[-1]
+        self.assertEqual(
+            replacement.kwargs["extra_args"], ("--resume", "omp-official-1")
+        )
+        self.assertEqual(self.model.get(session_id)["id"], session_id)
+        self.assertEqual(
+            self.model.get(session_id)["transport"]["status"],
+            "connected",
+            self.model.snapshot(),
+        )
+
+    def test_dispatch_deduplicates_and_rejects_conflicting_request_id_reuse(self):
+        session_id = self.launch()["id"]
+        payload = {"message": "hello"}
+
+        first = self.manager.dispatch(session_id, "request-1", "sendMessage", payload)
+        duplicate = self.manager.dispatch(
+            session_id, "request-1", "sendMessage", dict(payload)
+        )
+
+        self.assertEqual(duplicate, first)
+        self.assertEqual(
+            [call[0] for call in FakeRpcClient.instances[-1].calls], ["prompt"]
+        )
+        with self.assertRaisesRegex(ValueError, "already used for another command"):
+            self.manager.dispatch(
+                session_id, "request-1", "sendMessage", {"message": "different"}
+            )
+
+    def test_dispatch_serializes_each_session_without_blocking_other_sessions(self):
+        first_id = self.launch()["id"]
+        second_project = self.settings.project_root / "other"
+        second_project.mkdir()
+        second_id = self.manager.launch("other", second_project)["id"]
+        first_entered, first_release = Event(), Event()
+        second_same_entered, other_entered = Event(), Event()
+        FakeRpcClient.prompt_entered.update(
+            {
+                "first": first_entered,
+                "second-same": second_same_entered,
+                "other": other_entered,
+            }
+        )
+        FakeRpcClient.prompt_release["first"] = first_release
+        results = []
+
+        def dispatch(session_id, request_id, message):
+            results.append(
+                self.manager.dispatch(
+                    session_id, request_id, "sendMessage", {"message": message}
+                )
+            )
+
+        first = Thread(target=dispatch, args=(first_id, "request-1", "first"))
+        same = Thread(
+            target=dispatch, args=(first_id, "request-2", "second-same")
+        )
+        other = Thread(target=dispatch, args=(second_id, "request-3", "other"))
+        first.start()
+        self.assertTrue(first_entered.wait(timeout=1))
+        same.start()
+        other.start()
+        self.assertTrue(other_entered.wait(timeout=1))
+        self.assertFalse(second_same_entered.wait(timeout=0.05))
+        first_release.set()
+        first.join(timeout=1)
+        same.join(timeout=1)
+        other.join(timeout=1)
+
+        self.assertTrue(second_same_entered.is_set())
+        self.assertFalse(first.is_alive())
+        self.assertFalse(same.is_alive())
+        self.assertFalse(other.is_alive())
+        self.assertEqual(len(results), 3)
+
+    def test_failed_launch_is_persisted_as_not_desired_running(self):
+        FakeRpcClient.fail_start = True
+        with self.assertRaisesRegex(RuntimeError, "launch failed"):
+            self.launch()
+
+        record = self.registry.load()[0]
+        self.assertEqual(record["id"], "deck-stable-id")
+        self.assertFalse(record["desiredRpcRunning"])
+        self.assertTrue(FakeRpcClient.instances[-1].stopped)
+        transport = self.model.get(record["id"])["transport"]
+        self.assertEqual(transport["status"], "disconnected")
+        self.assertEqual(transport["reason"], "launch failed: launch failed")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,407 @@
+import threading
+import unittest
+from dataclasses import replace
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+
+from omp_deck.event_stream import EventJournal, ReplayUnavailableError
+from omp_deck.fleet_model import CAPABILITIES, FleetModel
+from omp_deck.rpc_adapter import AdapterEvent, AdapterSnapshot
+
+
+class FleetModelTests(unittest.TestCase):
+    def make_record(self, **overrides):
+        record = {
+            "id": "deck-1",
+            "title": "Build Deck",
+            "project": {"name": "deck", "path": "/work/deck"},
+            "adapterKind": "rpc",
+            "ompSessionId": "omp-old",
+            "generation": 3,
+            "updatedAt": "2026-09-03T12:00:00+00:00",
+        }
+        record.update(overrides)
+        return record
+
+    def make_snapshot(self, sequence=0, **state_overrides):
+        state = {
+            "session_id": "omp-live",
+            "is_streaming": True,
+            "is_compacting": False,
+            "model": {
+                "provider": "openai",
+                "id": "gpt-5",
+                "name": "GPT 5",
+                "api": "responses",
+                "reasoning": True,
+            },
+            "thinking_level": "high",
+            "message_count": 7,
+            "queued_message_count": 2,
+        }
+        state.update(state_overrides)
+        return AdapterSnapshot(
+            state=state,
+            messages=({"role": "user", "content": "hello"},),
+            todos=({"content": "ship", "status": "pending"},),
+            subagents=({"id": "agent-1", "status": "running"},),
+            sequence=sequence,
+            pending_ui_request=None,
+            transport_status="connected",
+            reason=None,
+        )
+
+    @staticmethod
+    def event(sequence, event_type="message_update", payload=None):
+        return AdapterEvent(
+            sequence=sequence,
+            type=event_type,
+            payload=payload or {"delta": "x"},
+            timestamp=float(sequence),
+        )
+
+    def connected_model(self):
+        model = FleetModel()
+        model.load_record(self.make_record())
+        self.assertTrue(
+            model.apply_rpc_snapshot(
+                "deck-1", instance_id="instance-a", generation=3, snapshot=self.make_snapshot()
+            )
+        )
+        return model
+
+    def test_rpc_snapshot_is_normalized_for_public_consumers(self):
+        model = self.connected_model()
+
+        session = model.get("deck-1")
+
+        self.assertEqual(
+            set(session),
+            {
+                "id", "ompSessionId", "title", "project", "state", "transport",
+                "capabilities", "messages", "todos", "subagents", "pendingUiRequest",
+                "unread", "updatedAt", "workingOn", "model", "thinking",
+            },
+        )
+        self.assertEqual(session["project"], {"name": "deck", "path": "/work/deck"})
+        self.assertEqual(
+            session["transport"],
+            {
+                "kind": "rpc", "status": "connected", "label": "Managed RPC",
+                "instanceId": "instance-a", "reason": None,
+            },
+        )
+        self.assertEqual(session["ompSessionId"], "omp-live")
+        self.assertEqual(session["state"], "working")
+        self.assertEqual(session["capabilities"], CAPABILITIES["rpc"])
+        self.assertTrue(session["capabilities"]["attachments"])
+        self.assertEqual(
+            session["model"],
+            {"provider": "openai", "id": "gpt-5", "name": "GPT 5", "api": "responses"},
+        )
+        self.assertEqual(session["thinking"], "high")
+        self.assertEqual(session["messages"][0]["role"], "user")
+        self.assertEqual(session["messages"][0]["content"], [{"type": "text", "text": "hello"}])
+        self.assertIn("id", session["messages"][0])
+        self.assertIn("createdAt", session["messages"][0])
+        self.assertEqual(session["todos"], [{"content": "ship", "status": "pending"}])
+        self.assertEqual(session["subagents"], [{"id": "agent-1", "status": "running"}])
+        public = model.snapshot()
+        self.assertEqual(set(public), {"generatedAt", "snapshotGeneration", "lastEventId", "sessions"})
+        self.assertEqual(public["sessions"], [session])
+
+    def test_record_reload_preserves_live_session_identity_and_adapter_progress(self):
+        model = self.connected_model()
+        self.assertTrue(model.apply_adapter_event(
+            "deck-1", instance_id="instance-a", generation=3, event=self.event(1)
+        ))
+
+        model.load_record(self.make_record(
+            title="Renamed", generation=4, ompSessionId="omp-from-record",
+            updatedAt="2026-09-03T13:00:00+00:00",
+        ))
+
+        session = model.get("deck-1")
+        self.assertEqual(session["id"], "deck-1")
+        self.assertEqual(session["transport"]["instanceId"], "instance-a")
+        self.assertEqual(session["ompSessionId"], "omp-live")
+        self.assertEqual(session["title"], "Renamed")
+        self.assertTrue(model.apply_adapter_event(
+            "deck-1", instance_id="instance-a", generation=4, event=self.event(2)
+        ))
+
+    def test_global_event_ids_are_monotonic_across_model_changes(self):
+        model = self.connected_model()
+        self.assertTrue(model.apply_adapter_event(
+            "deck-1", instance_id="instance-a", generation=3, event=self.event(1)
+        ))
+        model.set_transport(
+            "deck-1", instance_id="instance-a", generation=3,
+            status="disconnected", reason="closed",
+        )
+
+        events = model.journal.replay_after(0)
+        self.assertEqual([event.id for event in events], list(range(1, len(events) + 1)))
+        self.assertEqual(model.snapshot()["lastEventId"], events[-1].id)
+        self.assertEqual(
+            [event.snapshot_generation for event in events],
+            list(range(1, len(events) + 1)),
+        )
+
+    def test_rejects_duplicate_stale_instance_and_stale_generation_events(self):
+        model = self.connected_model()
+        accepted = self.event(1)
+        self.assertTrue(model.apply_adapter_event(
+            "deck-1", instance_id="instance-a", generation=3, event=accepted
+        ))
+        event_id = model.journal.latest_id
+
+        self.assertFalse(model.apply_adapter_event(
+            "deck-1", instance_id="instance-a", generation=3, event=accepted
+        ))
+        self.assertFalse(model.apply_adapter_event(
+            "deck-1", instance_id="instance-old", generation=3, event=self.event(2)
+        ))
+        self.assertFalse(model.apply_adapter_event(
+            "deck-1", instance_id="instance-a", generation=2, event=self.event(2)
+        ))
+        self.assertFalse(model.apply_rpc_snapshot(
+            "deck-1", instance_id="instance-old", generation=3, snapshot=self.make_snapshot(sequence=2)
+        ))
+        self.assertFalse(model.set_transport(
+            "deck-1", instance_id="instance-old", generation=3,
+            status="disconnected", reason="stale",
+        ))
+        self.assertEqual(model.journal.latest_id, event_id)
+        self.assertEqual(model.get("deck-1")["transport"]["instanceId"], "instance-a")
+
+    def test_equal_generation_wrong_instance_cannot_replace_snapshot_or_transport(self):
+        model = self.connected_model()
+        before = model.get("deck-1")
+        event_id = model.journal.latest_id
+
+        self.assertFalse(model.apply_rpc_snapshot(
+            "deck-1", instance_id="instance-b", generation=3,
+            snapshot=self.make_snapshot(sequence=10, session_id="wrong-session"),
+        ))
+        self.assertFalse(model.set_transport(
+            "deck-1", instance_id="instance-b", generation=3,
+            status="disconnected", reason="wrong owner",
+        ))
+
+        self.assertEqual(model.get("deck-1"), before)
+        self.assertEqual(model.journal.latest_id, event_id)
+
+    def test_new_generation_resets_adapter_sequence_for_same_instance(self):
+        model = self.connected_model()
+        self.assertTrue(model.apply_adapter_event(
+            "deck-1", instance_id="instance-a", generation=3, event=self.event(1)
+        ))
+
+        self.assertTrue(model.set_transport(
+            "deck-1", instance_id="instance-a", generation=4,
+            status="connected", reason=None,
+        ))
+        self.assertTrue(model.apply_adapter_event(
+            "deck-1", instance_id="instance-a", generation=4, event=self.event(1)
+        ))
+
+    def test_sequence_gap_latches_until_authoritative_snapshot(self):
+        model = self.connected_model()
+
+        self.assertFalse(model.apply_adapter_event(
+            "deck-1", instance_id="instance-a", generation=3, event=self.event(2)
+        ))
+        self.assertFalse(model.apply_adapter_event(
+            "deck-1", instance_id="instance-a", generation=3, event=self.event(1)
+        ))
+
+        session = model.get("deck-1")
+        self.assertEqual(session["transport"]["status"], "connected")
+        self.assertEqual(session["transport"]["reason"], "adapter event gap")
+        self.assertEqual(session["state"], "degraded")
+        resync = model.journal.replay_after(0)[-1]
+        self.assertEqual(resync.type, "session_resync_required")
+        self.assertEqual(resync.payload, {"expectedSequence": 1, "receivedSequence": 2})
+        self.assertTrue(model.apply_rpc_snapshot(
+            "deck-1", instance_id="instance-a", generation=3,
+            snapshot=self.make_snapshot(sequence=2),
+        ))
+        self.assertTrue(model.apply_adapter_event(
+            "deck-1", instance_id="instance-a", generation=3, event=self.event(3)
+        ))
+
+    def test_sequence_gap_requires_snapshot_at_or_beyond_received_watermark(self):
+        model = self.connected_model()
+        self.assertFalse(model.apply_adapter_event(
+            "deck-1", instance_id="instance-a", generation=3, event=self.event(3)
+        ))
+
+        self.assertFalse(model.apply_rpc_snapshot(
+            "deck-1", instance_id="instance-a", generation=3,
+            snapshot=self.make_snapshot(sequence=2),
+        ))
+        self.assertFalse(model.apply_adapter_event(
+            "deck-1", instance_id="instance-a", generation=3, event=self.event(3)
+        ))
+        self.assertTrue(model.apply_rpc_snapshot(
+            "deck-1", instance_id="instance-a", generation=3,
+            snapshot=self.make_snapshot(sequence=3),
+        ))
+        self.assertTrue(model.apply_adapter_event(
+            "deck-1", instance_id="instance-a", generation=3, event=self.event(4)
+        ))
+
+    def test_adapter_snapshot_collections_are_copied_into_fleet_state(self):
+        model = FleetModel()
+        model.load_record(self.make_record())
+        messages = [{"role": "user", "content": [{"type": "text", "text": "original"}]}]
+        todos = [{"content": "ship", "status": "pending", "meta": {"owner": "a"}}]
+        subagents = [{"id": "agent-1", "status": "running", "meta": {"attempt": 1}}]
+        snapshot = replace(
+            self.make_snapshot(), messages=messages, todos=todos, subagents=subagents,
+        )
+
+        self.assertTrue(model.apply_rpc_snapshot(
+            "deck-1", instance_id="instance-a", generation=3, snapshot=snapshot,
+        ))
+        messages[0]["content"][0]["text"] = "mutated"
+        messages.append({"role": "assistant", "content": "late"})
+        todos.append({"content": "late", "status": "pending"})
+        subagents.append({"id": "agent-late", "status": "running"})
+        todos[0]["meta"]["owner"] = "b"
+        subagents[0]["meta"]["attempt"] = 2
+
+        session = model.get("deck-1")
+        self.assertEqual(session["messages"][0]["content"][0]["text"], "original")
+        self.assertEqual(len(session["messages"]), 1)
+        self.assertEqual(len(session["todos"]), 1)
+        self.assertEqual(len(session["subagents"]), 1)
+        self.assertEqual(session["todos"][0]["meta"]["owner"], "a")
+        self.assertEqual(session["subagents"][0]["meta"]["attempt"], 1)
+
+
+
+class EventJournalTests(unittest.TestCase):
+    @staticmethod
+    def publish(journal, number, payload=None):
+        return journal.publish(
+            snapshot_generation=number,
+            event_type="change",
+            payload={"number": number} if payload is None else payload,
+            session_id=f"session-{number % 3}",
+            instance_id="instance-a",
+            generation=1,
+            sequence=number,
+        )
+
+    def test_replay_reports_a_gap_when_requested_id_predates_retained_window(self):
+        journal = EventJournal(max_events=2, max_bytes=100_000)
+        for number in range(1, 5):
+            self.publish(journal, number)
+
+        with self.assertRaises(ReplayUnavailableError):
+            journal.replay_after(1)
+        self.assertEqual([event.id for event in journal.replay_after(2)], [3, 4])
+
+    def test_event_count_bound_evicts_oldest_events(self):
+        journal = EventJournal(max_events=3, max_bytes=100_000)
+        for number in range(1, 6):
+            self.publish(journal, number)
+
+        self.assertEqual([event.id for event in journal.replay_after(2)], [3, 4, 5])
+        with self.assertRaises(ReplayUnavailableError):
+            journal.replay_after(1)
+
+    def test_fully_evicted_window_reports_replay_gap(self):
+        journal = EventJournal(max_events=10, max_bytes=1)
+
+        event = self.publish(journal, 1, {"text": "too large"})
+
+        self.assertEqual(event.id, 1)
+        self.assertEqual(journal.latest_id, 1)
+        with self.assertRaises(ReplayUnavailableError):
+            journal.replay_after(0)
+
+    def test_future_cursor_is_unavailable_for_fresh_and_nonempty_journals(self):
+        fresh = EventJournal()
+        with self.assertRaises(ReplayUnavailableError):
+            fresh.replay_after(1)
+
+        populated = EventJournal()
+        self.publish(populated, 1)
+        with self.assertRaises(ReplayUnavailableError):
+            populated.replay_after(2)
+
+    def test_nested_payload_is_immutable_through_source_event_and_replay_objects(self):
+        journal = EventJournal()
+        source = {"nested": {"items": [{"value": "original"}]}}
+
+        published = self.publish(journal, 1, source)
+        source["nested"]["items"][0]["value"] = "source mutation"
+        published.payload["nested"]["items"][0]["value"] = "event mutation"
+
+        replayed = journal.replay_after(0)[0]
+        self.assertEqual(replayed.payload["nested"]["items"][0]["value"], "original")
+        replayed.payload["nested"]["items"][0]["value"] = "replay mutation"
+        self.assertEqual(journal.replay_after(0)[0].payload["nested"]["items"][0]["value"], "original")
+
+    def test_invalid_payloads_do_not_advance_latest_id(self):
+        journal = EventJournal()
+        cycle = {}
+        cycle["self"] = cycle
+        invalid_payloads = (
+            {"value": float("nan")},
+            {"value": float("inf")},
+            {"value": float("-inf")},
+            cycle,
+            {"value": object()},
+        )
+
+        for payload in invalid_payloads:
+            with self.subTest(payload=repr(payload)):
+                before = journal.latest_id
+                with self.assertRaises((TypeError, ValueError)):
+                    self.publish(journal, 1, payload)
+                self.assertEqual(journal.latest_id, before)
+
+    def test_event_timestamp_is_rfc3339(self):
+        event = self.publish(EventJournal(), 1)
+
+        parsed = datetime.fromisoformat(event.timestamp)
+        self.assertIsNotNone(parsed.tzinfo)
+        self.assertIsNotNone(parsed.utcoffset())
+        self.assertRegex(
+            event.timestamp,
+            r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$",
+        )
+
+    def test_concurrent_publishers_receive_one_contiguous_global_order(self):
+        publisher_count = 8
+        events_per_publisher = 40
+        journal = EventJournal(max_events=publisher_count * events_per_publisher, max_bytes=1_000_000)
+        barrier = threading.Barrier(publisher_count)
+
+        def publish_batch(publisher):
+            barrier.wait()
+            return [
+                self.publish(journal, publisher * events_per_publisher + offset)
+                for offset in range(events_per_publisher)
+            ]
+
+        with ThreadPoolExecutor(max_workers=publisher_count) as executor:
+            batches = list(executor.map(publish_batch, range(publisher_count)))
+
+        returned = [event for batch in batches for event in batch]
+        replayed = journal.replay_after(0)
+        expected_count = publisher_count * events_per_publisher
+        self.assertEqual(sorted(event.id for event in returned), list(range(1, expected_count + 1)))
+        self.assertEqual([event.id for event in replayed], list(range(1, expected_count + 1)))
+        self.assertEqual(
+            {event.payload["number"] for event in replayed},
+            set(range(expected_count)),
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

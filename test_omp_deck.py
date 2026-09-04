@@ -3,92 +3,324 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-import omp_deck
-from settings import load_settings
+from omp_deck import cli
+from omp_deck.settings import load_settings
 
 
 class SettingsTests(unittest.TestCase):
-    def test_config_overrides_port_and_project_root(self):
+    def test_config_overrides_port_project_root_and_allowed_hosts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = root / "config.json"
-            config.write_text(json.dumps({"port": 9123, "project_root": str(root / "code")}))
+            config.write_text(
+                json.dumps(
+                    {
+                        "port": 9123,
+                        "project_root": str(root / "code"),
+                        "allowed_hosts": ["deck.example.ts.net"],
+                    }
+                )
+            )
 
             configured = load_settings(config)
 
             self.assertEqual(configured.port, 9123)
             self.assertEqual(configured.project_root, root / "code")
+            self.assertIn("deck.example.ts.net", configured.allowed_hosts)
             self.assertEqual(configured.host, "127.0.0.1")
 
-    def test_invalid_port_is_rejected(self):
+    def test_invalid_port_and_allowed_hosts_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "config.json"
             config.write_text('{"port": 70000}')
-
             with self.assertRaisesRegex(RuntimeError, "port"):
                 load_settings(config)
 
+            config.write_text('{"allowed_hosts": ["https://attacker.example"]}')
+            with self.assertRaisesRegex(RuntimeError, "allowed_hosts"):
+                load_settings(config)
 
-class InstallerTests(unittest.TestCase):
-    def test_install_creates_service_command_and_private_config(self):
-        with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory)
-            config = home / "config/omp-deck/config.json"
-            settings = SimpleNamespace(omp_bin="/usr/bin/omp", host="127.0.0.1", port=8787)
-            calls = []
-            environment = {
-                "XDG_DATA_HOME": str(home / "data"),
-                "XDG_CONFIG_HOME": str(home / "config"),
-                "OMP_DECK_BIN_DIR": str(home / "bin"),
-                "PI_CODING_AGENT_DIR": str(home / "omp-agent"),
-            }
-            legacy_extension = home / "omp-agent/extensions/mobile-bridge.ts"
-            legacy_extension.parent.mkdir(parents=True)
-            legacy_extension.write_text("legacy")
-            with (
-                patch.dict(omp_deck.os.environ, environment, clear=False),
-                patch.object(omp_deck, "CONFIG_PATH", config),
-                patch.object(omp_deck, "SETTINGS", settings),
-                patch.object(omp_deck.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"),
-                patch.object(omp_deck, "run", side_effect=lambda command, check=True: calls.append(command)),
-                patch.object(omp_deck, "enable_tailscale", return_value=None),
-            ):
-                omp_deck.install()
 
-            unit = home / "config/systemd/user/omp-deck.service"
-            command = home / "bin/omp-deck"
-            self.assertTrue((home / "data/omp-deck/server.py").is_file())
-            self.assertTrue((home / "data/omp-deck/projects.py").is_file())
-            self.assertTrue((home / "omp-agent/extensions/omp-deck.ts").is_file())
-            self.assertFalse(legacy_extension.exists())
-            self.assertIn(str(home / "data/omp-deck/server.py"), unit.read_text())
-            self.assertTrue(command.stat().st_mode & 0o100)
-            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
-            self.assertIn(["systemctl", "--user", "enable", "omp-deck.service"], calls)
-            self.assertIn(["systemctl", "--user", "restart", "omp-deck.service"], calls)
-
-    def test_tailscale_is_enabled_only_when_unconfigured(self):
-        results = [
-            SimpleNamespace(returncode=0, stdout="{}"),
-            SimpleNamespace(returncode=0, stdout=""),
-            SimpleNamespace(
-                returncode=0,
-                stdout=json.dumps({"Self": {"DNSName": "workstation.example.ts.net."}}),
-            ),
-        ]
+class CommandTests(unittest.TestCase):
+    def test_service_remove_does_not_load_runtime_configuration(self):
         with (
-            patch.object(omp_deck.shutil, "which", return_value="/usr/bin/tailscale"),
-            patch.object(omp_deck.subprocess, "run", side_effect=results) as run,
+            patch.object(cli, "remove_service") as remove,
+            patch.object(cli, "load_settings") as load_settings_mock,
         ):
-            url = omp_deck.enable_tailscale()
+            result = cli.main(["service", "remove"])
 
-        self.assertEqual(url, "https://workstation.example.ts.net")
+        self.assertEqual(result, 0)
+        remove.assert_called_once_with()
+        load_settings_mock.assert_not_called()
+
+    def test_purge_uses_configured_omp_binary(self):
+        settings = SimpleNamespace(omp_bin="/opt/omp/bin/omp")
+        with (
+            patch.object(cli, "load_settings", return_value=settings),
+            patch.object(cli, "purge_installation") as purge,
+        ):
+            self.assertEqual(cli.main(["purge"]), 0)
+        purge.assert_called_once_with("/opt/omp/bin/omp")
+
+    def test_setup_orders_plugin_service_health_and_pairing(self):
+        settings = SimpleNamespace(omp_bin="omp", state_root=Path("/tmp/state"))
+        calls = []
+        secret = SimpleNamespace(token="secret", expires_at=1)
+        manager = SimpleNamespace(begin_pairing=lambda: secret)
+        service_snapshot = object()
+        with (
+            patch.object(cli, "load_settings", return_value=settings),
+            patch.object(cli, "config_path", return_value=Path("/tmp/config.json")),
+            patch.object(cli.shutil, "which", return_value="/usr/bin/tool"),
+            patch.object(cli, "plugin_installed", return_value=False),
+            patch.object(cli, "capture_service_state", return_value=service_snapshot),
+            patch.object(cli, "backup_plugin", return_value=None),
+            patch.object(cli, "discard_plugin_backup", side_effect=lambda value: calls.append("discard")),
+            patch.object(cli, "AuthManager", return_value=manager),
+            patch.object(cli, "install_plugin", side_effect=lambda value: calls.append("plugin")),
+            patch.object(
+                cli,
+                "install_service",
+                side_effect=lambda value, path: calls.append(("service", path)),
+            ),
+            patch.object(cli, "check_health", side_effect=lambda value: calls.append("health")),
+            patch.object(
+                cli,
+                "print_pairing",
+                side_effect=lambda value: calls.append(("pair", value)),
+            ),
+        ):
+            cli.setup()
+
         self.assertEqual(
-            run.call_args_list[1].args[0],
-            ["tailscale", "serve", "--bg", "--yes", "8787"],
+            calls,
+            [
+                ("service", Path("/tmp/config.json")),
+                "health",
+                "plugin",
+                "health",
+                "discard",
+                ("pair", secret),
+            ],
         )
+
+    def test_setup_rolls_back_new_plugin_and_service_after_failed_health(self):
+        settings = SimpleNamespace(omp_bin="omp", state_root=Path("/tmp/state"))
+        manager = SimpleNamespace(
+            begin_pairing=lambda: SimpleNamespace(token="secret", expires_at=1)
+        )
+        service_snapshot = object()
+        with (
+            patch.object(cli, "load_settings", return_value=settings),
+            patch.object(cli, "config_path", return_value=Path("/tmp/config.json")),
+            patch.object(cli.shutil, "which", return_value="/usr/bin/tool"),
+            patch.object(cli, "plugin_installed", return_value=False),
+            patch.object(cli, "capture_service_state", return_value=service_snapshot),
+            patch.object(cli, "AuthManager", return_value=manager),
+            patch.object(cli, "install_plugin") as install_plugin,
+            patch.object(cli, "install_service"),
+            patch.object(cli, "check_health", side_effect=RuntimeError("unhealthy")),
+            patch.object(cli, "restore_service_state") as restore_service,
+            patch.object(cli, "restore_plugin") as restore_plugin,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "unhealthy"):
+                cli.setup()
+
+        restore_service.assert_called_once_with(service_snapshot)
+        restore_plugin.assert_not_called()
+        install_plugin.assert_not_called()
+
+    def test_setup_restores_existing_plugin_and_service_after_late_failure(self):
+        settings = SimpleNamespace(omp_bin="omp", state_root=Path("/tmp/state"))
+        manager = SimpleNamespace(
+            begin_pairing=lambda: SimpleNamespace(token="secret", expires_at=1)
+        )
+        service_snapshot = object()
+        plugin_backup = Path("/tmp/state/setup-rollback/plugin")
+        with (
+            patch.object(cli, "load_settings", return_value=settings),
+            patch.object(cli, "config_path", return_value=Path("/tmp/config.json")),
+            patch.object(cli.shutil, "which", return_value="/usr/bin/tool"),
+            patch.object(cli, "plugin_installed", return_value=True),
+            patch.object(cli, "capture_service_state", return_value=service_snapshot),
+            patch.object(cli, "backup_plugin", return_value=plugin_backup),
+            patch.object(cli, "AuthManager", return_value=manager),
+            patch.object(cli, "install_plugin"),
+            patch.object(cli, "install_service"),
+            patch.object(cli, "check_health", side_effect=[None, RuntimeError("late failure")]),
+            patch.object(cli, "restore_service_state") as restore_service,
+            patch.object(cli, "restore_plugin") as restore_plugin,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "late failure"):
+                cli.setup()
+
+        restore_plugin.assert_called_once_with(settings, plugin_backup)
+        restore_service.assert_called_once_with(service_snapshot)
+
+    def test_setup_refuses_to_replace_unsnapshottable_existing_plugin(self):
+        settings = SimpleNamespace(omp_bin="omp", state_root=Path("/tmp/state"))
+        manager = SimpleNamespace(
+            begin_pairing=lambda: SimpleNamespace(token="secret", expires_at=1)
+        )
+        with (
+            patch.object(cli, "load_settings", return_value=settings),
+            patch.object(cli, "config_path", return_value=Path("/tmp/config.json")),
+            patch.object(cli.shutil, "which", return_value="/usr/bin/tool"),
+            patch.object(cli, "plugin_installed", return_value=True),
+            patch.object(cli, "capture_service_state", return_value=object()),
+            patch.object(cli, "backup_plugin", return_value=None),
+            patch.object(cli, "AuthManager", return_value=manager),
+            patch.object(cli, "install_service"),
+            patch.object(cli, "check_health"),
+            patch.object(cli, "install_plugin") as install_plugin,
+            patch.object(cli, "restore_service_state"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "cannot snapshot"):
+                cli.setup()
+
+        install_plugin.assert_not_called()
+
+    def test_setup_does_not_create_pairing_secret_before_success(self):
+        settings = SimpleNamespace(omp_bin="omp", state_root=Path("/tmp/state"))
+        manager = Mock()
+        with (
+            patch.object(cli, "load_settings", return_value=settings),
+            patch.object(cli, "config_path", return_value=Path("/tmp/config.json")),
+            patch.object(cli.shutil, "which", return_value="/usr/bin/tool"),
+            patch.object(cli, "plugin_installed", return_value=False),
+            patch.object(cli, "capture_service_state", return_value=object()),
+            patch.object(cli, "AuthManager", return_value=manager),
+            patch.object(cli, "install_service"),
+            patch.object(cli, "check_health", side_effect=RuntimeError("unhealthy")),
+            patch.object(cli, "restore_service_state"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "unhealthy"):
+                cli.setup()
+        manager.begin_pairing.assert_not_called()
+
+    def test_setup_removes_tailscale_route_when_pairing_fails(self):
+        settings = SimpleNamespace(omp_bin="omp", state_root=Path("/tmp/state"))
+        manager = Mock()
+        manager.begin_pairing.side_effect = RuntimeError("pairing failed")
+        with (
+            patch.object(cli, "load_settings", return_value=settings),
+            patch.object(cli, "config_path", return_value=Path("/tmp/config.json")),
+            patch.object(cli.shutil, "which", return_value="/usr/bin/tool"),
+            patch.object(cli, "plugin_installed", return_value=False),
+            patch.object(cli, "capture_service_state", return_value=object()),
+            patch.object(cli, "backup_plugin", return_value=None),
+            patch.object(cli, "AuthManager", return_value=manager),
+            patch.object(cli, "install_service"),
+            patch.object(cli, "install_plugin"),
+            patch.object(cli, "check_health"),
+            patch.object(cli, "enable_tailscale", return_value=True),
+            patch.object(cli, "disable_tailscale") as disable,
+            patch.object(cli, "restore_plugin"),
+            patch.object(cli, "restore_service_state"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "pairing failed"):
+                cli.setup(tailscale=True)
+        disable.assert_called_once_with(settings)
+
+
+    def test_tailscale_refuses_to_overwrite_existing_routes(self):
+        existing = SimpleNamespace(returncode=0, stdout='{"Web": {"443": {}}}', stderr="")
+        with (
+            patch.object(cli.shutil, "which", return_value="/usr/bin/tailscale"),
+            patch.object(cli.subprocess, "run", return_value=existing) as run,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "left unchanged"):
+                cli.enable_tailscale(SimpleNamespace(port=8787))
+
+        run.assert_called_once_with(
+            ["tailscale", "serve", "status", "--json"],
+            capture_output=True,
+            text=True,
+        )
+
+    def test_tailscale_setup_verifies_the_exact_proxy(self):
+        empty = SimpleNamespace(returncode=0, stdout="{}", stderr="")
+        configured = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({
+                "Web": {
+                    "deck.example.ts.net:443": {
+                        "Handlers": {"/": {"Proxy": "http://127.0.0.1:8787"}}
+                    }
+                }
+            }),
+            stderr="",
+        )
+        command = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with (
+            patch.object(cli.shutil, "which", return_value="/usr/bin/tailscale"),
+            patch.object(cli.subprocess, "run", side_effect=[empty, command, configured]) as run,
+        ):
+            cli.enable_tailscale(SimpleNamespace(port=8787))
+
+        self.assertEqual(run.call_count, 3)
+
+    def test_tailscale_verification_failure_resets_new_route(self):
+        empty = SimpleNamespace(returncode=0, stdout="{}", stderr="")
+        command = SimpleNamespace(returncode=0, stdout="", stderr="")
+        mismatched = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({
+                "Web": {
+                    "deck.example.ts.net:443": {
+                        "Handlers": {"/": {"Proxy": "http://127.0.0.1:9999"}}
+                    }
+                }
+            }),
+            stderr="",
+        )
+        with (
+            patch.object(cli.shutil, "which", return_value="/usr/bin/tailscale"),
+            patch.object(
+                cli.subprocess,
+                "run",
+                side_effect=[empty, command, mismatched, command],
+            ) as run,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "did not expose"):
+                cli.enable_tailscale(SimpleNamespace(port=8787))
+        self.assertEqual(run.call_args_list[-1].args[0], ["tailscale", "serve", "reset"])
+
+    def test_tailscale_cleanup_refuses_concurrent_routes(self):
+        configured = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({
+                "Web": {
+                    "deck.example.ts.net:443": {
+                        "Handlers": {
+                            "/": {"Proxy": "http://127.0.0.1:8787"},
+                            "/other": {"Proxy": "http://127.0.0.1:9999"},
+                        }
+                    }
+                }
+            }),
+            stderr="",
+        )
+        with patch.object(cli.subprocess, "run", return_value=configured) as run:
+            with self.assertRaisesRegex(RuntimeError, "unrecognized"):
+                cli.disable_tailscale(SimpleNamespace(port=8787))
+        self.assertEqual(run.call_count, 1)
+
+    def test_config_validate_loads_only_the_requested_configuration(self):
+        settings = SimpleNamespace(
+            host="127.0.0.1",
+            port=8787,
+            project_root=Path("/tmp/projects"),
+        )
+        with (
+            patch.object(cli, "config_path", return_value=Path("/tmp/config.json")),
+            patch.object(cli, "load_settings", return_value=settings) as load,
+        ):
+            self.assertEqual(cli.main(["config", "validate"]), 0)
+
+        load.assert_called_once_with(Path("/tmp/config.json"))
 
 
 if __name__ == "__main__":

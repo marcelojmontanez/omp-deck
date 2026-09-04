@@ -1,0 +1,13 @@
+# Changelog
+
+## 0.1.0 — Unreleased
+
+- Package OMP Deck as a standard Python application with an `omp-deck` entry point, official plugin-manager lifecycle, systemd user-service commands, health checks, isolated setup verification, and ownership-safe purge behavior.
+- Add mandatory device pairing, revocation, CSRF and Origin enforcement, Host validation, private-response headers, bounded request parsing, safe project resolution, and authenticated blob delivery.
+- Replace managed TUI/tmux control with supervised official `omp_rpc.RpcClient` sessions, stable Deck identities, persisted desired-running state, resume metadata, correlated commands, protocol-version coverage, and complete built-in Ask handling.
+- Add terminal-owned session support through the published pi-wire Collab protocol and a versioned Unix-socket extension fallback with peer authentication, capability negotiation, structured events, managed timers, bounded frames, and terminal-only fallback Ask behavior.
+- Add protected server-side Collab credential storage and browser import/removal controls. Writable links are never returned to the browser after import or included in API events and logs.
+- Normalize RPC, Collab, and extension state behind one fleet model with generation/sequence ownership, stale-event rejection, bounded event replay, server-authoritative persistent unread cursors, explicit degradation, and per-session request deduplication.
+- Replace browser snapshot polling with authenticated SSE plus bounded replay and low-frequency authoritative recovery. Add accessible transport status, capability-driven controls, mobile pending-request forms, ordered optimistic sends, in-memory drafts, and bounded image attachments.
+- Remove `/proc` discovery, tmux keystroke control, full-transcript live polling, direct plugin copying, legacy HTTP routes, slash-command emulation, persistent browser session data, and obsolete compatibility tests.
+- Document the single-owner architecture, transport limitations, Tailscale trust assumptions, retained data, supported OMP release, service operations, upgrades, rollback boundary, and safe uninstall behavior.

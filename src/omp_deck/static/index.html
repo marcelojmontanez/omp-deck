@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
+  <meta name="theme-color" content="#080b12">
+  <link rel="manifest" href="/manifest.json">
+  <title>OMP Deck</title>
+  <link rel="stylesheet" href="/composer.css">
+  <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/todo.css">
+  <link rel="stylesheet" href="/launcher.css">
+  <link rel="stylesheet" href="/image-viewer.css">
+  <link rel="stylesheet" href="/auth.css">
+  <link rel="stylesheet" href="/pending-request.css">
+</head>
+<body>
+  <section class="auth-screen" id="auth-screen" aria-labelledby="auth-title" hidden>
+    <form class="auth-card" id="pair-form">
+      <div class="mark" aria-hidden="true">π</div>
+      <div class="eyebrow">Private control surface</div>
+      <h1 id="auth-title">Pair this device</h1>
+      <p>Enter the one-time code shown by <code>omp-deck pair</code>.</p>
+      <label for="pair-token">Pairing code</label>
+      <input id="pair-token" name="token" type="password" autocomplete="one-time-code" required>
+      <button type="submit">Pair device</button>
+      <p class="auth-error" id="auth-error" role="alert" hidden></p>
+    </form>
+  </section>
+  <main class="app" id="app" hidden>
+    <header class="appbar">
+      <div class="brand">
+        <div class="mark" aria-hidden="true">π</div>
+        <div>
+          <div class="eyebrow">Control surface</div>
+          <h1 id="dashboard-title" tabindex="-1">OMP Deck</h1>
+        </div>
+      </div>
+      <div class="connection" id="connection"><span class="live-dot"></span><span id="connection-text">Connecting</span></div>
+    </header>
+
+    <section class="overview" aria-live="polite">
+      <div class="metric-row">
+        <span class="metric working"><strong id="working-count">0</strong> working</span>
+        <span class="metric attention" title="Errors or agents waiting for your input"><strong id="attention-count">0</strong> need attention</span>
+        <span class="metric unread"><strong id="unread-count">0</strong> unread</span>
+        <span class="metric idle"><strong id="idle-count">0</strong> idle</span>
+      </div>
+    </section>
+    <section class="usage" id="usage" aria-label="Subscription usage">
+      <div class="usage-title">Subscription</div>
+      <div class="usage-list" id="usage-list"></div>
+    </section>
+
+    <section class="launcher" aria-label="Start an OMP">
+      <label id="project-root-label" for="project-select">Start OMP in configured project root</label>
+      <div class="launcher-controls">
+        <div class="launcher-fields">
+          <select id="project-select" aria-label="Project directory"><option value="">Choose project…</option></select>
+          <input id="project-new" type="text" maxlength="80" placeholder="New directory name" aria-label="New project directory name" hidden>
+        </div>
+        <button id="project-launch" type="button" disabled>Start</button>
+      </div>
+      <span id="launch-state" role="status" aria-live="polite"></span>
+      <details class="collab-connect">
+        <summary>Connect terminal via Collab</summary>
+        <label for="collab-link">Writable Collab link</label>
+        <div class="collab-controls">
+          <input id="collab-link" type="password" autocomplete="off" spellcheck="false" maxlength="8192" placeholder="Paste writable link">
+          <button id="collab-connect" type="button">Connect</button>
+        </div>
+        <span id="collab-state" role="status" aria-live="polite"></span>
+      </details>
+    </section>
+
+    <section class="workspace" id="workspace">
+      <aside class="rail" aria-label="Active OMPs">
+        <nav class="filters" aria-label="Filter OMPs">
+          <button class="filter active" data-filter="all">All</button>
+          <button class="filter" data-filter="working">Working</button>
+          <button class="filter" data-filter="attention" title="Errors or agents waiting for your input">Needs attention</button>
+          <button class="filter" data-filter="unread">Unread</button>
+          <button class="filter" data-filter="idle">Idle</button>
+        </nav>
+        <div class="agent-list" id="agent-list"></div>
+      </aside>
+
+      <section class="detail" id="detail" aria-live="polite">
+        <header class="detail-header">
+          <div class="chips" id="detail-chips"></div>
+          <div class="detail-actions">
+            <div id="task-control"></div>
+            <span class="transport-status disconnected" id="transport-status" role="status" title="Disconnected"><i aria-hidden="true"></i><span class="sr-only">Disconnected</span></span>
+            <button class="overflow-button" id="overflow-button" type="button" aria-label="Session actions" aria-expanded="false" aria-controls="session-menu">⋮</button>
+            <div class="session-menu" id="session-menu" role="menu" hidden>
+              <button type="button" role="menuitem" data-session-action="clear">Clear context</button>
+              <button type="button" role="menuitem" data-session-action="interrupt">Interrupt</button>
+              <button type="button" role="menuitem" data-session-action="quit">Quit</button>
+              <button type="button" role="menuitem" data-session-action="copy">Copy link</button>
+              <button type="button" role="menuitem" data-session-action="remove" hidden>Remove from Deck</button>
+              <button type="button" role="menuitem" data-clear-local-data>Clear local data</button>
+              <button type="button" role="menuitem" data-session-action="logout">Log out this device</button>
+              <button type="button" role="menuitem" data-session-action="revoke-all">Revoke all devices</button>
+            </div>
+          </div>
+        </header>
+        <section class="pending-request" id="pending-request" aria-live="polite" hidden></section>
+        <div class="activity" id="activity"><p class="activity-empty">Waiting for structured OMP events.</p></div>
+        <button class="scroll-newest" id="scroll-newest" type="button" hidden>↑ Newest</button>
+        <form class="composer" id="composer">
+          <div class="attachments" id="attachments"></div>
+          <div class="composer-shell">
+            <button class="attach" id="attach" type="button" aria-label="Attach images">＋</button>
+            <input id="attachment-input" type="file" accept="image/*" multiple hidden>
+            <button class="gallery" id="gallery" type="button" aria-label="Choose images from gallery"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"></rect><circle cx="8.5" cy="9" r="1.5"></circle><path d="m5 17 4.5-4.5 3 3 2-2L19 18"></path></svg></button>
+            <input id="gallery-input" type="file" accept="image/*" multiple hidden>
+            <textarea id="message" rows="1" maxlength="4000" placeholder="Message this OMP…" aria-label="Message selected OMP"></textarea>
+            <button class="send" id="send" type="submit">Send</button>
+          </div>
+          <div class="composer-actions"><span class="send-state" id="send-state" role="status" aria-live="polite"></span></div>
+        </form>
+        <div class="toast" id="toast" role="alert" hidden></div>
+      </section>
+    </section>
+  </main>
+  <dialog class="image-viewer" id="image-viewer" aria-label="Image preview">
+    <button class="image-viewer-close" type="button" aria-label="Close image preview">×</button>
+    <img id="image-viewer-image" alt="Enlarged attachment">
+  </dialog>
+
+  <script src="/api.js"></script>
+  <script src="/markdown.js"></script>
+  <script src="/usage.js"></script>
+  <script src="/todo-ui.js"></script>
+  <script src="/fleet-projection.js"></script>
+  <script src="/pending-request.js"></script>
+  <script src="/live-events.js"></script>
+  <script src="/ui-helpers.js"></script>
+  <script src="/composer.js"></script>
+  <script src="/deck-rendering.js"></script>
+  <script src="/app.js"></script>
+  <script src="/session-controls.js"></script>
+  <script src="/launcher.js"></script>
+  <script src="/image-viewer.js"></script>
+</body>
+</html>

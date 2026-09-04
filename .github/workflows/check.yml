@@ -1,0 +1,94 @@
+name: Check
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repository-check:
+    name: Clean repository check (Python ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+      - name: Export tracked checkout
+        run: |
+          mkdir "$RUNNER_TEMP/omp-deck"
+          git archive HEAD | tar -x -C "$RUNNER_TEMP/omp-deck"
+      - name: Install runtime dependencies
+        working-directory: ${{ runner.temp }}/omp-deck
+        run: python3 -m pip install .
+      - name: Run repository check
+        working-directory: ${{ runner.temp }}/omp-deck
+        run: python3 tools/check.py
+
+  package:
+    name: Package and lifecycle gate
+    needs: repository-check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install build
+      - run: python3 -m build
+      - run: python3 -m pip install dist/*.whl
+      - run: omp-deck --help
+      - name: Reinstall and uninstall wheel
+        run: |
+          python3 -m pip install --force-reinstall --no-deps dist/*.whl
+          python3 -m pip uninstall --yes omp-deck
+          python3 -c "import importlib.util; assert importlib.util.find_spec('omp_deck') is None"
+
+  plugin:
+    name: OMP plugin gate
+    needs: repository-check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+          cache: npm
+          cache-dependency-path: src/omp_deck/plugin/package-lock.json
+      - working-directory: src/omp_deck/plugin
+        run: npm ci
+      - working-directory: src/omp_deck/plugin
+        run: npm run check
+
+  browser:
+    name: Browser behavior gate
+    needs: repository-check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+          cache: npm
+      - run: npm ci
+      - run: python3 -m pip install .
+      - run: npx puppeteer browsers install chrome
+      - run: node --test --test-concurrency=1 browser_behavior_test.mjs
+      - run: npm run test:browser

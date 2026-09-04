@@ -1,32 +1,45 @@
 #!/usr/bin/env python3
 import ast
+import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-MAINTAINED_SOURCES = (
-    "attachments.py",
-    "omp_deck.py",
-    "process_discovery.py",
-    "projects.py",
-    "server.py",
-    "settings.py",
-    "session_state.py",
-    "static/app.css",
-    "static/app.js",
-    "static/composer.js",
-    "static/composer.css",
-    "static/index.html",
-    "static/markdown.js",
-    "static/sw.js",
-    "static/todo-ui.js",
-    "static/todo.css",
-    "static/ui-helpers.js",
-    "tools/check.py",
-    "tools/check_commit.py",
-    "tools/metrics.py",
+SOURCE_SUFFIXES = {".py", ".js", ".ts", ".css"}
+EXCLUDED_PARTS = {".git", "__pycache__"}
+
+
+def maintained_sources():
+    """Return tracked and non-ignored source files from the current checkout."""
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if result.returncode == 0:
+        names = (name for name in result.stdout.decode("utf-8").split("\0") if name)
+        return tuple(
+            name
+            for name in names
+            if Path(name).suffix.lower() in SOURCE_SUFFIXES and (ROOT / name).is_file()
+        )
+    return tuple(
+        str(path.relative_to(ROOT))
+        for path in sorted(ROOT.rglob("*"))
+        if path.is_file()
+        and path.suffix.lower() in SOURCE_SUFFIXES
+        and not EXCLUDED_PARTS.intersection(path.relative_to(ROOT).parts)
+    )
+
+
+MAINTAINED_SOURCES = maintained_sources()
+SOURCE_FILES = tuple(
+    ROOT / path
+    for path in MAINTAINED_SOURCES
+    if not Path(path).name.startswith("test_")
 )
-SOURCE_FILES = tuple(ROOT / path for path in MAINTAINED_SOURCES)
 MAX_FILE_LINES = 500
 MAX_PYTHON_COMPLEXITY = 25
 BRANCH_NODES = (

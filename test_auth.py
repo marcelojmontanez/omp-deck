@@ -1,0 +1,240 @@
+import json
+import os
+import stat
+import tempfile
+import unittest
+from pathlib import Path
+
+from omp_deck.auth import (
+    AuthManager,
+    AuthError,
+    AuthenticationFailed,
+    AuthStateCorrupt,
+    COOKIE_NAME,
+    PairingFailed,
+    PairingRateLimited,
+    validate_auth_state,
+)
+
+
+class Clock:
+    def __init__(self, value=1_700_000_000):
+        self.value = value
+
+    def __call__(self):
+        return self.value
+
+    def advance(self, seconds):
+        self.value += seconds
+
+
+class AuthManagerTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.wall = Clock()
+        self.monotonic = Clock(100)
+        self.auth = AuthManager(
+            self.temp.name,
+            pairing_ttl=30,
+            session_ttl=60,
+            pairing_attempts=2,
+            pairing_window=10,
+            max_rate_limit_sources=2,
+            now=self.wall,
+            monotonic=self.monotonic,
+        )
+
+    def pair_device(self, source="phone"):
+        secret = self.auth.begin_pairing()
+        return secret, self.auth.pair(secret.token, source=source)
+
+    def test_state_is_versioned_atomic_private_and_contains_no_raw_secrets(self):
+        secret, paired = self.pair_device()
+        state_path = Path(self.temp.name) / "auth.json"
+        state_text = state_path.read_text()
+        state = json.loads(state_text)
+
+        self.assertEqual(state["version"], 1)
+        self.assertEqual(stat.S_IMODE(state_path.stat().st_mode), 0o600)
+        self.assertNotIn(secret.token, state_text)
+        self.assertNotIn(paired.credential, state_text)
+        self.assertEqual(list(Path(self.temp.name).glob(".auth.json.*.tmp")), [])
+
+    def test_pairing_is_high_entropy_single_use_and_expiring(self):
+        secret = self.auth.begin_pairing()
+        self.assertGreaterEqual(len(secret.token), 40)
+        paired = self.auth.pair(secret.token, source="phone")
+        self.assertEqual(self.auth.authenticate(paired.credential).device_id, paired.device.device_id)
+        with self.assertRaises(PairingFailed):
+            self.auth.pair(secret.token, source="other-phone")
+
+        expired = self.auth.begin_pairing()
+        self.wall.advance(31)
+        with self.assertRaises(PairingFailed):
+            self.auth.pair(expired.token, source="third-phone")
+
+    def test_device_cookie_has_required_public_boundary_attributes(self):
+        _, paired = self.pair_device()
+        self.assertTrue(paired.set_cookie.startswith(f"{COOKIE_NAME}=v1."))
+        for attribute in ("Path=/", "HttpOnly", "Secure", "SameSite=Strict"):
+            self.assertIn(attribute, paired.set_cookie)
+
+    def test_authentication_survives_restart_but_expired_session_fails(self):
+        _, paired = self.pair_device()
+        restarted = AuthManager(
+            self.temp.name,
+            pairing_ttl=30,
+            session_ttl=60,
+            now=self.wall,
+            monotonic=self.monotonic,
+        )
+        self.assertEqual(restarted.authenticate(paired.credential).device_id, paired.device.device_id)
+        self.wall.advance(61)
+        with self.assertRaises(AuthenticationFailed):
+            restarted.authenticate(paired.credential)
+
+    def test_running_manager_accepts_pairing_secret_created_by_cli_process(self):
+        running_service = self.auth
+        cli_process = AuthManager(
+            self.temp.name,
+            pairing_ttl=30,
+            session_ttl=60,
+            now=self.wall,
+            monotonic=self.monotonic,
+        )
+        secret = cli_process.begin_pairing()
+
+        paired = running_service.pair(secret.token, source="phone")
+
+        self.assertEqual(
+            running_service.authenticate(paired.credential).device_id,
+            paired.device.device_id,
+        )
+
+    def test_csrf_is_bound_to_device_credential_and_compared_at_boundary(self):
+        _, first = self.pair_device()
+        _, second = self.pair_device(source="tablet")
+        self.assertEqual(
+            self.auth.validate_csrf(first.credential, first.device.csrf_token).device_id,
+            first.device.device_id,
+        )
+        with self.assertRaises(AuthenticationFailed):
+            self.auth.validate_csrf(first.credential, second.device.csrf_token)
+        with self.assertRaises(AuthenticationFailed):
+            self.auth.validate_csrf(first.credential, None)
+
+    def test_logout_revokes_only_present_device_and_expires_cookie(self):
+        _, first = self.pair_device()
+        _, second = self.pair_device(source="tablet")
+        clear = self.auth.logout(first.credential)
+
+        self.assertIn(f"{COOKIE_NAME}=", clear)
+        self.assertIn("Max-Age=0", clear)
+        with self.assertRaises(AuthenticationFailed):
+            self.auth.authenticate(first.credential)
+        self.assertEqual(self.auth.authenticate(second.credential).device_id, second.device.device_id)
+
+    def test_revoke_all_rotates_epoch_and_invalidates_every_device(self):
+        _, first = self.pair_device()
+        _, second = self.pair_device(source="tablet")
+        old_epoch = json.loads((Path(self.temp.name) / "auth.json").read_text())["epoch"]
+        self.auth.revoke_all(first.credential, first.device.csrf_token)
+        new_epoch = json.loads((Path(self.temp.name) / "auth.json").read_text())["epoch"]
+
+        self.assertNotEqual(old_epoch, new_epoch)
+        for credential in (first.credential, second.credential):
+            with self.assertRaises(AuthenticationFailed):
+                self.auth.authenticate(credential)
+
+    def test_pairing_attempts_are_rate_limited_and_source_table_is_bounded(self):
+        secret = self.auth.begin_pairing()
+        for _ in range(2):
+            with self.assertRaises(PairingFailed):
+                self.auth.pair("wrong", source="attacker")
+        with self.assertRaises(PairingRateLimited):
+            self.auth.pair(secret.token, source="attacker")
+
+        # Independent sources do not consume each other's allowance; source state stays bounded.
+        self.auth.pair(secret.token, source="owner")
+        with self.assertRaises(PairingFailed):
+            self.auth.pair("wrong", source="third")
+        self.assertLessEqual(len(self.auth._limiter.sources), 2)
+
+    def test_rate_limit_window_recovers(self):
+        secret = self.auth.begin_pairing()
+        for _ in range(2):
+            with self.assertRaises(PairingFailed):
+                self.auth.pair("wrong", source="phone")
+        self.monotonic.advance(11)
+        paired = self.auth.pair(secret.token, source="phone")
+        self.assertEqual(self.auth.authenticate(paired.credential).device_id, paired.device.device_id)
+
+    def test_corrupt_state_is_quarantined_without_silent_reset(self):
+        state_path = Path(self.temp.name) / "auth.json"
+        state_path.write_text("not-json")
+        with self.assertRaises(AuthStateCorrupt) as caught:
+            AuthManager(self.temp.name, now=self.wall, monotonic=self.monotonic)
+
+        self.assertFalse(state_path.exists())
+        self.assertTrue(caught.exception.quarantine_path.exists())
+        self.assertEqual(list(Path(self.temp.name).glob("auth.json.corrupt-*")), [caught.exception.quarantine_path])
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode semantics")
+    def test_existing_state_permissions_are_repaired(self):
+        state_path = Path(self.temp.name) / "auth.json"
+        os.chmod(state_path, 0o644)
+        AuthManager(self.temp.name, now=self.wall, monotonic=self.monotonic)
+        self.assertEqual(stat.S_IMODE(state_path.stat().st_mode), 0o600)
+
+    def test_read_only_validation_does_not_create_missing_state(self):
+        missing = Path(self.temp.name) / "missing"
+        with self.assertRaisesRegex(RuntimeError, "missing"):
+            validate_auth_state(missing)
+        self.assertFalse(missing.exists())
+
+    def test_read_only_validation_does_not_quarantine_corrupt_state(self):
+        state_path = Path(self.temp.name) / "auth.json"
+        state_path.write_text("not-json")
+        os.chmod(state_path, 0o600)
+        with self.assertRaisesRegex(RuntimeError, "invalid"):
+            validate_auth_state(self.temp.name)
+        self.assertEqual(state_path.read_text(), "not-json")
+        self.assertEqual(list(Path(self.temp.name).glob("auth.json.corrupt-*")), [])
+
+    def test_read_only_validation_rejects_unsafe_lock(self):
+        lock = Path(self.temp.name) / ".auth.lock"
+        os.chmod(lock, 0o644)
+        with self.assertRaisesRegex(RuntimeError, "lock is unsafe"):
+            validate_auth_state(self.temp.name)
+
+
+    def test_cross_process_pairing_preserves_existing_devices(self):
+        stale = AuthManager(self.temp.name, now=self.wall, monotonic=self.monotonic)
+        secret = self.auth.begin_pairing()
+        paired = self.auth.pair(secret.token, source="owner")
+
+        stale.begin_pairing()
+
+        reloaded = AuthManager(self.temp.name, now=self.wall, monotonic=self.monotonic)
+        self.assertEqual(
+            reloaded.authenticate(paired.credential).device_id,
+            paired.device.device_id,
+        )
+
+    def test_symlink_state_root_is_rejected_without_mutating_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            target = parent / "target"
+            target.mkdir(mode=0o755)
+            link = parent / "state"
+            link.symlink_to(target, target_is_directory=True)
+
+            with self.assertRaisesRegex(AuthError, "unsafe"):
+                AuthManager(link)
+
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o755)
+            self.assertFalse((target / "auth.json").exists())
+
+if __name__ == "__main__":
+    unittest.main()

@@ -21,6 +21,7 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+from . import _auth_state
 
 STATE_VERSION = 1
 COOKIE_NAME = "omp_deck_device"
@@ -114,8 +115,13 @@ class AuthManager:
         now: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
     ):
-        if pairing_ttl < 1 or session_ttl < 1 or max_devices < 1:
-            raise ValueError("authentication lifetimes and limits must be positive")
+        if (
+            pairing_ttl < 1
+            or session_ttl < 1
+            or max_devices < 1
+            or max_devices > _auth_state.MAX_PERSISTED_DEVICES
+        ):
+            raise ValueError("authentication lifetimes and limits must be positive and bounded")
         self.state_root = Path(state_root)
         self.path = self.state_root / "auth.json"
         self.pairing_ttl = pairing_ttl
@@ -334,15 +340,29 @@ class AuthManager:
             raise AuthStateCorrupt(self.path) from error
         try:
             info = os.fstat(descriptor)
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.geteuid()
+            ):
                 raise AuthStateCorrupt(self.path)
+            if info.st_size > _auth_state.MAX_STATE_BYTES:
+                raise ValueError("authentication state is too large")
             os.fchmod(descriptor, 0o600)
-            with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
-                descriptor = -1
-                state = json.load(stream)
+            raw = os.read(descriptor, _auth_state.MAX_STATE_BYTES + 1)
+            if len(raw) > _auth_state.MAX_STATE_BYTES:
+                raise ValueError("authentication state is too large")
+            state = json.loads(raw)
             self._validate_state(state)
             return state
-        except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError, KeyError):
+        except (
+            OSError,
+            UnicodeError,
+            json.JSONDecodeError,
+            RecursionError,
+            ValueError,
+            TypeError,
+            KeyError,
+        ):
             quarantine = self.path.with_name(
                 f"auth.json.corrupt-{int(self._now())}-{secrets.token_hex(4)}"
             )
@@ -361,33 +381,7 @@ class AuthManager:
             if descriptor >= 0:
                 os.close(descriptor)
 
-    @staticmethod
-    def _validate_state(state: object) -> None:
-        if not isinstance(state, dict) or set(state) != {"version", "epoch", "pairing", "devices"}:
-            raise ValueError("invalid auth state shape")
-        if state["version"] != STATE_VERSION or not isinstance(state["epoch"], str):
-            raise ValueError("unsupported auth state")
-        if not isinstance(state["devices"], dict):
-            raise ValueError("invalid devices")
-        pairing = state["pairing"]
-        if pairing is not None and (
-            not isinstance(pairing, dict)
-            or set(pairing) != {"verifier", "expiresAt"}
-            or not isinstance(pairing["verifier"], str)
-            or not isinstance(pairing["expiresAt"], int)
-        ):
-            raise ValueError("invalid pairing verifier")
-        for device_id, record in state["devices"].items():
-            if (
-                not isinstance(device_id, str)
-                or not isinstance(record, dict)
-                or set(record) != {"verifier", "createdAt", "expiresAt", "epoch"}
-                or not isinstance(record["verifier"], str)
-                or not isinstance(record["createdAt"], int)
-                or not isinstance(record["expiresAt"], int)
-                or not isinstance(record["epoch"], str)
-            ):
-                raise ValueError("invalid device record")
+    _validate_state = staticmethod(_auth_state.validate)
 
     def _prune_expired(self, now: int) -> None:
         self._state["devices"] = {
@@ -452,6 +446,7 @@ def validate_auth_state(state_root: str | os.PathLike[str]) -> None:
         or not stat.S_ISREG(path_stat.st_mode)
         or path_stat.st_uid != os.geteuid()
         or stat.S_IMODE(path_stat.st_mode) != 0o600
+        or path_stat.st_size > _auth_state.MAX_STATE_BYTES
     ):
         raise RuntimeError("authentication state file is unsafe")
     lock = root / ".auth.lock"
@@ -470,5 +465,13 @@ def validate_auth_state(state_root: str | os.PathLike[str]) -> None:
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
         AuthManager._validate_state(state)
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError, KeyError) as error:
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        RecursionError,
+        ValueError,
+        TypeError,
+        KeyError,
+    ) as error:
         raise RuntimeError("authentication state is invalid") from error

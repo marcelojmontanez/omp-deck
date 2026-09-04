@@ -28,3 +28,4 @@
 - Reuse mutation request IDs after unclassified server failures while allowing known failures to retry as new operations.
 - Persist removed extension connection tombstones so the same registration stays hidden across service restarts.
 - Reserve in-flight attachment count and bytes so concurrent selections cannot bypass browser limits.
+- Bound authentication state size and device cardinality and reject malformed persisted credential shapes.

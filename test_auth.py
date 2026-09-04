@@ -180,6 +180,41 @@ class AuthManagerTests(unittest.TestCase):
         self.assertTrue(caught.exception.quarantine_path.exists())
         self.assertEqual(list(Path(self.temp.name).glob("auth.json.corrupt-*")), [caught.exception.quarantine_path])
 
+    def test_oversized_state_is_bounded_and_quarantined(self):
+        state_path = Path(self.temp.name) / "auth.json"
+        state_path.write_bytes(b"x" * (1024 * 1024 + 1))
+        os.chmod(state_path, 0o600)
+
+        with self.assertRaisesRegex(RuntimeError, "unsafe"):
+            validate_auth_state(self.temp.name)
+        self.assertTrue(state_path.exists())
+
+        with self.assertRaises(AuthStateCorrupt) as caught:
+            AuthManager(self.temp.name, now=self.wall, monotonic=self.monotonic)
+        self.assertFalse(state_path.exists())
+        self.assertTrue(caught.exception.quarantine_path.exists())
+
+    def test_device_capacity_configuration_is_bounded_before_state_creation(self):
+        root = Path(self.temp.name) / "excessive-capacity"
+        with self.assertRaisesRegex(ValueError, "bounded"):
+            AuthManager(root, max_devices=1025)
+        self.assertFalse(root.exists())
+
+    def test_persisted_device_count_is_bounded(self):
+        self.pair_device()
+        state_path = Path(self.temp.name) / "auth.json"
+        state = json.loads(state_path.read_text())
+        record = next(iter(state["devices"].values()))
+        state["devices"] = {
+            f"{index:032x}": dict(record)
+            for index in range(1025)
+        }
+        state_path.write_text(json.dumps(state))
+
+        with self.assertRaises(AuthStateCorrupt):
+            AuthManager(self.temp.name, now=self.wall, monotonic=self.monotonic)
+        self.assertFalse(state_path.exists())
+
     @unittest.skipIf(os.name == "nt", "POSIX mode semantics")
     def test_existing_state_permissions_are_repaired(self):
         state_path = Path(self.temp.name) / "auth.json"

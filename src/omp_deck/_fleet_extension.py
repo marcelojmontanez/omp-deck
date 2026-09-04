@@ -17,6 +17,13 @@ def project_extension_event(session: dict[str, Any], session_id: str, kind: str,
             session["state"] = "working"
         elif lifecycle_state in {"agent_end", "session_shutdown"}:
             session["state"] = "idle" if lifecycle_state == "agent_end" else "disconnected"
+    elif kind == "degraded":
+        reason = payload.get("reason")
+        if not isinstance(reason, str) or not reason:
+            reason = "extension event degraded"
+        session["state"] = "degraded"
+        session["transport"]["status"] = "degraded"
+        session["transport"]["reason"] = reason[:256]
     elif kind == "todo" and isinstance(payload.get("todos"), Sequence):
         session["todos"] = bounded_collection([
             item for item in payload["todos"] if isinstance(item, Mapping)

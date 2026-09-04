@@ -17,3 +17,4 @@
 - Harden setup rollback, malformed-config purge, RPC and Collab request idempotency, concurrent cursor persistence, transport shutdown/reconnect ownership, cleared browser queues, multi-select Ask responses, and oversized plugin-event sequencing.
 - Keep rollback plugin backups alive while linked, retain failed-start transports until cleanup succeeds, and report unjoinable Collab reader shutdowns.
 - Reject malformed Collab links before reserving durable request IDs.
+- Surface oversized extension events as an explicit degraded transport state.

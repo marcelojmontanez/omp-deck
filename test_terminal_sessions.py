@@ -269,6 +269,26 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.assertEqual(self.model.get(session_id)["id"], session_id)
         self.assertEqual(manager.registry.load()[0]["title"], "Renamed")
 
+    def test_extension_degraded_event_is_visible_in_fleet_state(self):
+        manager = self.manager()
+        session_id, _, adapter = self.connect_extension(manager)
+
+        adapter.callback({
+            "sequence": 2,
+            "kind": "degraded",
+            "data": {
+                "droppedKind": "message",
+                "reason": "event exceeds wire limit",
+            },
+        })
+
+        session = self.model.get(session_id)
+        self.assertEqual(session["state"], "degraded")
+        self.assertEqual(session["transport"]["status"], "degraded")
+        self.assertEqual(
+            session["transport"]["reason"], "event exceeds wire limit"
+        )
+
     def test_expired_socket_or_heartbeat_drops_runtime_but_persists_disconnected_session(self):
         manager = self.manager()
         session_id, path, adapter = self.connect_extension(manager)

@@ -166,16 +166,36 @@ class CollabAdapter:
         with self._lock:
             ws, thread = self._ws, self._thread
         if ws is not None:
-            try: ws.close()
-            except Exception: pass
+            try:
+                ws.close()
+            except Exception:
+                pass
         if thread is not None and thread is not threading.current_thread():
             thread.join(WELCOME_TIMEOUT)
+            if thread.is_alive():
+                error = AdapterTimeoutError(
+                    "collaboration reader did not stop", kind="timeout"
+                )
+                with self._lock:
+                    self._status, self._reason = "degraded", str(error)
+                    self._fail_replies(error)
+                self._emit(
+                    "transport",
+                    {"status": "degraded", "reason": str(error)},
+                )
+                raise error
         with self._lock:
-            self._thread = None; self._ws = None
-            self._fail_replies(AdapterDisconnectedError("adapter closed", kind="closed"))
+            self._thread = None
+            self._ws = None
+            self._fail_replies(
+                AdapterDisconnectedError("adapter closed", kind="closed")
+            )
             changed = self._status != "disconnected"
             self._status, self._reason = "disconnected", "closed"
-        if changed: self._emit("transport", {"status": "disconnected", "reason": "closed"})
+        if changed:
+            self._emit(
+                "transport", {"status": "disconnected", "reason": "closed"}
+            )
 
     shutdown = close
 

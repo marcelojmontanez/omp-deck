@@ -179,12 +179,15 @@ class TerminalSessionManager:
     def _rollback_collab(self, session_id: str) -> list[str]:
         errors = []
         with self._lock:
-            runtime = self._runtimes.pop(session_id, None)
+            runtime = self._runtimes.get(session_id)
         if runtime is not None:
             try:
                 runtime.adapter.close()
             except Exception as error:
-                errors.append(f"transport: {error}")
+                return [f"transport: {error}"]
+            with self._lock:
+                if self._runtimes.get(session_id) is runtime:
+                    self._runtimes.pop(session_id)
         try:
             self.credentials.remove(session_id)
         except Exception as error:
@@ -302,11 +305,16 @@ class TerminalSessionManager:
                 snapshot=adapter.snapshot(),
             ):
                 raise TerminalSessionNotConnected(session_id)
-        except Exception:
+        except Exception as error:
+            try:
+                adapter.close()
+            except Exception as close_error:
+                raise RuntimeError(
+                    f"{error}; Collab cleanup failed: {close_error}"
+                ) from error
             with self._lock:
                 if self._runtimes.get(session_id) is runtime:
                     self._runtimes.pop(session_id, None)
-            adapter.close()
             raise
 
     def _watch_extensions(self) -> None:
@@ -429,11 +437,20 @@ class TerminalSessionManager:
                 registration=registration, snapshot=snapshot,
             ):
                 raise TerminalSessionNotConnected(session_id)
-        except Exception:
+        except Exception as error:
+            try:
+                adapter.close()
+            except Exception as close_error:
+                self.model.set_transport(
+                    session_id, instance_id=connection_id, generation=generation,
+                    status="degraded", reason=f"Extension cleanup failed: {close_error}",
+                )
+                raise RuntimeError(
+                    f"{error}; Extension cleanup failed: {close_error}"
+                ) from error
             with self._lock:
                 if self._runtimes.get(session_id) is runtime:
                     self._runtimes.pop(session_id, None)
-            adapter.close()
             self.model.set_transport(
                 session_id, instance_id=None, generation=generation,
                 status="disconnected", reason="Extension connection unavailable",

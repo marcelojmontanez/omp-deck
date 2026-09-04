@@ -227,6 +227,36 @@ class CollabAdapterTests(unittest.TestCase):
         adapter.start(); self.assertEqual(adapter.transport_status, "connected"); adapter.close()
         self.assertTrue(seen)
 
+    def test_close_retains_unjoinable_reader_and_reports_failure(self):
+        class StuckThread:
+            def __init__(self):
+                self.alive = True
+                self.joined = False
+
+            def join(self, timeout):
+                self.joined = True
+
+            def is_alive(self):
+                return self.alive
+
+        adapter, sock = self.make([])
+        thread = StuckThread()
+        adapter._thread = thread
+        adapter._ws = sock
+        adapter._status = "connected"
+
+        with self.assertRaisesRegex(AdapterError, "reader did not stop"):
+            adapter.close()
+
+        self.assertTrue(thread.joined)
+        self.assertIs(adapter._thread, thread)
+        self.assertEqual(adapter.transport_status, "degraded")
+
+        thread.alive = False
+        adapter.close()
+        self.assertIsNone(adapter._thread)
+        self.assertEqual(adapter.transport_status, "disconnected")
+
     def test_corrupt_crypto_is_fatal_and_redacted(self):
         corrupt = pack_envelope(1, b"0" * 28)
         adapter, _ = self.make([corrupt])

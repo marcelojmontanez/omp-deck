@@ -69,6 +69,7 @@ class CollabSocket:
 class FakeCollabAdapter:
     instances = []
     fail_start = False
+    fail_close = False
 
     def __init__(self, link, name, on_event=None):
         self._link_for_assertion = link
@@ -101,12 +102,16 @@ class FakeCollabAdapter:
         return True
 
     def close(self):
-        self.closed = True
         self.calls.append(("close",))
+        if type(self).fail_close:
+            raise RuntimeError("close failed")
+        self.closed = True
 
 
 class FakeExtensionAdapter:
     instances = []
+    fail_start = False
+    fail_close = False
     capabilities = {
         "sendMessage": True, "followUp": True, "interrupt": True, "shutdown": True,
         "todos": True, "subagents": True, "answerUiRequest": False,
@@ -133,6 +138,8 @@ class FakeExtensionAdapter:
 
     def start(self):
         self.calls.append(("start",))
+        if type(self).fail_start:
+            raise RuntimeError("connect failed")
         return self.registration
 
     def snapshot(self):
@@ -148,8 +155,10 @@ class FakeExtensionAdapter:
         self.calls.append(("shutdown_session",))
 
     def close(self):
-        self.closed = True
         self.calls.append(("close",))
+        if type(self).fail_close:
+            raise RuntimeError("close failed")
+        self.closed = True
 
 
 class TerminalSessionManagerTests(unittest.TestCase):
@@ -170,7 +179,10 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.managers = []
         FakeCollabAdapter.instances.clear()
         FakeCollabAdapter.fail_start = False
+        FakeCollabAdapter.fail_close = False
         FakeExtensionAdapter.instances.clear()
+        FakeExtensionAdapter.fail_start = False
+        FakeExtensionAdapter.fail_close = False
 
     def tearDown(self):
         for manager in reversed(self.managers):
@@ -277,6 +289,25 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.assertTrue(current.closed)
         self.assertEqual(self.model.get(session_id)["id"], session_id)
 
+    def test_extension_failed_cleanup_retains_runtime_until_remove_succeeds(self):
+        manager = self.manager()
+        path, _, metadata = self.unix_registration(connection="failed")
+        FakeExtensionAdapter.fail_start = True
+        FakeExtensionAdapter.fail_close = True
+
+        with patch("omp_deck.terminal_sessions.ExtensionAdapter", FakeExtensionAdapter):
+            manager._reconcile_extensions({"omp-extension": (path, metadata)})
+
+        record = manager.registry.load()[0]
+        self.assertIsNotNone(manager._runtime_or_none(record["id"]))
+        transport = self.model.get(record["id"])["transport"]
+        self.assertEqual(transport["status"], "degraded")
+        self.assertIn("cleanup failed", transport["reason"])
+
+        FakeExtensionAdapter.fail_close = False
+        self.assertTrue(manager.remove(record["id"]))
+        self.assertIsNone(manager._runtime_or_none(record["id"]))
+
     def test_collab_credential_is_secret_commands_route_and_remove_forgets_everything(self):
         secret = collab_link()
         manager = self.manager()
@@ -330,6 +361,25 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.assertEqual(manager.credentials.list(), [])
         self.assertEqual(manager.registry.load(), [])
         self.assertTrue(FakeCollabAdapter.instances[-1].closed)
+    def test_collab_failed_cleanup_retains_every_resource_until_remove_succeeds(self):
+        manager = self.manager()
+        FakeCollabAdapter.fail_start = True
+        FakeCollabAdapter.fail_close = True
+
+        with patch("omp_deck.terminal_sessions.CollabAdapter", FakeCollabAdapter):
+            with self.assertRaisesRegex(CollabImportError, "rollback failed"):
+                manager.add_collab(collab_link())
+
+        record = manager.registry.load()[0]
+        self.assertIsNotNone(manager._runtime_or_none(record["id"]))
+        self.assertIsNotNone(manager.credentials.get_link(record["id"]))
+        self.assertEqual(self.model.get(record["id"])["id"], record["id"])
+
+        FakeCollabAdapter.fail_close = False
+        self.assertTrue(manager.remove(record["id"]))
+        self.assertIsNone(manager._runtime_or_none(record["id"]))
+        self.assertEqual(manager.registry.load(), [])
+
 
     def test_collab_import_request_is_durable_and_does_not_store_secret(self):
         manager = self.manager()

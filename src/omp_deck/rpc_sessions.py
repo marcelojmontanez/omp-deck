@@ -345,15 +345,15 @@ class RpcSessionManager:
                 generation=runtime.generation,
                 snapshot=snapshot,
             )
-        except Exception:
-            with self._lock:
-                if self._runtimes.get(runtime.session_id) is runtime:
-                    self._runtimes.pop(runtime.session_id)
+        except Exception as error:
+            cleanup_error = None
             if adapter is not None:
-                try:
-                    adapter.close()
-                except Exception:
-                    pass
+                try: adapter.close()
+                except Exception as close_error: cleanup_error = close_error
+            if cleanup_error is not None:
+                raise RuntimeError(f"{error}; RPC cleanup failed: {cleanup_error}") from error
+            with self._lock:
+                if self._runtimes.get(runtime.session_id) is runtime: self._runtimes.pop(runtime.session_id)
             raise
 
     def _persist_rpc_identity(

@@ -180,8 +180,6 @@ def setup(*, tailscale=False):
                 restore_plugin(settings, plugin_backup)
             except Exception as cleanup_error:
                 rollback_errors.append(f"plugin: {cleanup_error}")
-            finally:
-                discard_plugin_backup(plugin_backup)
         if service_touched:
             try:
                 restore_service_state(service_snapshot)

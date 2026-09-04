@@ -632,6 +632,19 @@ class TestRpcSessionManager(unittest.TestCase):
         self.assertEqual(transport["status"], "disconnected")
         self.assertEqual(transport["reason"], "launch failed: launch failed")
 
+    def test_failed_launch_cleanup_retains_runtime_until_stop_succeeds(self):
+        FakeRpcClient.fail_start = True
+        FakeRpcClient.fail_stop = True
+
+        with self.assertRaisesRegex(RuntimeError, "RPC cleanup failed"):
+            self.launch()
+
+        self.assertIsNotNone(self.manager._runtime_or_none("deck-stable-id"))
+        FakeRpcClient.fail_stop = False
+        self.manager.close()
+        self.assertIsNone(self.manager._runtime_or_none("deck-stable-id"))
+
+
 
 if __name__ == "__main__":
     unittest.main()

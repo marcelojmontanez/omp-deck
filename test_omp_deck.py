@@ -151,34 +151,43 @@ class CommandTests(unittest.TestCase):
         restore_plugin.assert_not_called()
         install_plugin.assert_not_called()
 
-    def test_setup_restores_existing_plugin_and_service_after_late_failure(self):
-        settings = SimpleNamespace(omp_bin="omp", state_root=Path("/tmp/state"))
-        manager = SimpleNamespace(
-            begin_pairing=lambda: SimpleNamespace(token="secret", expires_at=1)
-        )
-        service_snapshot = object()
-        plugin_backup = Path("/tmp/state/setup-rollback/plugin")
-        with (
-            patch.object(cli, "load_settings", return_value=settings),
-            patch.object(cli, "config_path", return_value=Path("/tmp/config.json")),
-            patch.object(cli.shutil, "which", return_value="/usr/bin/tool"),
-            patch.object(cli, "plugin_installed", return_value=True),
-            patch.object(cli, "capture_service_state", return_value=service_snapshot),
-            patch.object(cli, "backup_plugin", return_value=plugin_backup),
-            patch.object(cli, "AuthManager", return_value=manager),
-            patch.object(cli, "install_plugin"),
-            patch.object(cli, "install_service"),
-            patch.object(cli, "check_health", side_effect=[None, RuntimeError("late failure")]),
-            patch.object(cli, "restore_service_state") as restore_service,
-            patch.object(cli, "restore_plugin") as restore_plugin,
-            patch.object(cli, "discard_plugin_backup") as discard_plugin_backup,
-        ):
-            with self.assertRaisesRegex(RuntimeError, "late failure"):
-                cli.setup()
+    def test_setup_keeps_restored_plugin_backup_after_late_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = SimpleNamespace(omp_bin="omp", state_root=root / "state")
+            manager = SimpleNamespace(
+                begin_pairing=lambda: SimpleNamespace(token="secret", expires_at=1)
+            )
+            service_snapshot = object()
+            plugin_backup = settings.state_root / "setup-rollback/plugin"
+            plugin_backup.mkdir(parents=True)
+            (plugin_backup / "omp-deck.ts").write_text("restored\n")
+            installed_plugin = root / "omp-plugin"
 
-        restore_plugin.assert_called_once_with(settings, plugin_backup)
-        restore_service.assert_called_once_with(service_snapshot)
-        discard_plugin_backup.assert_called_once_with(plugin_backup)
+            def restore_plugin(_settings, backup):
+                installed_plugin.symlink_to(backup, target_is_directory=True)
+
+            with (
+                patch.object(cli, "load_settings", return_value=settings),
+                patch.object(cli, "config_path", return_value=root / "config.json"),
+                patch.object(cli.shutil, "which", return_value="/usr/bin/tool"),
+                patch.object(cli, "plugin_installed", return_value=True),
+                patch.object(cli, "capture_service_state", return_value=service_snapshot),
+                patch.object(cli, "backup_plugin", return_value=plugin_backup),
+                patch.object(cli, "AuthManager", return_value=manager),
+                patch.object(cli, "install_plugin"),
+                patch.object(cli, "install_service"),
+                patch.object(cli, "check_health", side_effect=[None, RuntimeError("late failure")]),
+                patch.object(cli, "restore_service_state") as restore_service,
+                patch.object(cli, "restore_plugin", side_effect=restore_plugin),
+                patch.object(cli, "discard_plugin_backup", wraps=cli.discard_plugin_backup) as discard_plugin_backup,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "late failure"):
+                    cli.setup()
+
+            restore_service.assert_called_once_with(service_snapshot)
+            discard_plugin_backup.assert_not_called()
+            self.assertEqual((installed_plugin / "omp-deck.ts").read_text(), "restored\n")
 
     def test_setup_refuses_to_replace_unsnapshottable_existing_plugin(self):
         settings = SimpleNamespace(omp_bin="omp", state_root=Path("/tmp/state"))

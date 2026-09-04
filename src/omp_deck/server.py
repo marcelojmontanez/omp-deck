@@ -14,6 +14,7 @@ from .auth import (
     PairingRateLimited,
 )
 from .attachments import detect_image_mime, read_blob
+from ._sse import send_stream
 from ._terminal_commands import TerminalCommandConflict
 from .projects import list_launchable_projects, resolve_project_path
 from .fleet_model import FleetModel
@@ -219,76 +220,6 @@ class Handler(SimpleHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
-    def send_sse(self):
-        raw_cursor = self.headers.get("Last-Event-ID")
-        if raw_cursor is None or raw_cursor == "":
-            cursor = _fleet_model.journal.latest_id
-            initial = [(
-                cursor,
-                {
-                    "id": cursor,
-                    "type": "snapshot",
-                    "payload": _fleet_model.snapshot(),
-                },
-            )]
-        elif not raw_cursor.isascii() or not raw_cursor.isdecimal() or len(raw_cursor) > 20:
-            self.reply(400, {"error": "invalid Last-Event-ID"})
-            return
-        else:
-            cursor = int(raw_cursor)
-            try:
-                if cursor > _fleet_model.journal.latest_id:
-                    raise ReplayUnavailableError
-                initial = [
-                    (event.id, event.public())
-                    for event in _fleet_model.journal.replay_after(cursor)
-                ]
-            except ReplayUnavailableError:
-                cursor = _fleet_model.journal.latest_id
-                initial = [(
-                    cursor,
-                    {
-                        "id": cursor,
-                        "type": "snapshot",
-                        "payload": _fleet_model.snapshot(),
-                    },
-                )]
-        try:
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self.send_header("Connection", "keep-alive")
-            self.send_header("X-Accel-Buffering", "no")
-            self.end_headers()
-            self.connection.settimeout(20)
-            for event_id, payload in initial:
-                self._write_sse_event(event_id, payload)
-                cursor = event_id
-            while True:
-                try:
-                    events = _fleet_model.journal.wait_after(cursor, 15)
-                except ReplayUnavailableError:
-                    cursor = _fleet_model.journal.latest_id
-                    self._write_sse_event(cursor, {
-                        "id": cursor,
-                        "type": "snapshot",
-                        "payload": _fleet_model.snapshot(),
-                    })
-                    continue
-                if not events:
-                    self.wfile.write(b": keepalive\n\n")
-                    self.wfile.flush()
-                    continue
-                for event in events:
-                    self._write_sse_event(event.id, event.public())
-                    cursor = event.id
-        except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
-            return
-
-    def _write_sse_event(self, event_id, payload):
-        data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-        frame = f"id: {event_id}\nevent: fleet\ndata: {data}\n\n".encode("utf-8")
-        self.wfile.write(frame)
-        self.wfile.flush()
 
     def reply_blob(self, digest):
         blob = read_blob(digest)
@@ -362,7 +293,12 @@ class Handler(SimpleHTTPRequestHandler):
             self.reply_blob(request_path.rsplit("/", 1)[-1])
             return
         if request_path == "/api/events":
-            self.send_sse()
+            send_stream(
+                self,
+                _fleet_model,
+                auth_manager().authenticate,
+                cookie_credential(self.headers),
+            )
             return
         if request_path == "/api/sessions":
             try:

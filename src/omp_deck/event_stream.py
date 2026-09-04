@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import re
+import secrets
 import threading
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping
+
+_STREAM_CURSOR = re.compile(r"([a-f0-9]{32}):([0-9]{1,20})")
 
 
 class ReplayUnavailableError(LookupError):
@@ -53,12 +57,35 @@ class EventJournal:
         self._events: deque[tuple[FleetEvent, int]] = deque()
         self._bytes = 0
         self._next_id = 1
+        self.stream_id = secrets.token_hex(16)
         self._condition = threading.Condition()
 
     @property
     def latest_id(self) -> int:
         with self._condition:
             return self._next_id - 1
+
+    def cursor(self, event_id: int) -> str:
+        return f"{self.stream_id}:{event_id}"
+
+    def resume(self, raw_cursor: str) -> tuple[int, tuple[FleetEvent, ...] | None]:
+        """Resolve a process-scoped cursor, or request an authoritative snapshot."""
+        match = _STREAM_CURSOR.fullmatch(raw_cursor)
+        legacy = raw_cursor.isascii() and raw_cursor.isdecimal() and len(raw_cursor) <= 20
+        if match is None and not legacy:
+            raise ValueError("invalid event cursor")
+        with self._condition:
+            latest = self._next_id - 1
+            if match is None or match.group(1) != self.stream_id:
+                return latest, None
+            event_id = int(match.group(2))
+            try:
+                self._validate_cursor_locked(event_id)
+            except ReplayUnavailableError:
+                return latest, None
+            return event_id, tuple(
+                event for event, _ in self._events if event.id > event_id
+            )
 
     def publish(
         self,

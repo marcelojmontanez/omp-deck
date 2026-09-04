@@ -30,3 +30,4 @@
 - Reserve in-flight attachment count and bytes so concurrent selections cannot bypass browser limits.
 - Bound authentication state size and device cardinality and reject malformed persisted credential shapes.
 - Make authenticated blob lookup constant-time over supported image names and reject writable roots or candidates.
+- Scope event replay cursors to one server process, replace failed browser streams, recover event gaps immediately, and close streams after credential revocation.

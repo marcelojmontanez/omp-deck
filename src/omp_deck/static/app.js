@@ -19,6 +19,7 @@ const state = {
   eventSource: null,
   recoveryTimer: null,
   eventRefreshTimer: null,
+  eventReconnectTimer: null,
 };
 
 const el = Object.fromEntries([
@@ -229,6 +230,8 @@ function showAuthentication() {
   state.recoveryTimer = null;
   if (state.eventRefreshTimer) clearTimeout(state.eventRefreshTimer);
   state.eventRefreshTimer = null;
+  if (state.eventReconnectTimer) clearTimeout(state.eventReconnectTimer);
+  state.eventReconnectTimer = null;
   appRoot.hidden = true;
   authScreen.hidden = false;
   pairToken.value = '';

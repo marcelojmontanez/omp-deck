@@ -14,9 +14,10 @@ from omp_deck.event_stream import EventJournal
 
 class _AuthManager:
     credential = "test-device-credential"
+    revoked = False
 
     def authenticate(self, credential):
-        if credential != self.credential:
+        if credential != self.credential or self.revoked:
             raise AuthenticationFailed("authentication required")
         return SimpleNamespace(device_id="test-device", csrf_token="test-csrf")
 
@@ -27,7 +28,10 @@ class _FleetModel:
         self.snapshot_value = {"sessions": [{"id": "authoritative"}]}
 
     def snapshot(self):
-        return self.snapshot_value
+        return {
+            **self.snapshot_value,
+            "lastEventId": self.journal.latest_id,
+        }
 
 
 class ServerSseBoundaryTests(unittest.TestCase):
@@ -90,6 +94,10 @@ class ServerSseBoundaryTests(unittest.TestCase):
             payload={"number": number},
         )
 
+    def _cursor(self, event_id, *, stream_id=None):
+        identity = stream_id or self.model.journal.stream_id
+        return f"{identity}:{event_id}"
+
     def test_unauthenticated_events_request_is_401(self):
         _, response = self._request(authenticated=False)
         self.assertEqual(response.status, 401)
@@ -105,13 +113,13 @@ class ServerSseBoundaryTests(unittest.TestCase):
         self.assertEqual(response.getheader("Content-Type"), "text/event-stream; charset=utf-8")
         frame = self._read_frame(response)
 
-        self.assertEqual(frame["id"], str(current))
+        self.assertEqual(frame["id"], self._cursor(current))
         with self.assertRaises(socket.timeout):
             response.fp.readline()
         self.assertEqual(frame["event"], "fleet")
         self.assertEqual(
             json.loads(frame["data"]),
-            {"id": current, "type": "snapshot", "payload": self.model.snapshot_value},
+            {"id": current, "type": "snapshot", "payload": self.model.snapshot()},
         )
 
     def test_last_event_id_replays_ordered_missed_events_without_snapshot(self):
@@ -119,11 +127,14 @@ class ServerSseBoundaryTests(unittest.TestCase):
         second = self._publish(2)
         third = self._publish(3)
 
-        _, response = self._request(cursor=first.id)
+        _, response = self._request(cursor=self._cursor(first.id))
         frames = [self._read_frame(response), self._read_frame(response)]
         payloads = [json.loads(frame["data"]) for frame in frames]
 
-        self.assertEqual([int(frame["id"]) for frame in frames], [second.id, third.id])
+        self.assertEqual(
+            [frame["id"] for frame in frames],
+            [self._cursor(second.id), self._cursor(third.id)],
+        )
         self.assertEqual([payload["type"] for payload in payloads], ["change", "change"])
         self.assertNotIn("snapshot", [payload["type"] for payload in payloads])
 
@@ -134,13 +145,13 @@ class ServerSseBoundaryTests(unittest.TestCase):
         self._publish(2)
         current = self._publish(3).id
 
-        _, response = self._request(cursor=0)
+        _, response = self._request(cursor=self._cursor(0))
         frame = self._read_frame(response)
 
-        self.assertEqual(frame["id"], str(current))
+        self.assertEqual(frame["id"], self._cursor(current))
         self.assertEqual(
             json.loads(frame["data"]),
-            {"id": current, "type": "snapshot", "payload": self.model.snapshot_value},
+            {"id": current, "type": "snapshot", "payload": self.model.snapshot()},
         )
 
     def test_invalid_cursor_is_rejected_without_hanging(self):
@@ -154,26 +165,75 @@ class ServerSseBoundaryTests(unittest.TestCase):
     def test_future_cursor_from_previous_server_epoch_receives_snapshot(self):
         current = self._publish(1).id
 
-        _, response = self._request(cursor=current + 20)
+        _, response = self._request(cursor=self._cursor(current + 20))
         frame = self._read_frame(response)
 
         self.assertEqual(response.status, 200)
-        self.assertEqual(frame["id"], str(current))
+        self.assertEqual(frame["id"], self._cursor(current))
         self.assertEqual(
             json.loads(frame["data"]),
-            {"id": current, "type": "snapshot", "payload": self.model.snapshot_value},
+            {"id": current, "type": "snapshot", "payload": self.model.snapshot()},
         )
 
     def test_event_published_after_connection_arrives_live(self):
         _, response = self._request()
         snapshot = self._read_frame(response)
-        self.assertEqual(snapshot["id"], "0")
+        self.assertEqual(snapshot["id"], self._cursor(0))
 
         published = self._publish(1)
         live = self._read_frame(response)
 
-        self.assertEqual(live["id"], str(published.id))
+        self.assertEqual(live["id"], self._cursor(published.id))
         self.assertEqual(json.loads(live["data"])["payload"], {"number": 1})
+
+    def test_previous_server_epoch_receives_authoritative_snapshot(self):
+        current = self._publish(1).id
+
+        _, response = self._request(
+            cursor=self._cursor(0, stream_id="0" * 32),
+        )
+        frame = self._read_frame(response)
+
+        self.assertEqual(frame["id"], self._cursor(current))
+        self.assertEqual(json.loads(frame["data"])["type"], "snapshot")
+
+    def test_snapshot_cursor_matches_changes_published_during_snapshot(self):
+        published = False
+
+        def racing_snapshot():
+            nonlocal published
+            if not published:
+                published = True
+                self._publish(1)
+            return {
+                **self.model.snapshot_value,
+                "lastEventId": self.model.journal.latest_id,
+            }
+
+        with patch.object(self.model, "snapshot", side_effect=racing_snapshot):
+            _, response = self._request()
+            frame = self._read_frame(response)
+
+        self.assertEqual(frame["id"], self._cursor(1))
+        self.assertEqual(json.loads(frame["data"])["payload"]["lastEventId"], 1)
+
+    def test_revoked_live_stream_closes_before_delivering_more_events(self):
+        _, response = self._request()
+        self._read_frame(response)
+        self.auth.revoked = True
+
+        self._publish(1)
+
+        self.assertEqual(response.fp.readline(), b"")
+
+    def test_legacy_numeric_cursor_receives_authoritative_snapshot(self):
+        current = self._publish(1).id
+
+        _, response = self._request(cursor=0)
+        frame = self._read_frame(response)
+
+        self.assertEqual(frame["id"], self._cursor(current))
+        self.assertEqual(json.loads(frame["data"])["type"], "snapshot")
 
     def test_disconnected_stream_does_not_block_server_close(self):
         connection, response = self._request()

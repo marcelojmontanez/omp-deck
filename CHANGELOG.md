@@ -29,3 +29,4 @@
 - Persist removed extension connection tombstones so the same registration stays hidden across service restarts.
 - Reserve in-flight attachment count and bytes so concurrent selections cannot bypass browser limits.
 - Bound authentication state size and device cardinality and reject malformed persisted credential shapes.
+- Make authenticated blob lookup constant-time over supported image names and reject writable roots or candidates.

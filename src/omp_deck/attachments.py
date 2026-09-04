@@ -8,6 +8,7 @@ from pathlib import Path
 BLOB_ROOT = None
 _DIGEST = re.compile(r"[a-f0-9]{64}")
 _MAX_BLOB_BYTES = 16 * 1024 * 1024
+_CANDIDATE_SUFFIXES = ("", ".png", ".jpg", ".jpeg", ".gif", ".webp")
 
 
 def blob_root():
@@ -23,19 +24,18 @@ def read_blob(digest):
     except OSError:
         return None
     try:
-        names = [
-            entry.name
-            for entry in os.scandir(directory_fd)
-            if entry.name == digest or entry.name.startswith(f"{digest}.")
-        ]
-        if not names or len(names) > 16:
+        root_info = os.fstat(directory_fd)
+        if (
+            not stat.S_ISDIR(root_info.st_mode)
+            or root_info.st_uid != os.geteuid()
+            or root_info.st_mode & 0o022
+        ):
             return None
-        for name in sorted(names, key=lambda candidate: (candidate != digest, candidate)):
+        for suffix in _CANDIDATE_SUFFIXES:
+            name = f"{digest}{suffix}"
             result = _read_candidate(directory_fd, name, digest)
             if result is not None:
                 return result
-        return None
-    except OSError:
         return None
     finally:
         os.close(directory_fd)
@@ -50,7 +50,12 @@ def _read_candidate(directory_fd, name, digest):
             dir_fd=directory_fd,
         )
         info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= _MAX_BLOB_BYTES:
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_mode & 0o022
+            or not 0 < info.st_size <= _MAX_BLOB_BYTES
+        ):
             return None
         body = bytearray()
         while len(body) < info.st_size:

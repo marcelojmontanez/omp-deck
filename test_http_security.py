@@ -1,4 +1,5 @@
 import http.client
+import hashlib
 import json
 import tempfile
 import threading
@@ -7,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from omp_deck import server
+from omp_deck import attachments, server
 
 
 class HttpSecurityTests(unittest.TestCase):
@@ -21,6 +22,15 @@ class HttpSecurityTests(unittest.TestCase):
         self.settings_patch = patch.object(server, "SETTINGS", settings)
         self.settings_patch.start()
         self.addCleanup(self.settings_patch.stop)
+        self.blob_root = Path(self.directory.name) / "blobs"
+        self.blob_root.mkdir()
+        self.blob_patch = patch.object(
+            attachments,
+            "BLOB_ROOT",
+            self.blob_root,
+        )
+        self.blob_patch.start()
+        self.addCleanup(self.blob_patch.stop)
         server._auth_manager = None
         self.addCleanup(setattr, server, "_auth_manager", None)
         self.httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
@@ -65,6 +75,36 @@ class HttpSecurityTests(unittest.TestCase):
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
         self.assertEqual(headers["Referrer-Policy"], "no-referrer")
+
+    def test_blob_delivery_requires_authentication_and_is_not_cached(self):
+        body = b"\x89PNG\r\n\x1a\nprivate"
+        digest = hashlib.sha256(body).hexdigest()
+        (self.blob_root / digest).write_bytes(body)
+
+        status, _, payload = self.request("GET", f"/api/blob/{digest}")
+        self.assertEqual(status, 401)
+        self.assertEqual(payload, {"error": "authentication required"})
+
+        cookie, _ = self.pair()
+        connection = http.client.HTTPConnection(
+            "127.0.0.1",
+            self.httpd.server_port,
+        )
+        connection.request(
+            "GET",
+            f"/api/blob/{digest}",
+            headers={"Host": self.host, "Cookie": cookie},
+        )
+        response = connection.getresponse()
+        delivered = response.read()
+        headers = response.headers
+        connection.close()
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(delivered, body)
+        self.assertEqual(headers["Content-Type"], "image/png")
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
 
     def test_pairing_requires_same_origin_and_issues_secure_cookie(self):
         secret = server.auth_manager().begin_pairing()

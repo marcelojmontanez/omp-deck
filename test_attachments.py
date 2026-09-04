@@ -19,9 +19,16 @@ class BlobReaderTests(unittest.TestCase):
         self.digest = hashlib.sha256(self.payload).hexdigest()
 
     def test_reads_one_bounded_regular_blob(self):
-        (self.root / f"{self.digest}.png").write_bytes(self.payload)
+        candidate = self.root / f"{self.digest}.png"
+        candidate.write_bytes(self.payload)
+        with patch.object(
+            attachments.os,
+            "scandir",
+            side_effect=AssertionError("blob lookup must not scan the directory"),
+        ):
+            result = attachments.read_blob(self.digest)
         self.assertEqual(
-            attachments.read_blob(self.digest),
+            result,
             (f"{self.digest}.png", self.payload),
         )
 
@@ -51,9 +58,19 @@ class BlobReaderTests(unittest.TestCase):
         poisoned.write_bytes(b"")
         self.assertIsNone(attachments.read_blob(self.digest))
         poisoned.unlink()
-        oversized = self.root / f"{self.digest}.bin"
+        oversized = self.root / f"{self.digest}.png"
         with oversized.open("wb") as stream:
             stream.truncate(16 * 1024 * 1024 + 1)
+        self.assertIsNone(attachments.read_blob(self.digest))
+
+    def test_rejects_writable_blob_root_and_candidate(self):
+        candidate = self.root / f"{self.digest}.png"
+        candidate.write_bytes(self.payload)
+        candidate.chmod(0o666)
+        self.assertIsNone(attachments.read_blob(self.digest))
+
+        candidate.chmod(0o600)
+        self.root.chmod(0o777)
         self.assertIsNone(attachments.read_blob(self.digest))
 
     def test_image_mime_is_derived_from_file_signature(self):

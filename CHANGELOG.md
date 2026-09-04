@@ -21,3 +21,4 @@
 - Bound RPC refresh shutdown and isolate terminal and RPC cleanup failures.
 - Reuse browser request IDs when Ask responses or session controls have ambiguous outcomes.
 - Keep removed disconnected extension registrations hidden until their connection changes.
+- Allow strictly named private Deck quarantine and interrupted-write artifacts during migration.

@@ -102,6 +102,40 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(apply_migration(self.settings)["sessionsImported"], 0)
 
 
+    def test_apply_accepts_private_deck_recovery_artifacts(self):
+        names = (
+            "auth.json.corrupt-1-deadbeef",
+            "registry.json.corrupt.20260904120000123456",
+            "registry.json.corrupt.20260904120000123456.1",
+            "collab.json.corrupt.20260904120000123456",
+            "cursors.json.corrupt-20260904T120000123456Z",
+            ".auth.json.deadbeefdeadbeef.tmp",
+            ".registry.json." + "a" * 32 + ".tmp",
+            ".requests.json." + "b" * 32 + ".tmp",
+            ".collab.json." + "c" * 32 + ".tmp",
+            ".cursors.json." + "d" * 32 + ".tmp",
+        )
+        for name in names:
+            artifact = self.state / name
+            artifact.write_text("recovery artifact", encoding="utf-8")
+            artifact.chmod(0o600)
+
+        result = apply_migration(self.settings)
+
+        self.assertEqual(result["sessionsImported"], 0)
+        self.assertTrue((self.state / ".omp-deck-owned").is_file())
+
+    def test_apply_rejects_permissive_recovery_artifact(self):
+        artifact = self.state / "auth.json.corrupt-1-deadbeef"
+        artifact.write_text("recovery artifact", encoding="utf-8")
+        artifact.chmod(0o644)
+
+        with self.assertRaisesRegex(RuntimeError, "unknown entries"):
+            apply_migration(self.settings)
+
+        self.assertFalse((self.state / ".omp-deck-owned").exists())
+
+
     def test_apply_refuses_to_claim_unknown_legacy_state(self):
         (self.state / "unrelated-private-data").write_text("do not delete")
 

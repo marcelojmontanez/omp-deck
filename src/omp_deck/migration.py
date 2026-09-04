@@ -14,6 +14,15 @@ from .registry_store import RegistryStore
 _LEGACY_METADATA = re.compile(r"[0-9a-f-]{36}\.\d+\.[^.]+\.sock\.json")
 _MAX_METADATA_BYTES = 64 * 1024
 _MAX_CURSOR_BYTES = 1024 * 1024
+_RECOVERY_FILE = re.compile(
+    r"(?:"
+    r"auth\.json\.corrupt-\d+-[0-9a-f]{8}|"
+    r"(?:registry|collab)\.json\.corrupt\.(?:\d+|unknown)(?:\.\d+)?|"
+    r"cursors\.json\.corrupt-\d{8}T\d{12}Z|"
+    r"\.auth\.json\.[0-9a-f]{16}\.tmp|"
+    r"\.(?:registry|requests|collab|cursors)\.json\.[0-9a-f]{32}\.tmp"
+    r")"
+)
 
 
 def migration_plan(settings) -> dict[str, int | bool]:
@@ -195,7 +204,13 @@ def _validate_adoptable_state_root(settings) -> None:
                 if directory == root:
                     if entry.is_dir(follow_symlinks=False) and entry.name in allowed_directories:
                         pending.append(path)
-                    elif entry.is_file(follow_symlinks=False) and entry.name in allowed_files:
+                    elif entry.is_file(follow_symlinks=False) and (
+                        entry.name in allowed_files
+                        or (
+                            _RECOVERY_FILE.fullmatch(entry.name)
+                            and _owned_file_safe(path)
+                        )
+                    ):
                         continue
                     else:
                         raise RuntimeError("legacy state root contains unknown entries")

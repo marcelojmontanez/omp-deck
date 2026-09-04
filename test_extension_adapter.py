@@ -336,7 +336,7 @@ class ExtensionAdapterTests(unittest.TestCase):
         peer.close()
 
 
-    def test_event_queue_is_bounded_and_close_joins_non_daemon_reader(self):
+    def test_event_queue_is_bounded_and_close_joins_supervised_reader(self):
         peer = self.make_peer()
         adapter = self.make_adapter(peer, event_limit=2)
         adapter.start()
@@ -347,7 +347,7 @@ class ExtensionAdapterTests(unittest.TestCase):
             time.sleep(0.005)
         adapter.close()
         self.assertIsNotNone(adapter._reader)
-        self.assertFalse(adapter._reader.daemon)
+        self.assertTrue(adapter._reader.daemon)
         self.assertFalse(adapter._reader.is_alive())
         self.assertEqual([item["sequence"] for item in adapter.drain_events()], [2, 3])
         peer.close()

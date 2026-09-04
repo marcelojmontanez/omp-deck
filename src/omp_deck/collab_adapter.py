@@ -152,7 +152,7 @@ class CollabAdapter:
             if self._thread is not None:
                 raise AdapterError("adapter is already started", kind="lifecycle")
             self._stopping.clear(); self._ready.clear(); self._fatal = None
-            self._thread = threading.Thread(target=self._run, name="omp-collab-reader", daemon=False)
+            self._thread = threading.Thread(target=self._run, name="omp-collab-reader", daemon=True)
             self._thread.start()
         if not self._ready.wait(WELCOME_TIMEOUT):
             self.close()

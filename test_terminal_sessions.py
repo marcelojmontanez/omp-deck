@@ -613,6 +613,23 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.assertEqual(self.model.get(session_id)["state"], "disconnected")
         self.managers.remove(manager)
 
+    def test_close_reports_failed_adapter_and_retains_runtime(self):
+        manager = self.manager()
+        session_id, _, _ = self.connect_extension(manager)
+        FakeExtensionAdapter.fail_close = True
+        try:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "terminal session shutdown failed.*close failed",
+            ):
+                manager.close(timeout=0.2)
+            self.assertIsNotNone(manager._runtime_or_none(session_id))
+        finally:
+            FakeExtensionAdapter.fail_close = False
+        manager.close()
+        self.assertIsNone(manager._runtime_or_none(session_id))
+        self.managers.remove(manager)
+
 
 if __name__ == "__main__":
     unittest.main()

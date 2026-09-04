@@ -8,6 +8,7 @@ from typing import Any, Mapping
 
 from omp_rpc import RpcClient
 
+from ._shutdown import close_rpc_manager
 from . import _rpc_commands
 from .fleet_model import FleetModel
 from .projects import resolve_project_path
@@ -264,28 +265,17 @@ class RpcSessionManager:
                 reason="shut down",
             )
 
-    def close(self) -> None:
+    def close(self, timeout: float = 5.0) -> None:
         with self._lock:
             self._closed = True
             runtimes = tuple(self._runtimes.values())
-        for runtime in runtimes:
-            with self._operation_lock(runtime.session_id):
-                try:
-                    if runtime.adapter is not None:
-                        runtime.adapter.close()
-                except Exception as error:
-                    self.model.set_transport(
-                        runtime.session_id,
-                        instance_id=runtime.instance_id,
-                        generation=runtime.generation,
-                        status="disconnected",
-                        reason=f"close failed: {error}",
-                    )
-                    continue
-                with self._lock:
-                    if self._runtimes.get(runtime.session_id) is runtime:
-                        self._runtimes.pop(runtime.session_id)
-        self._refreshes.close()
+        close_rpc_manager(
+            self,
+            runtimes,
+            self._refreshes,
+            timeout,
+            self._operation_lock,
+        )
 
     def _connect(self, record: Mapping[str, Any], *, resume: str | None) -> None:
         runtime = _Runtime(

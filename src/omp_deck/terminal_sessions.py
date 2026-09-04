@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from . import _terminal_commands
+from ._shutdown import close_terminal_manager
 from ._collab_imports import CollabImportCoordinator
 
 from ._terminal_discovery import discover_extension_candidates, terminal_id as _terminal_id
@@ -113,42 +114,24 @@ class TerminalSessionManager:
                 self._watcher = threading.Thread(
                     target=self._watch_extensions,
                     name="omp-deck-extension-discovery",
-                    daemon=False,
+                    daemon=True,
                 )
                 self._watcher.start()
         return failures
 
-    def close(self) -> None:
+    def close(self, timeout: float = 5.0) -> None:
         self._stop.set()
         with self._lock:
             watcher = self._watcher
             self._watcher = None
             runtimes = tuple(self._runtimes.values())
-        if watcher is not None and watcher is not threading.current_thread():
-            watcher.join(max(5.0, self.discovery_interval * 2))
-        for runtime in runtimes:
-            with self._commands.lock(runtime.session_id):
-                try:
-                    runtime.adapter.close()
-                except Exception as error:
-                    self.model.set_transport(
-                        runtime.session_id,
-                        instance_id=runtime.instance_id,
-                        generation=runtime.generation,
-                        status="disconnected",
-                        reason=f"service stop failed: {error}",
-                    )
-                    continue
-                with self._lock:
-                    if self._runtimes.get(runtime.session_id) is runtime:
-                        self._runtimes.pop(runtime.session_id)
-                self.model.set_transport(
-                    runtime.session_id,
-                    instance_id=None,
-                    generation=runtime.generation,
-                    status="disconnected",
-                    reason="service stopped",
-                )
+        close_terminal_manager(
+            self,
+            runtimes,
+            watcher,
+            timeout,
+            self._commands.lock,
+        )
 
     def add_collab_request(
         self,

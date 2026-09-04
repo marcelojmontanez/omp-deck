@@ -182,7 +182,7 @@ class ExtensionAdapter:
             self._apply_event(snapshot_frame)
             self._last_heartbeat = self._clock()
             sock.settimeout(min(1.0, self._heartbeat_timeout / 4))
-            reader = threading.Thread(target=self._reader_loop, name="omp-deck-extension", daemon=False)
+            reader = threading.Thread(target=self._reader_loop, name="omp-deck-extension", daemon=True)
             self._reader = reader
             reader.start()
             return registration

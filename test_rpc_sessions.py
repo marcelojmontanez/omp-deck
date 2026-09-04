@@ -295,6 +295,49 @@ class TestRpcSessionManager(unittest.TestCase):
         self.assertEqual(self.model.get(session_id)["transport"]["status"], "disconnected")
         self.assertEqual(self.model.get(session_id)["transport"]["reason"], "closed")
 
+    def test_close_reports_failed_transport_and_retains_runtime(self):
+        session_id = self.launch()["id"]
+        FakeRpcClient.fail_stop = True
+        try:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "RPC session shutdown failed.*stop failed",
+            ):
+                self.manager.close(timeout=0.2)
+            self.assertIsNotNone(self.manager._runtime_or_none(session_id))
+        finally:
+            FakeRpcClient.fail_stop = False
+        self.manager.close()
+        self.assertIsNone(self.manager._runtime_or_none(session_id))
+
+    def test_close_is_bounded_when_session_operation_does_not_finish(self):
+        session_id = self.launch()["id"]
+        entered = Event()
+        release = Event()
+
+        def hold_operation():
+            with self.manager._operation_lock(session_id):
+                entered.set()
+                release.wait()
+
+        worker = Thread(target=hold_operation, daemon=True)
+        worker.start()
+        self.assertTrue(entered.wait(timeout=1))
+        started = time.monotonic()
+        try:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "session did not become idle",
+            ):
+                self.manager.close(timeout=0.01)
+            self.assertLess(time.monotonic() - started, 0.2)
+            self.assertIsNotNone(self.manager._runtime_or_none(session_id))
+        finally:
+            release.set()
+            worker.join(timeout=1)
+        self.manager.close()
+
+
     def test_startup_recovery_resumes_official_id_in_original_project(self):
         original = self.launch()
         self.manager.close()

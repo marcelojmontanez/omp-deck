@@ -24,3 +24,4 @@
 - Allow strictly named private Deck quarantine and interrupted-write artifacts during migration.
 - Abort and safely discard in-flight attachment reads when local browser data is cleared.
 - Keep rollback plugin recovery sources outside service-owned roots.
+- Bound manager shutdown waits, report adapter failures, and make supervised transport readers non-blocking at process exit.

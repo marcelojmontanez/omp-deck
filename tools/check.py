@@ -94,7 +94,7 @@ def main():
     ]
     checks = [
         [sys.executable, "-m", "py_compile", *python_sources],
-        [sys.executable, "-m", "unittest", "discover"],
+        [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", "."],
         [sys.executable, "tools/metrics.py"],
     ]
     for command in checks:

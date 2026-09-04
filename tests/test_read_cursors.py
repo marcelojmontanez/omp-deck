@@ -136,7 +136,7 @@ class CursorStoreTests(unittest.TestCase):
             environment = {
                 **os.environ,
                 "OMP_DECK_CONFIG": str(config),
-                "PYTHONPATH": str(Path(__file__).parent / "src"),
+                "PYTHONPATH": str(Path(__file__).resolve().parent.parent / "src"),
             }
 
             result = subprocess.run(

@@ -8,7 +8,7 @@ import net from 'node:net';
 import test from 'node:test';
 import puppeteer from 'puppeteer';
 
-const ROOT = path.dirname(new URL(import.meta.url).pathname);
+const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const PYTHON = process.env.PYTHON || (
   existsSync(path.join(ROOT, '.venv', 'bin', 'python'))
     ? path.join(ROOT, '.venv', 'bin', 'python')

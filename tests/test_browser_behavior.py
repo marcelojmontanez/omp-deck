@@ -6,8 +6,9 @@ import subprocess
 import unittest
 
 
-ROOT = Path(__file__).resolve().parent
-NODE_TEST = ROOT / "browser_behavior_test.mjs"
+TEST_ROOT = Path(__file__).resolve().parent
+ROOT = TEST_ROOT.parent
+NODE_TEST = TEST_ROOT / "browser_behavior_test.mjs"
 
 
 class BrowserBehaviorTests(unittest.TestCase):

@@ -8,7 +8,7 @@ import test from 'node:test';
 import {pathToFileURL} from 'node:url';
 
 const PLUGIN = pathToFileURL(
-  path.join(import.meta.dirname, 'src/omp_deck/plugin/omp-deck.ts'),
+  path.join(import.meta.dirname, '../src/omp_deck/plugin/omp-deck.ts'),
 );
 
 async function connect(socketPath) {

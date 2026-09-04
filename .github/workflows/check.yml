@@ -94,5 +94,5 @@ jobs:
       - run: npm ci
       - run: python3 -m pip install .
       - run: npx puppeteer browsers install chrome
-      - run: node --test --test-concurrency=1 browser_behavior_test.mjs
+      - run: node --test --test-concurrency=1 tests/browser_behavior_test.mjs
       - run: npm run test:browser

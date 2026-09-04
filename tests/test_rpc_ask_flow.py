@@ -10,7 +10,7 @@ from omp_rpc import RpcClient
 from omp_deck.rpc_adapter import SessionAdapter
 
 
-FIXTURE = Path(__file__).parent / "test_fixtures" / "fake_rpc_server.py"
+FIXTURE = Path(__file__).parent / "fixtures" / "fake_rpc_server.py"
 
 
 class RpcAskFlowTests(unittest.TestCase):

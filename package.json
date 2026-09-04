@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test:browser": "node --test --test-concurrency=1 browser_e2e_test.mjs"
+    "test:browser": "node --test --test-concurrency=1 tests/browser_e2e_test.mjs"
   },
   "devDependencies": {
     "puppeteer": "25.10.0"

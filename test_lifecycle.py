@@ -385,10 +385,8 @@ class LifecycleTests(unittest.TestCase):
             plugin.mkdir()
             (plugin / "package.json").write_text('{"name":"omp-deck","version":"0.0.9"}')
             (plugin / "omp-deck.ts").write_text("export default function old() {}\n")
-            settings = SimpleNamespace(
-                omp_bin="/usr/bin/omp",
-                state_root=root / "state",
-            )
+            settings = self.settings(root / "state" / "omp-deck")
+            config = root / "config" / "omp-deck" / "config.json"
             runner = FakeRunner([
                 SimpleNamespace(
                     returncode=0,
@@ -401,9 +399,24 @@ class LifecycleTests(unittest.TestCase):
                 )
             ])
 
-            backup = lifecycle.backup_plugin(settings, runner=runner)
-            lifecycle.restore_plugin(settings, backup, runner=runner)
+            with patch.dict(os.environ, self.environment(root), clear=False):
+                snapshot = lifecycle.capture_service_state(
+                    settings=settings,
+                    config_path=config,
+                    runner=FakeRunner(),
+                )
+                lifecycle.install_service(
+                    settings,
+                    config,
+                    runner=FakeRunner(),
+                    start=False,
+                )
+                backup = lifecycle.backup_plugin(settings, runner=runner)
+                lifecycle.restore_plugin(settings, backup, runner=runner)
+                lifecycle.restore_service_state(snapshot, runner=FakeRunner())
 
+            self.assertTrue(backup.exists())
+            self.assertEqual(backup.parent.parent, settings.state_root.parent)
             self.assertEqual((backup / "omp-deck.ts").read_text(), "export default function old() {}\n")
             self.assertEqual(
                 runner.calls[-1][0],
@@ -413,11 +426,19 @@ class LifecycleTests(unittest.TestCase):
     def test_plugin_backup_reuses_existing_rollback_source(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            backup = root / "state" / "setup-rollback" / "plugin"
+            state_root = root / "state" / "omp-deck"
+            backup = (
+                state_root.parent
+                / ".omp-deck-setup-rollback-existing"
+                / "plugin"
+            )
             backup.mkdir(parents=True)
             source = backup / "omp-deck.ts"
             source.write_text("preserved\n")
-            settings = SimpleNamespace(omp_bin="/usr/bin/omp", state_root=root / "state")
+            settings = SimpleNamespace(
+                omp_bin="/usr/bin/omp",
+                state_root=state_root,
+            )
             runner = FakeRunner([
                 SimpleNamespace(
                     returncode=0,

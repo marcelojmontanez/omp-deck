@@ -23,3 +23,4 @@
 - Keep removed disconnected extension registrations hidden until their connection changes.
 - Allow strictly named private Deck quarantine and interrupted-write artifacts during migration.
 - Abort and safely discard in-flight attachment reads when local browser data is cleared.
+- Keep rollback plugin recovery sources outside service-owned roots.

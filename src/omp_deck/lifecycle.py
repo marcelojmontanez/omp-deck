@@ -202,14 +202,21 @@ def backup_plugin(settings, *, runner=None):
         source = Path(record["path"]).resolve(strict=True)
     except (KeyError, TypeError, ValueError, OSError):
         return None
-    root = Path(settings.state_root) / "setup-rollback"
+    state_root = Path(settings.state_root)
+    prefix = f".{state_root.name}-setup-rollback-"
+    if source.name == "plugin" and source.parent.name.startswith(prefix):
+        return source
+    root = Path(tempfile.mkdtemp(prefix=prefix, dir=state_root.parent))
     backup = root / "plugin"
-    root.mkdir(parents=True, exist_ok=True)
-    if source == backup.resolve(strict=False):
-        return backup
-    if backup.exists():
-        shutil.rmtree(backup)
-    shutil.copytree(source, backup, ignore=shutil.ignore_patterns("node_modules"))
+    try:
+        shutil.copytree(
+            source,
+            backup,
+            ignore=shutil.ignore_patterns("node_modules"),
+        )
+    except BaseException:
+        shutil.rmtree(root, ignore_errors=True)
+        raise
     return backup
 
 

@@ -110,13 +110,16 @@ class LifecycleTests(unittest.TestCase):
                 ["systemctl", "--user", "disable", "--now", "omp-deck.service"],
             )
 
-    def test_plugin_install_and_remove_use_official_manager_arguments(self):
+    def test_plugin_install_ignores_unrelated_doctor_warnings_and_uses_official_manager(self):
         runner = FakeRunner(
             [
                 SimpleNamespace(returncode=0, stdout=""),
                 SimpleNamespace(
                     returncode=0,
-                    stdout=json.dumps([{"name": "plugin:omp-deck", "status": "ok"}]),
+                    stdout=json.dumps([
+                        {"name": "package_manifest", "status": "warning"},
+                        {"name": "plugin:omp-deck", "status": "ok"},
+                    ]),
                 ),
                 SimpleNamespace(
                     returncode=0,

@@ -240,11 +240,22 @@ def install_plugin(settings, *, runner=run):
         checks = json.loads(doctor.stdout)
     except (TypeError, json.JSONDecodeError):
         checks = None
+    plugin_check = (
+        next(
+            (
+                item
+                for item in checks
+                if isinstance(item, dict) and item.get("name") == f"plugin:{PLUGIN_NAME}"
+            ),
+            None,
+        )
+        if isinstance(checks, list)
+        else None
+    )
     if (
-        doctor.returncode
-        or not isinstance(checks, list)
-        or not checks
-        or not all(isinstance(item, dict) and item.get("status") == "ok" for item in checks)
+        not isinstance(checks, list)
+        or not isinstance(plugin_check, dict)
+        or plugin_check.get("status") != "ok"
         or not plugin_status(settings, runner=runner)
     ):
         raise RuntimeError("OMP Deck plugin validation failed")

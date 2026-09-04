@@ -13,3 +13,4 @@
 - Document the single-owner architecture, transport limitations, Tailscale trust assumptions, retained data, supported OMP release, service operations, upgrades, rollback boundary, and safe uninstall behavior.
 - Validate OMP 18.1.10 RPC and extension compatibility and update the pinned Python and plugin dependencies.
 - Exclude plugin development dependencies from Python artifacts and update the browser test runtime to a vulnerability-free Puppeteer release.
+- Validate the Deck plugin independently so unrelated OMP plugin-doctor warnings do not block setup.

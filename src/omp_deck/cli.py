@@ -9,6 +9,7 @@ from pathlib import Path
 from .auth import AuthManager, validate_auth_state
 
 from .lifecycle import (
+    PLUGIN_VERSION,
     backup_plugin,
     capture_service_state,
     check_health,
@@ -245,7 +246,7 @@ def doctor():
                 _check(
                     "Plugin compatibility",
                     plugin_status(settings) if omp_available else False,
-                    detail="expected omp-deck 0.1.0 for OMP 18.1.10",
+                    detail=f"expected omp-deck {PLUGIN_VERSION} for OMP 18.1.10",
                 ),
                 _check(
                     "Authentication",

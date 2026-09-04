@@ -174,8 +174,8 @@ class LifecycleTests(unittest.TestCase):
                             "npm": [
                                 {
                                     "name": "omp-deck",
-                                    "version": "0.1.0",
-                                    "manifest": {"version": "0.1.0"},
+                                    "version": "1.0.0",
+                                    "manifest": {"version": "1.0.0"},
                                 }
                             ]
                         }

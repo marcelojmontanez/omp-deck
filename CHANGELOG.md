@@ -1,34 +1,33 @@
 # Changelog
 
-## 0.1.0 — Unreleased
+## 1.0.0 — 2026-09-04
 
-- Package OMP Deck as a standard Python application with an `omp-deck` entry point, official plugin-manager lifecycle, systemd user-service commands, health checks, isolated setup verification, and ownership-safe purge behavior.
-- Add mandatory device pairing, revocation, CSRF and Origin enforcement, Host validation, private-response headers, bounded request parsing, safe project resolution, and authenticated blob delivery.
-- Replace managed TUI/tmux control with supervised official `omp_rpc.RpcClient` sessions, stable Deck identities, persisted desired-running state, resume metadata, correlated commands, protocol-version coverage, and complete built-in Ask handling.
-- Add terminal-owned session support through the published pi-wire Collab protocol and a versioned Unix-socket extension fallback with peer authentication, capability negotiation, structured events, managed timers, bounded frames, and terminal-only fallback Ask behavior.
-- Add protected server-side Collab credential storage and browser import/removal controls. Writable links are never returned to the browser after import or included in API events and logs.
-- Normalize RPC, Collab, and extension state behind one fleet model with generation/sequence ownership, stale-event rejection, bounded event replay, server-authoritative persistent unread cursors, explicit degradation, and per-session request deduplication.
-- Replace browser snapshot polling with authenticated SSE plus bounded replay and low-frequency authoritative recovery. Add accessible transport status, capability-driven controls, mobile pending-request forms, ordered optimistic sends, in-memory drafts, and bounded image attachments.
-- Remove `/proc` discovery, tmux keystroke control, full-transcript live polling, direct plugin copying, legacy HTTP routes, slash-command emulation, persistent browser session data, and obsolete compatibility tests.
-- Document the single-owner architecture, transport limitations, Tailscale trust assumptions, retained data, supported OMP release, service operations, upgrades, rollback boundary, and safe uninstall behavior.
-- Validate OMP 18.1.10 RPC and extension compatibility and update the pinned Python and plugin dependencies.
-- Exclude plugin development dependencies from Python artifacts and update the browser test runtime to a vulnerability-free Puppeteer release.
-- Validate the Deck plugin independently so unrelated OMP plugin-doctor warnings do not block setup.
-- Harden setup rollback, malformed-config purge, RPC and Collab request idempotency, concurrent cursor persistence, transport shutdown/reconnect ownership, cleared browser queues, multi-select Ask responses, and oversized plugin-event sequencing.
-- Keep rollback plugin backups alive while linked, retain failed-start transports until cleanup succeeds, and report unjoinable Collab reader shutdowns.
-- Reject malformed Collab links before reserving durable request IDs.
-- Surface oversized extension events as an explicit degraded transport state.
-- Bound RPC refresh shutdown and isolate terminal and RPC cleanup failures.
-- Reuse browser request IDs when Ask responses or session controls have ambiguous outcomes.
-- Keep removed disconnected extension registrations hidden until their connection changes.
-- Allow strictly named private Deck quarantine and interrupted-write artifacts during migration.
-- Abort and safely discard in-flight attachment reads when local browser data is cleared.
-- Keep rollback plugin recovery sources outside service-owned roots.
-- Bound manager shutdown waits, report adapter failures, and make supervised transport readers non-blocking at process exit.
-- Reuse mutation request IDs after unclassified server failures while allowing known failures to retry as new operations.
-- Persist removed extension connection tombstones so the same registration stays hidden across service restarts.
-- Reserve in-flight attachment count and bytes so concurrent selections cannot bypass browser limits.
-- Bound authentication state size and device cardinality and reject malformed persisted credential shapes.
-- Make authenticated blob lookup constant-time over supported image names and reject writable roots or candidates.
-- Scope event replay cursors to one server process, replace failed browser streams, recover event gaps immediately, and close streams after credential revocation.
-- Reject noncanonical project paths and preserve newly created project data with a durable failure result when OMP startup fails.
+### Added
+
+- Ship OMP Deck as an installable Python application with an `omp-deck` command, systemd user service, health diagnostics, optional Tailscale Serve setup, and ownership-safe removal and purge operations.
+- Manage Deck-launched sessions through the official `omp_rpc.RpcClient`, including stable Deck identities, persisted desired-running state, OMP session resume, correlated commands, and complete built-in Ask handling.
+- Connect terminal-owned sessions through imported writable Collab links or the bundled versioned Unix-socket extension fallback. Collab supports remote pending-request responses; extension fallback keeps Ask terminal-only.
+- Present RPC, Collab, and extension sessions through one normalized mobile fleet dashboard with transport status, capabilities, messages, todos, subagents, usage, unread state, and pending requests.
+- Support project launch and creation, ordered prompts and follow-ups, interrupt, compact, model and thinking controls, image attachments, session removal, logout, revoke-all, and local browser-data clearing when the active transport advertises each capability.
+
+### Security
+
+- Require explicit device pairing for every API, SSE, and blob request, with opaque verifier-backed credentials, individual logout, revoke-all, CSRF enforcement, trusted Origin and Host validation, and private no-store responses.
+- Keep writable Collab links in protected server-side storage and exclude them from browser state, events, logs, and persisted recovery metadata.
+- Enforce rooted project resolution, hostile-symlink rejection, canonical project names, authenticated constant-time blob lookup, verified image signatures, and bounded request and attachment sizes.
+- Store authentication, registry, request, cursor, and Collab state atomically with strict ownership, permissions, schemas, size limits, retention bounds, and explicit corruption recovery.
+
+### Reliability
+
+- Provide generation- and sequence-aware fleet ownership, stale-event rejection, bounded process-scoped SSE replay, authoritative replacement snapshots, failed-stream replacement, and immediate browser recovery from event gaps.
+- Close live event streams after credential revocation and preserve server-authoritative unread cursors across browser and service restarts.
+- Deduplicate launches and commands with durable request IDs, preserve ambiguous browser request IDs for safe retry, and serialize per-session operations without blocking unrelated sessions.
+- Supervise RPC, Collab, and extension transports through bounded startup, refresh, reconnect, shutdown, and cleanup paths with explicit degraded and disconnected states.
+- Preserve extension-removal tombstones across restarts, enforce concurrent attachment reservations, and retain newly created project data when OMP startup fails.
+
+### Compatibility and operations
+
+- Support Linux with Python 3.11 or 3.12, Bun 1.3.14 or newer, and stock OMP 18.1.10 through pinned and independently validated RPC, Collab, and extension integrations.
+- Include read-only legacy migration planning plus ownership-checked application, rollback boundaries, isolated plugin backup recovery, and safe handling of interrupted writes and quarantine artifacts.
+- Exclude plugin development dependencies from Python packages and use a vulnerability-free pinned Puppeteer release for browser verification.
+- Remove tmux keystroke control, `/proc` discovery, full-transcript live polling, direct plugin copying, legacy HTTP routes, slash-command emulation, persistent browser session data, and obsolete compatibility paths.

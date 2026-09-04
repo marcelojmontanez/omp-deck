@@ -75,10 +75,7 @@ el['session-menu'].addEventListener('click', async event => {
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
       const error = new Error(payload.error || `Action failed (${response.status})`);
-      error.reuseRequestId = (
-        payload.status === 'uncertain'
-        || payload.errorCode === 'outcome_unknown'
-      );
+      error.reuseRequestId = ompDeckApi.shouldReuseRequestId(response, payload);
       throw error;
     }
     sessionActionAttempts.delete(attemptKey);

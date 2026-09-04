@@ -613,7 +613,13 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       globalThis.confirm = () => true;
       ompDeckApi.request = async (_path, options) => {
         ids.push(JSON.parse(options.body).requestId);
-        if (ids.length === 1) throw new Error('response lost');
+        if (ids.length === 1) {
+          return {
+            ok: false,
+            status: 502,
+            json: async () => ({error: 'response lost'}),
+          };
+        }
         return {ok: true, status: 202, json: async () => ({})};
       };
       button.click();
@@ -627,6 +633,26 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     }
   });
   assert.equal(controlRetryIds[0], controlRetryIds[1]);
+
+  const retryClassification = await page.evaluate(() => ({
+    unknownServerError: ompDeckApi.shouldReuseRequestId(
+      {ok: false, status: 502},
+      {error: 'transport failed'},
+    ),
+    knownFailure: ompDeckApi.shouldReuseRequestId(
+      {ok: false, status: 502},
+      {status: 'failed', errorCode: 'command'},
+    ),
+    invalidRequest: ompDeckApi.shouldReuseRequestId(
+      {ok: false, status: 400},
+      {error: 'invalid request'},
+    ),
+  }));
+  assert.deepEqual(retryClassification, {
+    unknownServerError: true,
+    knownFailure: false,
+    invalidRequest: false,
+  });
 
   const launchRetry = await page.evaluate(async () => {
     const originalRequest = ompDeckApi.request;

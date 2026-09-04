@@ -61,5 +61,14 @@
     csrfToken = null;
   }
 
-  window.ompDeckApi = {request, session, pair, logout};
+  function shouldReuseRequestId(response, payload = {}) {
+    if (
+      payload.status === 'uncertain'
+      || payload.errorCode === 'outcome_unknown'
+    ) return true;
+    if (['failed', 'cancelled', 'stale'].includes(payload.status)) return false;
+    return response.ok || response.status >= 500;
+  }
+
+  window.ompDeckApi = {request, session, pair, logout, shouldReuseRequestId};
 })();

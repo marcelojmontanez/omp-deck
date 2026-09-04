@@ -60,11 +60,7 @@ el['project-launch'].addEventListener('click', async () => {
     const payload = await response.json();
     if (!response.ok || !payload.session) {
       const error = new Error(payload.error || `Launch failed (${response.status})`);
-      error.reuseRequestId = (
-        response.ok
-        || payload.status === 'uncertain'
-        || payload.errorCode === 'outcome_unknown'
-      );
+      error.reuseRequestId = ompDeckApi.shouldReuseRequestId(response, payload);
       throw error;
     }
     pendingLaunch = null;
@@ -110,11 +106,7 @@ collabConnect.addEventListener('click', async () => {
     const payload = await response.json();
     if (!response.ok || !payload.session) {
       const error = new Error(payload.error || `Connection failed (${response.status})`);
-      error.reuseRequestId = (
-        response.ok
-        || payload.status === 'uncertain'
-        || payload.errorCode === 'outcome_unknown'
-      );
+      error.reuseRequestId = ompDeckApi.shouldReuseRequestId(response, payload);
       throw error;
     }
     pendingCollab = null;

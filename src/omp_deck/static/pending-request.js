@@ -111,10 +111,7 @@ async function settlePendingRequest({cancel = false} = {}) {
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       const error = new Error(payload.error || `Response failed (${response.status})`);
-      error.reuseRequestId = (
-        payload.status === 'uncertain'
-        || payload.errorCode === 'outcome_unknown'
-      );
+      error.reuseRequestId = ompDeckApi.shouldReuseRequestId(response, payload);
       throw error;
     }
     await refresh();

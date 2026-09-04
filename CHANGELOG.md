@@ -20,3 +20,4 @@
 - Surface oversized extension events as an explicit degraded transport state.
 - Bound RPC refresh shutdown and isolate terminal and RPC cleanup failures.
 - Reuse browser request IDs when Ask responses or session controls have ambiguous outcomes.
+- Keep removed disconnected extension registrations hidden until their connection changes.

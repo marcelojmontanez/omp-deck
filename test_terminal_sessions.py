@@ -309,6 +309,35 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.assertTrue(current.closed)
         self.assertEqual(self.model.get(session_id)["id"], session_id)
 
+    def test_remove_disconnected_extension_ignores_same_registration(self):
+        manager = self.manager()
+        path, _, metadata = self.unix_registration(connection="failed")
+        FakeExtensionAdapter.fail_start = True
+
+        with patch("omp_deck.terminal_sessions.ExtensionAdapter", FakeExtensionAdapter):
+            manager._reconcile_extensions({"omp-extension": (path, metadata)})
+
+        record = manager.registry.load()[0]
+        session_id = record["id"]
+        self.assertIsNone(manager._runtime_or_none(session_id))
+        self.assertEqual(
+            record["recoveryMetadata"], {"connectionId": "failed"}
+        )
+        self.assertTrue(manager.remove(session_id))
+
+        FakeExtensionAdapter.fail_start = False
+        with patch("omp_deck.terminal_sessions.ExtensionAdapter", FakeExtensionAdapter):
+            manager._reconcile_extensions({"omp-extension": (path, metadata)})
+        self.assertEqual(manager.registry.load(), [])
+
+        new_path, _, new_metadata = self.unix_registration(connection="new")
+        with patch("omp_deck.terminal_sessions.ExtensionAdapter", FakeExtensionAdapter):
+            manager._reconcile_extensions({
+                "omp-extension": (new_path, new_metadata)
+            })
+        self.assertEqual(manager.registry.load()[0]["id"], session_id)
+        self.assertIsNotNone(manager._runtime_or_none(session_id))
+
     def test_extension_failed_cleanup_retains_runtime_until_remove_succeeds(self):
         manager = self.manager()
         path, _, metadata = self.unix_registration(connection="failed")

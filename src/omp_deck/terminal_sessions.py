@@ -212,13 +212,18 @@ class TerminalSessionManager:
             if record["adapterKind"] not in {"collab", "extension"}:
                 return False
             runtime = self._runtime_or_none(session_id)
+            ignored_connection = (
+                runtime.instance_id
+                if runtime is not None and runtime.kind == "extension"
+                else record.get("recoveryMetadata", {}).get("connectionId")
+            )
             if runtime is not None:
                 runtime.adapter.close()
             with self._lock:
                 if self._runtimes.get(session_id) is runtime:
                     self._runtimes.pop(session_id, None)
-                if runtime is not None and runtime.kind == "extension":
-                    self._ignored_extensions[session_id] = runtime.instance_id
+                if isinstance(ignored_connection, str):
+                    self._ignored_extensions[session_id] = ignored_connection
                 self._commands.forget(session_id)
             self.credentials.remove(session_id)
             removed = self.registry.remove(session_id)
@@ -389,12 +394,14 @@ class TerminalSessionManager:
             record = self.registry.update(
                 session_id, adapter_kind="extension", omp_session_id=str(metadata["sessionId"]),
                 project_name=project_name, project_path=project_path, title=title,
+                recovery_metadata={"connectionId": connection_id},
             )
         except KeyError:
             record = self.registry.create(
                 session_id=session_id, adapter_kind="extension",
                 omp_session_id=str(metadata["sessionId"]), project_name=project_name,
                 project_path=project_path, title=title,
+                recovery_metadata={"connectionId": connection_id},
             )
         self.model.load_record(record)
         generation = int(record["generation"])

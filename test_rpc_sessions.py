@@ -179,6 +179,23 @@ class TestRpcSessionManager(unittest.TestCase):
     def launch(self):
         return self.manager.launch("project", self.project, title="RPC test")
 
+    def test_manager_does_not_project_terminal_tombstones(self):
+        self.registry.create(
+            session_id="terminal-hidden",
+            adapter_kind="extension",
+            omp_session_id="omp-terminal",
+            project_name="terminal",
+            project_path=str(self.project),
+            title="Removed terminal",
+            recovery_metadata={"connectionId": "connection-1", "removed": True},
+        )
+        self.manager.close()
+        model = FleetModel()
+        self.manager = RpcSessionManager(self.settings, model, self.registry)
+
+        with self.assertRaises(KeyError):
+            model.get("terminal-hidden")
+
     def test_launch_persists_stable_deck_id_and_official_rpc_identity(self):
         session = self.launch()
         record = self.registry.load()[0]

@@ -68,7 +68,8 @@ class RpcSessionManager:
             self._mark_refresh_failed,
         )
         for record in self.registry.load():
-            self.model.load_record(record)
+            if record["adapterKind"] == "rpc":
+                self.model.load_record(record)
 
     def recover_desired(self) -> dict[str, str]:
         failures: dict[str, str] = {}

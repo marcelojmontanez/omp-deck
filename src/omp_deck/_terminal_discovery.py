@@ -17,6 +17,15 @@ def terminal_id(omp_session_id: str) -> str:
     digest = hashlib.sha256(omp_session_id.encode("utf-8")).hexdigest()[:24]
     return f"terminal:{digest}"
 
+def removed_extension_connection(record: dict[str, Any]) -> str | None:
+    if record.get("adapterKind") != "extension":
+        return None
+    metadata = record.get("recoveryMetadata")
+    if not isinstance(metadata, dict) or metadata.get("removed") is not True:
+        return None
+    connection_id = metadata.get("connectionId")
+    return connection_id if isinstance(connection_id, str) else None
+
 
 def discover_extension_candidates(
     root: Path,

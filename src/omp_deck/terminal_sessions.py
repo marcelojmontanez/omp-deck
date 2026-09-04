@@ -12,6 +12,7 @@ from . import _terminal_commands
 from ._shutdown import close_terminal_manager
 from ._collab_imports import CollabImportCoordinator
 
+from ._terminal_discovery import removed_extension_connection
 from ._terminal_discovery import discover_extension_candidates, terminal_id as _terminal_id
 from .collab_adapter import CollabAdapter
 from .collab_store import CollabStore
@@ -85,7 +86,10 @@ class TerminalSessionManager:
         self._watcher: threading.Thread | None = None
         self._ignored_extensions: dict[str, str] = {}
         for record in self.registry.load():
-            if record["adapterKind"] in {"collab", "extension"}:
+            ignored = removed_extension_connection(record)
+            if ignored is not None:
+                self._ignored_extensions[record["id"]] = ignored
+            elif record["adapterKind"] in {"collab", "extension"}:
                 self.model.load_record(record)
 
     def start(self) -> dict[str, str]:
@@ -202,17 +206,30 @@ class TerminalSessionManager:
             )
             if runtime is not None:
                 runtime.adapter.close()
+            if (
+                record["adapterKind"] == "extension"
+                and isinstance(ignored_connection, str)
+            ):
+                self.registry.update(
+                    session_id,
+                    recovery_metadata={
+                        "connectionId": ignored_connection,
+                        "removed": True,
+                    },
+                )
+            else:
+                if record["adapterKind"] == "collab":
+                    self.credentials.remove(session_id)
+                if not self.registry.remove(session_id):
+                    return False
             with self._lock:
                 if self._runtimes.get(session_id) is runtime:
                     self._runtimes.pop(session_id, None)
                 if isinstance(ignored_connection, str):
                     self._ignored_extensions[session_id] = ignored_connection
                 self._commands.forget(session_id)
-            self.credentials.remove(session_id)
-            removed = self.registry.remove(session_id)
-            if removed:
-                self.model.remove(session_id)
-            return removed
+            self.model.remove(session_id)
+            return True
 
     def refresh_connected(self) -> None:
         with self._lock:

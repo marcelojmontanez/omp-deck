@@ -26,3 +26,4 @@
 - Keep rollback plugin recovery sources outside service-owned roots.
 - Bound manager shutdown waits, report adapter failures, and make supervised transport readers non-blocking at process exit.
 - Reuse mutation request IDs after unclassified server failures while allowing known failures to retry as new operations.
+- Persist removed extension connection tombstones so the same registration stays hidden across service restarts.

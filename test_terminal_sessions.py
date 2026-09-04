@@ -309,7 +309,7 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.assertTrue(current.closed)
         self.assertEqual(self.model.get(session_id)["id"], session_id)
 
-    def test_remove_disconnected_extension_ignores_same_registration(self):
+    def test_removed_extension_stays_hidden_across_manager_restart(self):
         manager = self.manager()
         path, _, metadata = self.unix_registration(connection="failed")
         FakeExtensionAdapter.fail_start = True
@@ -325,18 +325,35 @@ class TerminalSessionManagerTests(unittest.TestCase):
         )
         self.assertTrue(manager.remove(session_id))
 
+        tombstone = manager.registry.load()[0]
+        self.assertEqual(
+            tombstone["recoveryMetadata"],
+            {"connectionId": "failed", "removed": True},
+        )
+        manager.close()
+        self.managers.remove(manager)
+        restarted = self.manager()
+
         FakeExtensionAdapter.fail_start = False
         with patch("omp_deck.terminal_sessions.ExtensionAdapter", FakeExtensionAdapter):
-            manager._reconcile_extensions({"omp-extension": (path, metadata)})
-        self.assertEqual(manager.registry.load(), [])
+            restarted._reconcile_extensions(
+                {"omp-extension": (path, metadata)}
+            )
+        self.assertIsNone(restarted._runtime_or_none(session_id))
+        self.assertEqual(restarted.registry.load(), [tombstone])
 
         new_path, _, new_metadata = self.unix_registration(connection="new")
         with patch("omp_deck.terminal_sessions.ExtensionAdapter", FakeExtensionAdapter):
-            manager._reconcile_extensions({
+            restarted._reconcile_extensions({
                 "omp-extension": (new_path, new_metadata)
             })
-        self.assertEqual(manager.registry.load()[0]["id"], session_id)
-        self.assertIsNotNone(manager._runtime_or_none(session_id))
+        current = restarted.registry.load()[0]
+        self.assertEqual(current["id"], session_id)
+        self.assertEqual(
+            current["recoveryMetadata"],
+            {"connectionId": "new"},
+        )
+        self.assertIsNotNone(restarted._runtime_or_none(session_id))
 
     def test_extension_failed_cleanup_retains_runtime_until_remove_succeeds(self):
         manager = self.manager()

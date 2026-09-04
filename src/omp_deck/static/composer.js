@@ -17,6 +17,7 @@ function createComposer({
   const revokedAttachmentUrls = new Set();
   const queueTokens = new Map();
   const attachmentReaders = new Set();
+  const attachmentReservations = new Map();
   let sessionId = null;
   let dataGeneration = 0;
 
@@ -38,6 +39,7 @@ function createComposer({
   function clearLocalData() {
     dataGeneration += 1;
     for (const reader of attachmentReaders) reader.abort();
+    attachmentReservations.clear();
     for (const items of attachments.values()) items.forEach(revokeAttachment);
     for (const items of pendingMessages.values()) {
       items.flatMap(item => item.attachments).forEach(revokeAttachment);
@@ -136,16 +138,35 @@ function createComposer({
       showToast('This transport accepts image attachments only.', 'error');
       return;
     }
-    if (current.length + incoming.length > 4) {
+    const reserved = attachmentReservations.get(targetSessionId) || {count: 0, bytes: 0};
+    if (current.length + reserved.count + incoming.length > 4) {
       showToast('Attach at most 4 images.', 'error');
       return;
     }
-    const total = [...current, ...incoming].reduce((bytes, item) => bytes + item.size, 0);
-    if (total > 700 * 1024) {
+    const incomingBytes = incoming.reduce((bytes, item) => bytes + item.size, 0);
+    const currentBytes = current.reduce((bytes, item) => bytes + item.size, 0);
+    if (currentBytes + reserved.bytes + incomingBytes > 700 * 1024) {
       showToast('Images must total 700 KB or less.', 'error');
       return;
     }
-    const loaded = (await Promise.all(incoming.map(readAttachment))).filter(Boolean);
+    if (!attachmentReservations.has(targetSessionId)) {
+      attachmentReservations.set(targetSessionId, reserved);
+    }
+    reserved.count += incoming.length;
+    reserved.bytes += incomingBytes;
+    let loaded;
+    try {
+      loaded = (await Promise.all(incoming.map(readAttachment))).filter(Boolean);
+    } finally {
+      reserved.count -= incoming.length;
+      reserved.bytes -= incomingBytes;
+      if (
+        attachmentReservations.get(targetSessionId) === reserved
+        && reserved.count === 0
+      ) {
+        attachmentReservations.delete(targetSessionId);
+      }
+    }
     if (
       generation !== dataGeneration
       || targetSessionId !== sessionId

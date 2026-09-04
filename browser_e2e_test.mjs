@@ -479,6 +479,83 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   assert.deepEqual(clearedAttachmentRead.revoked, ['blob:audit']);
   assert.equal(clearedAttachmentRead.rendered, 0);
 
+  const concurrentAttachments = await page.evaluate(async () => {
+    const OriginalFileReader = globalThis.FileReader;
+    const originalCreateObjectURL = URL.createObjectURL;
+    const readers = [];
+    let nextUrl = 0;
+    class ControlledFileReader {
+      constructor() {
+        this.result = null;
+        readers.push(this);
+      }
+      readAsDataURL() {}
+      abort() {
+        this.onabort?.();
+      }
+    }
+    const input = document.getElementById('attachment-input');
+    const choose = files => {
+      Object.defineProperty(input, 'files', {
+        configurable: true,
+        value: files,
+      });
+      input.dispatchEvent(new Event('change'));
+    };
+    try {
+      composer.clearLocalData();
+      composer.select('attachment-limit-session');
+      globalThis.FileReader = ControlledFileReader;
+      URL.createObjectURL = () => `blob:limit-${++nextUrl}`;
+      const batch = prefix => [0, 1, 2].map(index => new File(
+        ['image'],
+        `${prefix}-${index}.png`,
+        {type: 'image/png'},
+      ));
+
+      choose(batch('first'));
+      choose(batch('second'));
+      for (const reader of readers) {
+        reader.result = 'data:image/png;base64,aW1hZ2U=';
+        reader.onload();
+      }
+      await new Promise(resolve => setTimeout(resolve, 0));
+      const countReads = readers.length;
+      const countRendered = document.getElementById('attachments').children.length;
+
+      composer.clearLocalData();
+      readers.length = 0;
+      const largeBatch = prefix => [0, 1].map(index => new File(
+        [new Uint8Array(200 * 1024)],
+        `${prefix}-${index}.png`,
+        {type: 'image/png'},
+      ));
+      choose(largeBatch('large-first'));
+      choose(largeBatch('large-second'));
+      for (const reader of readers) {
+        reader.result = 'data:image/png;base64,aW1hZ2U=';
+        reader.onload();
+      }
+      await new Promise(resolve => setTimeout(resolve, 0));
+      return {
+        countReads,
+        countRendered,
+        byteReads: readers.length,
+        byteRendered: document.getElementById('attachments').children.length,
+      };
+    } finally {
+      composer.clearLocalData();
+      globalThis.FileReader = OriginalFileReader;
+      URL.createObjectURL = originalCreateObjectURL;
+    }
+  });
+  assert.deepEqual(concurrentAttachments, {
+    countReads: 3,
+    countRendered: 3,
+    byteReads: 2,
+    byteRendered: 2,
+  });
+
 
   const multiAsk = await page.evaluate(async () => {
     const originalRequest = ompDeckApi.request;

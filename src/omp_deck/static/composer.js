@@ -16,6 +16,7 @@ function createComposer({
   const retryBatches = new Map();
   const revokedAttachmentUrls = new Set();
   const queueTokens = new Map();
+  const attachmentReaders = new Set();
   let sessionId = null;
   let dataGeneration = 0;
 
@@ -36,6 +37,7 @@ function createComposer({
 
   function clearLocalData() {
     dataGeneration += 1;
+    for (const reader of attachmentReaders) reader.abort();
     for (const items of attachments.values()) items.forEach(revokeAttachment);
     for (const items of pendingMessages.values()) {
       items.flatMap(item => item.attachments).forEach(revokeAttachment);
@@ -101,19 +103,33 @@ function createComposer({
   function readAttachment(file) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
-      reader.onload = () => resolve({
-        name: file.name || 'Attachment',
-        type: file.type,
-        size: file.size,
-        data: reader.result,
-        url: URL.createObjectURL(file),
-      });
-      reader.onerror = () => reject(reader.error);
+      attachmentReaders.add(reader);
+      const finish = () => attachmentReaders.delete(reader);
+      reader.onload = () => {
+        finish();
+        resolve({
+          name: file.name || 'Attachment',
+          type: file.type,
+          size: file.size,
+          data: reader.result,
+          url: URL.createObjectURL(file),
+        });
+      };
+      reader.onerror = () => {
+        finish();
+        reject(reader.error);
+      };
+      reader.onabort = () => {
+        finish();
+        resolve(null);
+      };
       reader.readAsDataURL(file);
     });
   }
 
   async function addAttachments(files) {
+    const generation = dataGeneration;
+    const targetSessionId = sessionId;
     const current = attachmentsFor(sessionId);
     const incoming = [...files];
     if (incoming.some(file => !file.type.startsWith('image/'))) {
@@ -129,7 +145,16 @@ function createComposer({
       showToast('Images must total 700 KB or less.', 'error');
       return;
     }
-    current.push(...await Promise.all(incoming.map(readAttachment)));
+    const loaded = (await Promise.all(incoming.map(readAttachment))).filter(Boolean);
+    if (
+      generation !== dataGeneration
+      || targetSessionId !== sessionId
+      || attachments.get(targetSessionId) !== current
+    ) {
+      loaded.forEach(revokeAttachment);
+      return;
+    }
+    current.push(...loaded);
     if (sessionId) renderAttachments();
   }
 

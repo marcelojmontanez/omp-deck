@@ -22,3 +22,4 @@
 - Reuse browser request IDs when Ask responses or session controls have ambiguous outcomes.
 - Keep removed disconnected extension registrations hidden until their connection changes.
 - Allow strictly named private Deck quarantine and interrupted-write artifacts during migration.
+- Abort and safely discard in-flight attachment reads when local browser data is cleared.

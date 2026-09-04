@@ -421,6 +421,64 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     }
   });
   assert.deepEqual(clearedQueue, ['/api/sessions/queue-session/messages']);
+  const clearedAttachmentRead = await page.evaluate(async () => {
+    const OriginalFileReader = globalThis.FileReader;
+    const originalCreateObjectURL = URL.createObjectURL;
+    const originalRevokeObjectURL = URL.revokeObjectURL;
+    const readers = [];
+    const revoked = [];
+    class ControlledFileReader {
+      constructor() {
+        this.result = null;
+        this.aborted = false;
+        readers.push(this);
+      }
+      readAsDataURL() {}
+      abort() {
+        this.aborted = true;
+        this.onabort?.();
+      }
+    }
+    const input = document.getElementById('attachment-input');
+    const choose = file => {
+      Object.defineProperty(input, 'files', {
+        configurable: true,
+        value: [file],
+      });
+      input.dispatchEvent(new Event('change'));
+    };
+    try {
+      globalThis.FileReader = ControlledFileReader;
+      URL.createObjectURL = () => 'blob:audit';
+      URL.revokeObjectURL = url => revoked.push(url);
+
+      choose(new File(['first'], 'first.png', {type: 'image/png'}));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      composer.clearLocalData();
+      const firstAborted = readers[0].aborted;
+
+      choose(new File(['second'], 'second.png', {type: 'image/png'}));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      readers[1].result = 'data:image/png;base64,c2Vjb25k';
+      readers[1].onload();
+      composer.clearLocalData();
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      return {
+        firstAborted,
+        revoked,
+        rendered: document.getElementById('attachments').children.length,
+      };
+    } finally {
+      globalThis.FileReader = OriginalFileReader;
+      URL.createObjectURL = originalCreateObjectURL;
+      URL.revokeObjectURL = originalRevokeObjectURL;
+    }
+  });
+  assert.equal(clearedAttachmentRead.firstAborted, true);
+  assert.deepEqual(clearedAttachmentRead.revoked, ['blob:audit']);
+  assert.equal(clearedAttachmentRead.rendered, 0);
+
 
   const multiAsk = await page.evaluate(async () => {
     const originalRequest = ompDeckApi.request;

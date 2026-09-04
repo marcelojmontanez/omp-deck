@@ -1,4 +1,10 @@
 
+const sessionActionAttempts = new Map();
+function clearSessionActionAttempts() {
+  sessionActionAttempts.clear();
+}
+
+
 function closeSessionMenu({restoreFocus = false} = {}) {
   el['session-menu'].hidden = true;
   el['overflow-button'].setAttribute('aria-expanded', 'false');
@@ -57,18 +63,28 @@ el['session-menu'].addEventListener('click', async event => {
   if (['clear', 'quit'].includes(action) && !confirm(
     action === 'clear' ? 'Compact this session context?' : 'Shut down this OMP session?'
   )) return;
+  const attemptKey = `${agent.id}:${route}`;
+  const operationRequestId = sessionActionAttempts.get(attemptKey) || requestId();
+  sessionActionAttempts.set(attemptKey, operationRequestId);
   try {
     const response = await ompDeckApi.request(`/api/sessions/${encodeURIComponent(agent.id)}/${route}`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({requestId: requestId()}),
+      body: JSON.stringify({requestId: operationRequestId}),
     });
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
-      throw new Error(payload.error || `Action failed (${response.status})`);
+      const error = new Error(payload.error || `Action failed (${response.status})`);
+      error.reuseRequestId = (
+        payload.status === 'uncertain'
+        || payload.errorCode === 'outcome_unknown'
+      );
+      throw error;
     }
+    sessionActionAttempts.delete(attemptKey);
     showToast(`${action[0].toUpperCase()}${action.slice(1)} requested`, 'success');
   } catch (error) {
+    if (error.reuseRequestId === false) sessionActionAttempts.delete(attemptKey);
     showToast(error.message, 'error');
   }
 });

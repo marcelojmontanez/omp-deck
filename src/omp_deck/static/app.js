@@ -34,6 +34,8 @@ async function clearLocalData() {
   try { sessionStorage.clear(); } catch {}
   thinkingOverrides.clear();
   composer?.clearLocalData();
+  clearPendingRequestAttempts();
+  clearSessionActionAttempts();
   if ('caches' in window) {
     try {
       await Promise.all((await caches.keys()).map(name => caches.delete(name)));

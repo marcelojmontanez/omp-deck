@@ -1,3 +1,9 @@
+const pendingRequestAttempts = new Map();
+function clearPendingRequestAttempts() {
+  pendingRequestAttempts.clear();
+}
+
+
 function renderPendingRequest(agent) {
   const pending = agent?.pendingUiRequest;
   const key = pending ? JSON.stringify([
@@ -83,6 +89,16 @@ async function settlePendingRequest({cancel = false} = {}) {
       value = question.multi ? values : values[0];
     }
   }
+  const attemptKey = JSON.stringify([agent.id, pending.id, cancel]);
+  const signature = JSON.stringify(cancel ? null : value);
+  const previousAttempt = pendingRequestAttempts.get(attemptKey);
+  const operationRequestId = previousAttempt?.signature === signature
+    ? previousAttempt.requestId
+    : requestId();
+  pendingRequestAttempts.set(
+    attemptKey,
+    {signature, requestId: operationRequestId},
+  );
   form?.querySelectorAll('button,input,textarea').forEach(control => { control.disabled = true; });
   if (status) status.textContent = cancel ? 'Cancelling…' : 'Sending…';
   try {
@@ -90,12 +106,21 @@ async function settlePendingRequest({cancel = false} = {}) {
     const response = await ompDeckApi.request(requestPath, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({requestId: requestId(), ...(cancel ? {} : {value})}),
+      body: JSON.stringify({requestId: operationRequestId, ...(cancel ? {} : {value})}),
     });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || `Response failed (${response.status})`);
+    if (!response.ok) {
+      const error = new Error(payload.error || `Response failed (${response.status})`);
+      error.reuseRequestId = (
+        payload.status === 'uncertain'
+        || payload.errorCode === 'outcome_unknown'
+      );
+      throw error;
+    }
     await refresh();
+    pendingRequestAttempts.delete(attemptKey);
   } catch (error) {
+    if (error.reuseRequestId === false) pendingRequestAttempts.delete(attemptKey);
     form?.querySelectorAll('button,input,textarea').forEach(control => { control.disabled = false; });
     if (status) status.textContent = error.message;
   }

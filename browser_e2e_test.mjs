@@ -477,6 +477,99 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   assert.deepEqual(multiAsk.inputTypes, ['checkbox', 'checkbox']);
   assert.deepEqual(multiAsk.value, ['first', 'second']);
 
+  const askRetryIds = await page.evaluate(async () => {
+    const originalRequest = ompDeckApi.request;
+    const pending = {
+      id: 'ask-retry',
+      kind: 'confirm',
+      title: 'Retry confirmation',
+      questionIndex: 0,
+      questions: [{}],
+    };
+    const agent = {
+      id: 'ask-retry-session',
+      bridgeConnected: true,
+      capabilities: {answerUiRequest: true},
+      pendingUiRequest: pending,
+    };
+    state.agents = [agent];
+    state.selectedId = agent.id;
+    renderPendingRequest(agent);
+    el['pending-request'].querySelector('[data-confirm="true"]').checked = true;
+    const ids = [];
+    try {
+      ompDeckApi.request = async (path, options) => {
+        if (!path.includes('/ui-requests/')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              snapshotGeneration: state.snapshotGeneration,
+              sessions: [],
+            }),
+          };
+        }
+        ids.push(JSON.parse(options.body).requestId);
+        if (ids.length === 1) throw new Error('response lost');
+        return {ok: true, status: 202, json: async () => ({})};
+      };
+      await settlePendingRequest();
+      await settlePendingRequest();
+      return ids;
+    } finally {
+      ompDeckApi.request = originalRequest;
+    }
+  });
+  assert.equal(askRetryIds[0], askRetryIds[1]);
+
+  const controlRetryIds = await page.evaluate(async () => {
+    const originalRequest = ompDeckApi.request;
+    const originalConfirm = globalThis.confirm;
+    const agent = {
+      id: 'control-retry-session',
+      project: 'demo',
+      label: 'Control retry',
+      bridgeConnected: true,
+      executionState: 'idle',
+      inboxState: 'read',
+      capabilities: {compact: true},
+      transport: {kind: 'rpc', status: 'connected', label: 'RPC'},
+      pendingUiRequest: null,
+      subagents: [],
+      session: {activity: [], archiveActivity: [], updatedMs: Date.now()},
+    };
+    state.agents = [agent];
+    state.selectedId = agent.id;
+    renderDetail({selectionChanged: true});
+    const button = el['session-menu'].querySelector('[data-session-action="clear"]');
+    const ids = [];
+    const waitForAttempt = async count => {
+      const deadline = Date.now() + 1000;
+      while (ids.length < count) {
+        if (Date.now() >= deadline) throw new Error('control retry timed out');
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+      await new Promise(resolve => setTimeout(resolve, 0));
+    };
+    try {
+      globalThis.confirm = () => true;
+      ompDeckApi.request = async (_path, options) => {
+        ids.push(JSON.parse(options.body).requestId);
+        if (ids.length === 1) throw new Error('response lost');
+        return {ok: true, status: 202, json: async () => ({})};
+      };
+      button.click();
+      await waitForAttempt(1);
+      button.click();
+      await waitForAttempt(2);
+      return ids;
+    } finally {
+      ompDeckApi.request = originalRequest;
+      globalThis.confirm = originalConfirm;
+    }
+  });
+  assert.equal(controlRetryIds[0], controlRetryIds[1]);
+
   const launchRetry = await page.evaluate(async () => {
     const originalRequest = ompDeckApi.request;
     const select = document.getElementById('project-select');

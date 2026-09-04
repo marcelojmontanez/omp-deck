@@ -246,7 +246,7 @@ def doctor():
                 _check(
                     "Plugin compatibility",
                     plugin_status(settings) if omp_available else False,
-                    detail="expected omp-deck 0.1.0 for OMP 18.1.5",
+                    detail="expected omp-deck 0.1.0 for OMP 18.1.10",
                 ),
                 _check(
                     "Authentication",

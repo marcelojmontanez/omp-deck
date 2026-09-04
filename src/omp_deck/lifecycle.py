@@ -220,6 +220,7 @@ def prepare_installation(settings, config_path):
     mark_owned(
         paths.state_root,
         allowed_existing=(paths.state_root / "auth.json", paths.state_root / ".auth.lock"),
+        mode=0o700,
     )
     if not paths.config_path.exists():
         write_atomic(paths.config_path, "{}\n", 0o600)
@@ -272,10 +273,9 @@ def install_service(settings, config_path, *, runner=run, start=True):
     paths = prepare_installation(settings, config_path)
     write_atomic(paths.unit_path, service_unit(paths.config_path), 0o644)
     runner(["systemctl", "--user", "daemon-reload"])
+    runner(["systemctl", "--user", "enable", "omp-deck.service"])
     if start:
-        runner(["systemctl", "--user", "enable", "--now", "omp-deck.service"])
-    else:
-        runner(["systemctl", "--user", "enable", "omp-deck.service"])
+        runner(["systemctl", "--user", "restart", "omp-deck.service"])
     return paths
 
 

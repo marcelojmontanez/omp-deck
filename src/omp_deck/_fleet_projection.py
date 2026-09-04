@@ -110,17 +110,61 @@ def bounded_collection(values: Sequence[Mapping[str, Any]]) -> list[dict[str, An
     return [strict_clone(value) for value in values[-MAX_COLLECTION_ITEMS:]]
 
 
-def _pending_ui(value: PendingUiRequest | None) -> dict[str, Any] | None:
+def pending_ui_projection(
+    value: PendingUiRequest | Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
     if value is None:
         return None
-    question = {"id": f"{value.id}:0", "prompt": value.message or value.title or value.kind,
-                "options": [asdict(option) for option in value.options], "multi": False,
-                "recommended": None, "allowCustom": value.allow_custom,
-                "customPlaceholder": value.custom_placeholder, "prefill": value.prefill}
-    return {"id": value.id, "kind": value.kind, "title": value.title, "message": value.message,
-            "questions": [question], "questionIndex": 0, "allowCancel": value.allow_cancel,
-            "expiresAt": _timestamp(value.expires_at * 1000) if value.expires_at is not None else None,
-            "status": "pending"}
+    request = asdict(value) if isinstance(value, PendingUiRequest) else value
+    request_id = request.get("id")
+    kind = request.get("kind")
+    if not isinstance(request_id, str) or not request_id or not isinstance(kind, str):
+        return None
+    options = []
+    for option in request.get("options", ()):
+        if not isinstance(option, Mapping):
+            continue
+        option_value = option.get("value")
+        label = option.get("label")
+        if not isinstance(option_value, str) or not isinstance(label, str):
+            continue
+        description = option.get("description")
+        options.append(
+            {
+                "value": option_value,
+                "label": label,
+                "description": description if isinstance(description, str) else None,
+            }
+        )
+    title = request.get("title")
+    message = request.get("message")
+    prompt = message or title or kind
+    expires_at = request.get("expires_at")
+    question = {
+        "id": f"{request_id}:0",
+        "prompt": prompt,
+        "options": options,
+        "multi": False,
+        "recommended": None,
+        "allowCustom": request.get("allow_custom") is True,
+        "customPlaceholder": request.get("custom_placeholder")
+        if isinstance(request.get("custom_placeholder"), str)
+        else None,
+        "prefill": request.get("prefill") if isinstance(request.get("prefill"), str) else None,
+    }
+    return {
+        "id": request_id,
+        "kind": kind,
+        "title": title if isinstance(title, str) else None,
+        "message": message if isinstance(message, str) else None,
+        "questions": [question],
+        "questionIndex": 0,
+        "allowCancel": request.get("allow_cancel") is True,
+        "expiresAt": _timestamp(expires_at * 1000)
+        if isinstance(expires_at, (int, float)) and not isinstance(expires_at, bool)
+        else None,
+        "status": "pending",
+    }
 
 
 def _collab_pending(request: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -151,7 +195,7 @@ def _collab_pending(request: Mapping[str, Any] | None) -> dict[str, Any] | None:
 
 def rpc_projection(session: Mapping[str, Any], snapshot: AdapterSnapshot, session_id: str,
                    instance_id: str, generation: int) -> dict[str, Any]:
-    pending = _pending_ui(snapshot.pending_ui_request)
+    pending = pending_ui_projection(snapshot.pending_ui_request)
     state = snapshot.state
     public_state = "disconnected" if snapshot.transport_status != "connected" else (
         "needs_input" if pending is not None else "working" if state.get("is_streaming") or state.get("is_compacting") else "idle")
@@ -176,8 +220,19 @@ def collab_projection(session: Mapping[str, Any], snapshot: Any, session_id: str
     entries = []
     for entry in snapshot.entries:
         if entry.get("type") == "message" and isinstance(entry.get("message"), Mapping):
-            message = dict(entry["message"]); message["id"] = entry.get("id"); message["timestamp"] = entry.get("timestamp")
-            entries.append(message)
+            message = dict(entry["message"])
+        elif (
+            entry.get("type") == "custom_message"
+            and entry.get("customType") == "collab-prompt"
+            and entry.get("display") is True
+            and isinstance(entry.get("content"), str)
+        ):
+            message = {"role": "user", "content": entry["content"]}
+        else:
+            continue
+        message["id"] = entry.get("id")
+        message["timestamp"] = entry.get("timestamp")
+        entries.append(message)
     public_state = "disconnected" if snapshot.transport_status != "connected" else (
         "needs_input" if pending is not None else "working" if state.get("isStreaming") else "idle")
     return {"ompSessionId": snapshot.header.get("id") or session.get("ompSessionId"), "state": public_state,

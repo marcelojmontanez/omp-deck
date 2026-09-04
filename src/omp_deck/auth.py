@@ -273,6 +273,7 @@ class AuthManager:
             stat.S_ISLNK(info.st_mode)
             or not stat.S_ISDIR(info.st_mode)
             or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077
         ):
             raise AuthError("authentication state root is unsafe")
 
@@ -287,9 +288,12 @@ class AuthManager:
                 raise AuthError("authentication state root is unavailable") from error
             try:
                 root_info = os.fstat(directory_fd)
-                if not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid != os.geteuid():
+                if (
+                    not stat.S_ISDIR(root_info.st_mode)
+                    or root_info.st_uid != os.geteuid()
+                    or root_info.st_mode & 0o077
+                ):
                     raise AuthError("authentication state root is unsafe")
-                os.fchmod(directory_fd, 0o700)
                 try:
                     lock_fd = os.open(
                         ".auth.lock",

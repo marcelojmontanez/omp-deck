@@ -18,7 +18,12 @@ from omp_deck.extension_adapter import ExtensionRegistration, ExtensionSnapshot
 from omp_deck.fleet_model import FleetModel
 from omp_deck.rpc_adapter import AdapterError, AdapterEvent
 from omp_deck.settings import Settings
-from omp_deck.terminal_sessions import TerminalCommandConflict, TerminalSessionManager, _terminal_id
+from omp_deck.terminal_sessions import (
+    TerminalCommandConflict,
+    TerminalSessionError,
+    TerminalSessionManager,
+    _terminal_id,
+)
 
 
 KEY = bytes(range(32))
@@ -65,6 +70,7 @@ class CollabSocket:
 
 class FakeCollabAdapter:
     instances = []
+    fail_start = False
 
     def __init__(self, link, name, on_event=None):
         self._link_for_assertion = link
@@ -81,7 +87,8 @@ class FakeCollabAdapter:
 
     def start(self):
         self.calls.append(("start",))
-
+        if type(self).fail_start:
+            raise RuntimeError("connect failed")
     def snapshot(self):
         return self._snapshot
 
@@ -164,6 +171,7 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.model = FleetModel()
         self.managers = []
         FakeCollabAdapter.instances.clear()
+        FakeCollabAdapter.fail_start = False
         FakeExtensionAdapter.instances.clear()
 
     def tearDown(self):
@@ -297,6 +305,20 @@ class TerminalSessionManagerTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             self.model.get(session_id)
 
+    def test_collab_connection_failure_is_reported_and_remains_disconnected(self):
+        manager = self.manager()
+        FakeCollabAdapter.fail_start = True
+
+        with patch("omp_deck.terminal_sessions.CollabAdapter", FakeCollabAdapter):
+            with self.assertRaisesRegex(TerminalSessionError, "connection unavailable"):
+                manager.add_collab(collab_link())
+
+        session = self.model.snapshot()["sessions"][0]
+        self.assertEqual(session["transport"]["status"], "disconnected")
+        self.assertEqual(session["transport"]["reason"], "Collaboration connection unavailable")
+        self.assertIsNotNone(manager.credentials.get_link(session["id"]))
+        self.assertEqual(manager.registry.load()[0]["id"], session["id"])
+
     def test_real_read_only_collab_adapter_rejects_mutation_before_socket_write(self):
         frames = [host({**WELCOME, "readOnly": True}), host(EMPTY_CHUNK)]
         sock = CollabSocket(frames)
@@ -361,14 +383,42 @@ class TerminalSessionManagerTests(unittest.TestCase):
         adapter._snapshot = CollabSnapshot(
             header=MappingProxyType({"id": "omp-collab"}),
             state=MappingProxyType({"cwd": "/work/collab", "isStreaming": False}),
-            entries=(MappingProxyType({"type": "message", "id": "entry", "timestamp": "now", "message": {"role": "assistant", "content": "answer"}}),),
+            entries=(
+                MappingProxyType({
+                    "type": "message",
+                    "id": "entry",
+                    "timestamp": "now",
+                    "message": {"role": "assistant", "content": "answer"},
+                }),
+                MappingProxyType({
+                    "type": "custom_message",
+                    "customType": "collab-prompt",
+                    "display": True,
+                    "id": "prompt",
+                    "timestamp": "now",
+                    "content": "optimistic prompt",
+                }),
+            ),
             agents=(MappingProxyType({"id": "agent", "status": "running"}),),
-            pending_ui_requests=(MappingProxyType({"reqId": 12, "kind": "select", "title": "Proceed?", "options": ["Yes", "No"]}),),
-            sequence=2, transport_status="connected", reason=None, read_only=False,
+            pending_ui_requests=(MappingProxyType({
+                "reqId": 12,
+                "kind": "select",
+                "title": "Proceed?",
+                "options": ["Yes", "No"],
+            }),),
+            sequence=2,
+            transport_status="connected",
+            reason=None,
+            read_only=False,
         )
         adapter._callback(AdapterEvent(2, "entry", {}, 2.0))
         public = self.model.get(session_id)
         self.assertEqual(public["messages"][0]["content"], [{"type": "text", "text": "answer"}])
+        self.assertEqual(public["messages"][1]["role"], "user")
+        self.assertEqual(
+            public["messages"][1]["content"],
+            [{"type": "text", "text": "optimistic prompt"}],
+        )
         self.assertEqual(public["subagents"], [{"id": "agent", "status": "running"}])
         self.assertEqual(public["pendingUiRequest"]["id"], "12")
         self.assertEqual(public["state"], "needs_input")

@@ -21,9 +21,9 @@ function startEventStream() {
     if (message.type === 'snapshot') {
       applyFleetSnapshot(message.payload || {});
     } else if (message.type === 'session_removed') {
-      removeFleetSession(message.sessionId);
+      removeFleetSession(message.sessionId, message.snapshotGeneration);
     } else if (message.payload?.session) {
-      applyFleetSession(message.payload.session);
+      applyFleetSession(message.payload.session, message.snapshotGeneration);
     } else {
       scheduleEventRecovery();
     }

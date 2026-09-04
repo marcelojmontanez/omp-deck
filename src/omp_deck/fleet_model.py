@@ -12,6 +12,7 @@ from ._fleet_projection import (
     now,
     plain_json,
     rpc_projection,
+    pending_ui_projection,
     strict_clone,
 )
 from .event_stream import EventJournal
@@ -239,11 +240,15 @@ class FleetModel:
             if event.type == "transport":
                 status = event.payload.get("status", "disconnected")
                 session["transport"].update(status=status, reason=event.payload.get("reason"))
-                if status != "connected":
+                if status == "degraded":
+                    session["state"] = "degraded"
+                elif status != "connected":
                     session["state"] = "disconnected"
-            elif event.type == "ui_request" and "id" in event.payload:
-                session["pendingUiRequest"] = strict_clone(event.payload)
-                session["state"] = "needs_input"
+            elif event.type == "ui_request":
+                pending = pending_ui_projection(event.payload)
+                if pending is not None:
+                    session["pendingUiRequest"] = pending
+                    session["state"] = "needs_input"
             elif event.type in {"ui_request_resolved", "ui_request_cancelled", "ui_request_timeout"}:
                 pending = session.get("pendingUiRequest")
                 if isinstance(pending, Mapping) and pending.get("id") == event.payload.get("id"):
@@ -302,7 +307,9 @@ class FleetModel:
                 instanceId=instance_id,
                 reason=reason,
             )
-            if public_status != "connected":
+            if public_status == "degraded":
+                session["state"] = "degraded"
+            elif public_status != "connected":
                 session["state"] = "disconnected"
             session["updatedAt"] = now()
             self._changed_locked("transport", session_id, {"status": public_status, "reason": reason})

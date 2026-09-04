@@ -187,6 +187,22 @@ class AuthManagerTests(unittest.TestCase):
         AuthManager(self.temp.name, now=self.wall, monotonic=self.monotonic)
         self.assertEqual(stat.S_IMODE(state_path.stat().st_mode), 0o600)
 
+    @unittest.skipIf(os.name == "nt", "POSIX mode semantics")
+    def test_permissive_existing_state_root_is_rejected_without_mutation(self):
+        root = Path(self.temp.name) / "permissive"
+        root.mkdir()
+        sentinel = root / "unrelated"
+        sentinel.write_text("preserve")
+        root.chmod(0o777)
+
+        with self.assertRaisesRegex(AuthError, "state root is unsafe"):
+            AuthManager(root, now=self.wall, monotonic=self.monotonic)
+
+        self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o777)
+        self.assertEqual(sentinel.read_text(), "preserve")
+        self.assertFalse((root / ".auth.lock").exists())
+        self.assertFalse((root / "auth.json").exists())
+
     def test_read_only_validation_does_not_create_missing_state(self):
         missing = Path(self.temp.name) / "missing"
         with self.assertRaisesRegex(RuntimeError, "missing"):

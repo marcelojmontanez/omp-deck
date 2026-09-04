@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -97,13 +98,16 @@ def validate_manifest(paths):
     return InstallationPaths(**recorded)
 
 
-def mark_owned(root, allowed_existing=()):
+def mark_owned(root, allowed_existing=(), *, mode=None):
     if root.is_symlink():
         raise RuntimeError(f"refusing to mark symlink as owned: {root}")
     if root.exists():
-        if not root.is_dir():
-            raise RuntimeError(f"owned path is not a directory: {root}")
+        info = root.stat(follow_symlinks=False)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+            raise RuntimeError(f"owned path is unsafe: {root}")
         if has_ownership_marker(root):
+            if mode is not None:
+                root.chmod(mode)
             return
         allowed = {Path(path).absolute() for path in allowed_existing}
         entries = list(root.iterdir())
@@ -114,6 +118,9 @@ def mark_owned(root, allowed_existing=()):
         root.mkdir(parents=True)
     marker = root / OWNERSHIP_MARKER
     marker.write_text("OMP Deck owned directory\n", encoding="utf-8")
+
+    if mode is not None:
+        root.chmod(mode)
 
 
 def has_ownership_marker(root):

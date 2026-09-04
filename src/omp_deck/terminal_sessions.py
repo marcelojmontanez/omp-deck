@@ -177,6 +177,7 @@ class TerminalSessionManager:
                 record["id"], instance_id=None, generation=current["generation"],
                 status="disconnected", reason="Collaboration connection unavailable",
             )
+            raise TerminalSessionError("collaboration connection unavailable") from None
         return self.model.get(record["id"])
 
     def remove(self, session_id: str) -> bool:

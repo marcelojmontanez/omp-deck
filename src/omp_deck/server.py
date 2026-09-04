@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import json
-import mimetypes
 import re
 import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer as _ThreadingHTTPServer
@@ -14,7 +13,7 @@ from .auth import (
     PairingFailed,
     PairingRateLimited,
 )
-from .attachments import read_blob
+from .attachments import detect_image_mime, read_blob
 from .projects import create_project_directory, list_launchable_projects, resolve_project_path
 from .fleet_model import FleetModel
 from .rpc_sessions import (
@@ -78,6 +77,7 @@ def terminal_manager():
 
 
 def start_runtime():
+    auth_manager()
     failures = dict(rpc_manager().recover_desired())
     failures.update(terminal_manager().start())
     return failures
@@ -274,9 +274,9 @@ class Handler(SimpleHTTPRequestHandler):
         if blob is None:
             self.reply(404, {"error": "image not found"})
             return
-        name, body = blob
+        _, body = blob
         self.send_response(200)
-        self.send_header("Content-Type", mimetypes.guess_type(name)[0] or "application/octet-stream")
+        self.send_header("Content-Type", detect_image_mime(body) or "application/octet-stream")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -344,8 +344,7 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if request_path == "/api/sessions":
             try:
-                rpc_manager().refresh_connected()
-                terminal_manager().refresh_connected()
+                rpc_manager().request_refresh_connected()
                 self.reply(200, _fleet_model.snapshot())
             except Exception:
                 self.reply(503, {"error": "session state unavailable"})

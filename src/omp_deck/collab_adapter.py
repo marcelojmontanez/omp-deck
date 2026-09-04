@@ -313,13 +313,17 @@ class CollabAdapter:
             if not self._welcome:
                 raise AdapterIncompatibleError("host frame arrived before welcome", kind="protocol")
             if frame_type == "snapshot-chunk":
-                self._ingest_snapshot_chunk(frame)
-                return
-            if not self._snapshot_complete:
-                raise AdapterIncompatibleError("host frame arrived before snapshot completion", kind="protocol")
-            payload = self._ingest_live_frame(frame_type, frame)
+                if not self._ingest_snapshot_chunk(frame):
+                    return
+                event_type = "transport"
+                payload = {"status": "connected", "reason": None}
+            else:
+                if not self._snapshot_complete:
+                    raise AdapterIncompatibleError("host frame arrived before snapshot completion", kind="protocol")
+                event_type = frame_type.replace("-", "_")
+                payload = self._ingest_live_frame(frame_type, frame)
         if payload is not None:
-            self._emit(frame_type.replace("-", "_"), payload)
+            self._emit(event_type, payload)
 
     def _ingest_welcome(self, frame: Mapping[str, Any]) -> None:
         if self._welcome or frame.get("proto") != COLLAB_PROTO:
@@ -335,7 +339,7 @@ class CollabAdapter:
         if self._expected_entries < 0 or self._expected_entries > self._entry_limit:
             raise AdapterIncompatibleError("snapshot entry limit exceeded", kind="bounds")
 
-    def _ingest_snapshot_chunk(self, frame: Mapping[str, Any]) -> None:
+    def _ingest_snapshot_chunk(self, frame: Mapping[str, Any]) -> bool:
         entries = frame.get("entries")
         final = frame.get("final")
         if not isinstance(entries, list) or not isinstance(final, bool):
@@ -345,12 +349,13 @@ class CollabAdapter:
             raise AdapterIncompatibleError("snapshot bounds exceeded", kind="bounds")
         self._entries.extend(dict(entry) for entry in entries)
         if not final:
-            return
+            return False
         if len(self._entries) != self._expected_entries:
             raise AdapterIncompatibleError("incomplete collaboration snapshot", kind="protocol")
         self._snapshot_complete = True
         self._status, self._reason = "connected", None
         self._ready.set()
+        return True
 
     def _ingest_live_frame(self, frame_type: str, frame: Mapping[str, Any]) -> Mapping[str, Any] | None:
         if frame_type == "entry":

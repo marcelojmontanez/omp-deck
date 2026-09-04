@@ -151,7 +151,6 @@ def setup(*, tailscale=False):
         raise RuntimeError("stock OMP is not installed or not on PATH")
     plugin_preexisting = plugin_installed(settings)
     service_snapshot = capture_service_state()
-    manager = AuthManager(settings.state_root)
     plugin_backup = None
     plugin_touched = False
     service_touched = False
@@ -168,7 +167,7 @@ def setup(*, tailscale=False):
         check_health(settings)
         if tailscale:
             tailscale_touched = enable_tailscale(settings)
-        secret = manager.begin_pairing()
+        secret = AuthManager(settings.state_root).begin_pairing()
     except Exception as error:
         rollback_errors = []
         if tailscale_touched:

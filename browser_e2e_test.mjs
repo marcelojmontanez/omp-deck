@@ -176,6 +176,95 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   assert.match(rendering.cardText, /Worker/);
   assert.doesNotMatch(rendering.cardText, /Sleeper/);
   assert.equal(rendering.selectedId, 'session-1');
+  await page.waitForFunction(() => !state.refreshing);
+  const recovery = await page.evaluate(async () => {
+    state.eventSource?.close();
+    const originalFetch = window.fetch;
+    const baseGeneration = state.snapshotGeneration + 10;
+    let calls = 0;
+    let releaseFirst;
+    const response = payload => ({
+      ok: true,
+      status: 200,
+      json: async () => payload,
+    });
+    const rawSession = title => ({
+      id: 'recovery-session',
+      ompSessionId: 'omp-recovery',
+      title,
+      project: {name: 'demo', path: '/work/demo'},
+      state: 'idle',
+      transport: {kind: 'rpc', status: 'connected', label: 'RPC'},
+      capabilities: {},
+      messages: [],
+      todos: [],
+      subagents: [],
+      pendingUiRequest: null,
+      unread: false,
+      updatedAt: '2026-08-20T12:34:56.789Z',
+      workingOn: null,
+      model: null,
+      thinking: null,
+    });
+    window.fetch = (input, options) => {
+      if (input !== '/api/sessions') return originalFetch(input, options);
+      calls += 1;
+      if (calls === 1) {
+        return new Promise(resolve => {
+          releaseFirst = () => resolve(response({
+            snapshotGeneration: baseGeneration,
+            sessions: [rawSession('Stale HTTP')],
+          }));
+        });
+      }
+      return Promise.resolve(response({
+        snapshotGeneration: baseGeneration + 2,
+        sessions: [rawSession('Recovered snapshot')],
+      }));
+    };
+    try {
+      const activeRefresh = refresh();
+      while (!releaseFirst) await new Promise(resolve => setTimeout(resolve, 0));
+      void refresh();
+      applyFleetSession(rawSession('Live event'), baseGeneration + 1);
+      const liveTitle = state.agents.find(agent => agent.id === 'recovery-session')?.label;
+      releaseFirst();
+      await activeRefresh;
+      const recoveredTitle = state.agents.find(agent => agent.id === 'recovery-session')?.label;
+      const staleRequestGeneration = state.snapshotGeneration;
+      applyFleetSession(rawSession('Newest event'), baseGeneration + 3);
+      applyFleetSnapshot({
+        snapshotGeneration: baseGeneration + 2,
+        sessions: [rawSession('Late stale snapshot')],
+      }, staleRequestGeneration);
+      const staleIgnoredTitle = state.agents.find(
+        agent => agent.id === 'recovery-session'
+      )?.label;
+      applyFleetSnapshot({
+        snapshotGeneration: 1,
+        sessions: [rawSession('Restarted server')],
+      });
+      return {
+        calls,
+        liveTitle,
+        recoveredTitle,
+        staleIgnoredTitle,
+        restartedTitle: state.agents.find(
+          agent => agent.id === 'recovery-session'
+        )?.label,
+        snapshotGeneration: state.snapshotGeneration,
+      };
+    } finally {
+      window.fetch = originalFetch;
+    }
+  });
+  assert.equal(recovery.calls, 2);
+  assert.equal(recovery.liveTitle, 'Live event');
+  assert.equal(recovery.recoveredTitle, 'Recovered snapshot');
+  assert.equal(recovery.staleIgnoredTitle, 'Newest event');
+  assert.equal(recovery.restartedTitle, 'Restarted server');
+  assert.equal(recovery.snapshotGeneration > 0, true);
+
   assert.equal(device.httpOnly, true);
   assert.equal(device.secure, true);
   assert.equal(device.sameSite, 'Strict');

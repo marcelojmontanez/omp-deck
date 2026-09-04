@@ -16,12 +16,12 @@ from .fleet_model import FleetModel
 from .projects import resolve_project_path
 from .registry_store import RegistryStore
 from .rpc_adapter import (
-    AdapterDisconnectedError,
     AdapterError,
     AdapterEvent,
     AdapterSnapshot,
     SessionAdapter,
 )
+from .rpc_refresh import RpcRefreshScheduler
 from .settings import Settings
 
 
@@ -67,6 +67,10 @@ class RpcSessionManager:
         self._command_result_limit = 1_000
         self._launch_locks: dict[str, threading.Lock] = {}
         self._launch_results: OrderedDict[str, tuple[str, dict[str, Any]]] = OrderedDict()
+        self._closed = False
+        self._refreshes = RpcRefreshScheduler(
+            self.refresh, self._replace_disconnected, self._mark_refresh_failed
+        )
         for record in self.registry.load():
             self.model.load_record(record)
 
@@ -175,11 +179,13 @@ class RpcSessionManager:
     def refresh_connected(self) -> None:
         with self._lock:
             session_ids = tuple(self._runtimes)
-        for session_id in session_ids:
-            try:
-                self.refresh(session_id)
-            except AdapterDisconnectedError as error:
-                self._replace_disconnected(session_id, error)
+        self._refreshes.refresh_now(session_ids)
+
+    def request_refresh_connected(self) -> None:
+        with self._lock:
+            session_ids = tuple(self._runtimes)
+        self._refreshes.request(session_ids)
+
     def dispatch(
         self,
         session_id: str,
@@ -289,8 +295,18 @@ class RpcSessionManager:
         if runtime is not None:
             runtime.generation = record["generation"]
         self.model.load_record(record)
-        if runtime is not None and runtime.adapter is not None:
-            runtime.adapter.shutdown()
+        try:
+            if runtime is not None and runtime.adapter is not None:
+                runtime.adapter.shutdown()
+        except Exception:
+            self.model.set_transport(
+                session_id,
+                instance_id=runtime.instance_id,
+                generation=record["generation"],
+                status="disconnected",
+                reason="shutdown failed",
+            )
+            raise
         self.model.set_transport(
             session_id,
             instance_id=runtime.instance_id if runtime else None,
@@ -301,8 +317,10 @@ class RpcSessionManager:
 
     def close(self) -> None:
         with self._lock:
+            self._closed = True
             runtimes = tuple(self._runtimes.values())
             self._runtimes.clear()
+        self._refreshes.close()
         for runtime in runtimes:
             if runtime.adapter is not None:
                 try:
@@ -323,6 +341,8 @@ class RpcSessionManager:
             generation=record["generation"],
         )
         with self._lock:
+            if self._closed:
+                raise RuntimeError("RPC session manager is closed")
             if runtime.session_id in self._runtimes:
                 raise RuntimeError(f"session {runtime.session_id} is already connected")
             self._runtimes[runtime.session_id] = runtime
@@ -359,6 +379,9 @@ class RpcSessionManager:
             )
             runtime.adapter = adapter
             adapter.start()
+            with self._lock:
+                if self._closed or self._runtimes.get(runtime.session_id) is not runtime:
+                    raise RuntimeError("RPC session manager is closed")
             snapshot = adapter.snapshot()
             final = self._persist_rpc_identity(updated, snapshot)
             runtime.generation = final["generation"]
@@ -392,6 +415,7 @@ class RpcSessionManager:
             omp_session_id=omp_session_id if isinstance(omp_session_id, str) and omp_session_id else record.get("ompSessionId"),
             recovery_metadata=recovery,
         )
+
     def _validated_project(self, record: Mapping[str, Any]) -> str:
         project = record["project"]
         resolved = resolve_project_path(
@@ -406,6 +430,18 @@ class RpcSessionManager:
             if record["id"] == session_id:
                 return record
         raise KeyError(session_id)
+
+    def _mark_refresh_failed(self, session_id: str, reason: str) -> None:
+        runtime = self._runtime_or_none(session_id)
+        if runtime is None:
+            return
+        self.model.set_transport(
+            session_id,
+            instance_id=runtime.instance_id,
+            generation=runtime.generation,
+            status="degraded",
+            reason=reason,
+        )
 
     def _replace_disconnected(self, session_id: str, error: Exception) -> None:
         with self._lock:
@@ -427,6 +463,9 @@ class RpcSessionManager:
         record = self._record(session_id)
         if not record["desiredRpcRunning"]:
             return
+        with self._lock:
+            if self._closed:
+                return
         try:
             self._connect(record, resume=record.get("ompSessionId"))
         except Exception as reconnect_error:

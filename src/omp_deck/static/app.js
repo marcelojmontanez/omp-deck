@@ -10,6 +10,8 @@ const state = {
   showTodo: false,
   showArchive: false,
   refreshing: false,
+  refreshPending: false,
+  snapshotGeneration: 0,
   renderRevision: 0,
   renderedRevision: -1,
   renderedSessionId: null,
@@ -65,15 +67,24 @@ const {
 });
 
 async function refresh() {
-  if (state.refreshing) return;
+  if (state.refreshing) {
+    state.refreshPending = true;
+    return;
+  }
   state.refreshing = true;
   try {
-    const response = await ompDeckApi.request('/api/sessions', {cache: 'no-store'});
-    if (!response.ok) throw new Error(`OMP Deck returned ${response.status}`);
-    applyFleetSnapshot(await response.json());
-  } catch (error) {
-    el.connection.classList.add('offline');
-    el['connection-text'].textContent = 'Offline';
+    do {
+      state.refreshPending = false;
+      const requestedGeneration = state.snapshotGeneration;
+      try {
+        const response = await ompDeckApi.request('/api/sessions', {cache: 'no-store'});
+        if (!response.ok) throw new Error(`OMP Deck returned ${response.status}`);
+        applyFleetSnapshot(await response.json(), requestedGeneration);
+      } catch {
+        el.connection.classList.add('offline');
+        el['connection-text'].textContent = 'Offline';
+      }
+    } while (state.refreshPending);
   } finally {
     state.refreshing = false;
   }

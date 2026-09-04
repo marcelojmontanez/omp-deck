@@ -22,6 +22,7 @@ class MigrationTests(unittest.TestCase):
         self.sockets = self.state / "sockets"
         self.sockets.mkdir(parents=True, mode=0o700)
         self.sockets.chmod(0o700)
+        self.state.chmod(0o700)
         self.session_id = "01a0664c-4f44-768e-aef0-3adde4f0395a"
         self.settings = Settings(
             host="127.0.0.1",
@@ -96,6 +97,16 @@ class MigrationTests(unittest.TestCase):
             apply_migration(self.settings)
 
         self.assertFalse((self.state / ".omp-deck-owned").exists())
+
+    def test_apply_rejects_permissive_state_root_without_claiming_it(self):
+        self.state.chmod(0o777)
+
+        with self.assertRaisesRegex(RuntimeError, "unsafe ownership or permissions"):
+            apply_migration(self.settings)
+
+        self.assertEqual(self.state.stat().st_mode & 0o777, 0o777)
+        self.assertFalse((self.state / ".omp-deck-owned").exists())
+        self.assertFalse((self.state / "registry.json").exists())
 
 if __name__ == "__main__":
     unittest.main()

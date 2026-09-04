@@ -280,6 +280,41 @@ class FleetModelTests(unittest.TestCase):
         self.assertEqual(session["todos"][0]["meta"]["owner"], "a")
         self.assertEqual(session["subagents"][0]["meta"]["attempt"], 1)
 
+    def test_live_rpc_ui_request_uses_public_pending_request_shape(self):
+        model = self.connected_model()
+        payload = {
+            "id": "ask-7",
+            "kind": "select",
+            "title": "Choose",
+            "message": "Pick one",
+            "options": [
+                {"value": "safe", "label": "Safe", "description": "Recommended"},
+            ],
+            "allow_cancel": True,
+            "allow_custom": False,
+            "prefill": None,
+            "custom_placeholder": None,
+            "expires_at": None,
+        }
+
+        self.assertTrue(model.apply_adapter_event(
+            "deck-1",
+            instance_id="instance-a",
+            generation=3,
+            event=self.event(1, "ui_request", payload),
+        ))
+
+        pending = model.get("deck-1")["pendingUiRequest"]
+        self.assertEqual(pending["id"], "ask-7")
+        self.assertEqual(pending["questions"][0]["prompt"], "Pick one")
+        self.assertEqual(
+            pending["questions"][0]["options"],
+            [{"value": "safe", "label": "Safe", "description": "Recommended"}],
+        )
+        self.assertTrue(pending["allowCancel"])
+        self.assertNotIn("allow_cancel", pending)
+        self.assertNotIn("allow_custom", pending["questions"][0])
+
 
 
 class EventJournalTests(unittest.TestCase):

@@ -24,7 +24,7 @@ class _Manager:
         self.import_error = None
         self._requests = {}
 
-    def refresh_connected(self):
+    def request_refresh_connected(self):
         return None
 
     def _dispatch(self, session_id, request_id, action, payload):
@@ -217,7 +217,7 @@ class NormalizedHttpTests(unittest.TestCase):
 
     def test_message_and_follow_up_decode_images_to_exact_manager_wire_shape(self):
         self.enable("rpc-1", "attachments")
-        raw = b"\x00\x01image-bytes\xff"
+        raw = b"\x89PNG\r\n\x1a\nimage-bytes\xff"
         encoded = base64.b64encode(raw).decode("ascii")
         attachment = {
             "name": "capture.png",
@@ -247,15 +247,25 @@ class NormalizedHttpTests(unittest.TestCase):
 
     def test_image_validation_rejects_count_type_base64_and_decoded_size(self):
         self.enable("rpc-1", "attachments")
-        valid = {"name": "x.png", "type": "image/png", "data": "data:image/png;base64,AA=="}
+        png = base64.b64encode(b"\x89PNG\r\n\x1a\nvalid").decode("ascii")
+        valid = {
+            "name": "x.png",
+            "type": "image/png",
+            "data": f"data:image/png;base64,{png}",
+        }
         cases = (
             ([valid] * 5, "invalid attachments"),
             ([{"name": "x", "type": "text/plain", "data": "data:text/plain;base64,AA=="}],
              "invalid image attachment"),
             ([{"name": "x", "type": "image/png", "data": "data:image/png;base64,%%%"}],
              "invalid image attachment"),
+            ([{"name": "fake.png", "type": "image/png", "data": "data:image/png;base64,AA=="}],
+             "invalid image attachment"),
+            ([{"name": "x.png", "type": "image/png", "data": "data:image/png;base64," +
+               base64.b64encode(b"\xff\xd8\xffjpeg").decode("ascii")}],
+             "invalid image attachment"),
             ([{"name": "x", "type": "image/png", "data": "data:image/png;base64," +
-               base64.b64encode(b"x" * (700 * 1024 + 1)).decode("ascii")}],
+               base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * (700 * 1024)).decode("ascii")}],
              "image attachments exceed 700 KiB"),
         )
         for index, (attachments, error) in enumerate(cases):

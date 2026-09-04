@@ -74,6 +74,18 @@ class CollabAdapterTests(unittest.TestCase):
         with self.assertRaises(TypeError): snap.header["id"] = "changed"
         adapter.close(); self.assertTrue(sock.closed)
 
+    def test_completed_snapshot_emits_connected_transport_event(self):
+        events = []
+        adapter, _ = self.make([host(WELCOME), host(CHUNK)], on_event=events.append)
+
+        adapter.start()
+
+        self.assertTrue(any(
+            event.type == "transport" and event.payload.get("status") == "connected"
+            for event in events
+        ))
+        adapter.close()
+
     def test_view_link_denies_all_mutation_before_send(self):
         sock = Socket([host({**WELCOME, "entryCount":0, "readOnly":True}), host({"t":"snapshot-chunk", "entries":[], "final":True})])
         adapter = CollabAdapter(link(False), "viewer", connector=lambda url, **opts: sock)
@@ -177,7 +189,7 @@ class CollabAdapterTests(unittest.TestCase):
             def recv(self, timeout=None):
                 self.timeouts.append(timeout)
                 return super().recv(timeout)
-        ticks = iter((0.0, 5.0, 10.0, 15.0, 20.0, 25.0))
+        ticks = iter(float(value) for value in range(0, 105, 5))
         sock = TimedSocket([host({**WELCOME, "entryCount":1}),
                             host({"t":"snapshot-chunk", "entries":[], "final":False}),
                             host(CHUNK)])

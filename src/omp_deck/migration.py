@@ -158,8 +158,12 @@ def _validate_adoptable_state_root(settings) -> None:
         raise RuntimeError("legacy state root is not an approved Deck path")
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     root_info = root.stat(follow_symlinks=False)
-    if not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid != os.geteuid():
-        raise RuntimeError("legacy state root has unsafe ownership")
+    if (
+        not stat.S_ISDIR(root_info.st_mode)
+        or root_info.st_uid != os.geteuid()
+        or root_info.st_mode & 0o077
+    ):
+        raise RuntimeError("legacy state root has unsafe ownership or permissions")
     allowed_directories = {"sockets", "uploads"}
     allowed_files = {
         "read-cursors.json", "registry.json", "cursors.json", "auth.json", "collab.json",

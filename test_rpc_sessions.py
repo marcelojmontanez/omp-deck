@@ -40,6 +40,7 @@ class _Correlation:
 class FakeRpcClient:
     instances: list["FakeRpcClient"] = []
     fail_start = False
+    fail_stop = False
 
     fail_get_state_once: BaseException | None = None
     prompt_entered: dict[str, Event] = {}
@@ -51,6 +52,8 @@ class FakeRpcClient:
         self.stopped = False
         self.state = _OfficialState()
         type(self).instances.append(self)
+        self.get_state_entered: Event | None = None
+        self.get_state_release: Event | None = None
 
     def _on(self, kind, listener):
         self.listeners[kind].append(listener)
@@ -70,8 +73,15 @@ class FakeRpcClient:
             listener(ready)
         return self
 
-    def stop(self): self.stopped = True
+    def stop(self):
+        self.stopped = True
+        if type(self).fail_stop:
+            raise RuntimeError("stop failed")
     def get_state(self):
+        if self.get_state_entered is not None:
+            self.get_state_entered.set()
+        if self.get_state_release is not None:
+            self.get_state_release.wait(timeout=2)
         failure = type(self).fail_get_state_once
         if failure is not None:
             type(self).fail_get_state_once = None
@@ -146,6 +156,7 @@ class TestRpcSessionManager(unittest.TestCase):
         self.model = FleetModel()
         FakeRpcClient.instances.clear()
         FakeRpcClient.fail_start = False
+        FakeRpcClient.fail_stop = False
         FakeRpcClient.fail_get_state_once = None
         FakeRpcClient.prompt_entered.clear()
         FakeRpcClient.prompt_release.clear()
@@ -217,6 +228,20 @@ class TestRpcSessionManager(unittest.TestCase):
         self.assertFalse(self.registry.load()[0]["desiredRpcRunning"])
         self.assertEqual(self.model.get(session_id)["transport"]["status"], "disconnected")
         self.assertEqual(self.model.get(session_id)["transport"]["reason"], "shut down")
+
+    def test_shutdown_failure_still_clears_runtime_intent_and_public_connection(self):
+        session_id = self.launch()["id"]
+        FakeRpcClient.fail_stop = True
+
+        with self.assertRaisesRegex(RuntimeError, "stop failed"):
+            self.manager.shutdown(session_id)
+        FakeRpcClient.fail_stop = False
+
+        self.assertFalse(self.registry.load()[0]["desiredRpcRunning"])
+        self.assertIsNone(self.manager._runtime_or_none(session_id))
+        transport = self.model.get(session_id)["transport"]
+        self.assertEqual(transport["status"], "disconnected")
+        self.assertEqual(transport["reason"], "shutdown failed")
 
     def test_close_stops_transport_but_preserves_restart_intent(self):
         session_id = self.launch()["id"]
@@ -329,6 +354,29 @@ class TestRpcSessionManager(unittest.TestCase):
             "connected",
             self.model.snapshot(),
         )
+
+    def test_background_refresh_isolates_a_blocked_session(self):
+        first_id = self.launch()["id"]
+        first_client = FakeRpcClient.instances[-1]
+        second_project = self.settings.project_root / "second"
+        second_project.mkdir()
+        second_id = self.manager.launch("second", second_project)["id"]
+        second_client = FakeRpcClient.instances[-1]
+        first_client.get_state_entered = Event()
+        first_client.get_state_release = Event()
+        second_client.get_state_entered = Event()
+        second_client.state = dataclasses.replace(second_client.state, thinking_level="low")
+        event_id = self.model.journal.latest_id
+
+        self.manager.request_refresh_connected()
+
+        self.assertTrue(first_client.get_state_entered.wait(timeout=1))
+        self.assertTrue(second_client.get_state_entered.wait(timeout=1))
+        events = self.model.journal.wait_after(event_id, timeout=1)
+        self.assertTrue(any(event.session_id == second_id for event in events))
+        self.assertEqual(self.model.get(second_id)["thinking"], "low")
+        self.assertEqual(self.model.get(first_id)["thinking"], "medium")
+        first_client.get_state_release.set()
 
     def test_dispatch_deduplicates_and_rejects_conflicting_request_id_reuse(self):
         session_id = self.launch()["id"]

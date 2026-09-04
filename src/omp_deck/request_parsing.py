@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from .auth import COOKIE_NAME
+from .attachments import detect_image_mime
 
 
 def read_json_request(handler, max_bytes=64 * 1024):
@@ -98,6 +99,8 @@ def _decode_image(attachment):
         raw = base64.b64decode(payload, validate=True)
     except (ValueError, binascii.Error):
         raise ValueError("invalid image attachment") from None
+    if detect_image_mime(raw) != mime_type:
+        raise ValueError("invalid image attachment")
     return {"type": "image", "data": payload, "mimeType": mime_type}, len(raw)
 
 

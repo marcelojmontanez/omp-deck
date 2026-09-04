@@ -264,13 +264,23 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     if (state.selectedId) markRead(selectedAgent());
   }
 
-  function applyFleetSnapshot(payload) {
+  function noteSnapshotGeneration(generation) {
+    if (Number.isSafeInteger(generation)) state.snapshotGeneration = generation;
+  }
+
+  function applyFleetSnapshot(payload, requestedGeneration = null) {
+    if (
+      Number.isSafeInteger(requestedGeneration)
+      && state.snapshotGeneration !== requestedGeneration
+    ) return;
+    noteSnapshotGeneration(payload.snapshotGeneration);
     state.agents = (payload.sessions || []).map(projectSession);
     touchRender();
     renderFleet();
   }
 
-  function applyFleetSession(session) {
+  function applyFleetSession(session, snapshotGeneration) {
+    noteSnapshotGeneration(snapshotGeneration);
     const projected = projectSession(session);
     const index = state.agents.findIndex(agent => agent.id === projected.id);
     if (index < 0) state.agents.push(projected);
@@ -279,7 +289,8 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     renderFleet();
   }
 
-  function removeFleetSession(sessionId) {
+  function removeFleetSession(sessionId, snapshotGeneration) {
+    noteSnapshotGeneration(snapshotGeneration);
     state.agents = state.agents.filter(agent => agent.id !== sessionId);
     if (state.selectedId === sessionId) state.selectedId = null;
     touchRender();

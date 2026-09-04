@@ -1,4 +1,5 @@
 import tempfile
+import hashlib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -14,13 +15,26 @@ class BlobReaderTests(unittest.TestCase):
         self.patch = patch.object(attachments, "BLOB_ROOT", self.root)
         self.patch.start()
         self.addCleanup(self.patch.stop)
-        self.digest = "a" * 64
+        self.payload = b"\x89PNG\r\n\x1a\nimage"
+        self.digest = hashlib.sha256(self.payload).hexdigest()
 
     def test_reads_one_bounded_regular_blob(self):
-        (self.root / f"{self.digest}.png").write_bytes(b"image")
-        self.assertEqual(attachments.read_blob(self.digest), (f"{self.digest}.png", b"image"))
+        (self.root / f"{self.digest}.png").write_bytes(self.payload)
+        self.assertEqual(
+            attachments.read_blob(self.digest),
+            (f"{self.digest}.png", self.payload),
+        )
 
-    def test_rejects_malformed_ambiguous_symlink_and_oversized_blobs(self):
+    def test_duplicate_content_addressed_names_resolve_to_verified_content(self):
+        (self.root / self.digest).write_bytes(self.payload)
+        (self.root / f"{self.digest}.png").write_bytes(self.payload)
+
+        self.assertEqual(
+            attachments.read_blob(self.digest),
+            (self.digest, self.payload),
+        )
+
+    def test_rejects_malformed_symlink_poisoned_and_oversized_blobs(self):
         self.assertIsNone(attachments.read_blob("../private"))
 
         target = self.root / "target.png"
@@ -30,20 +44,24 @@ class BlobReaderTests(unittest.TestCase):
         self.assertIsNone(attachments.read_blob(self.digest))
         symlink.unlink()
 
-        first = self.root / f"{self.digest}.png"
-        second = self.root / f"{self.digest}.jpg"
-        first.write_bytes(b"one")
-        second.write_bytes(b"two")
+        poisoned = self.root / f"{self.digest}.png"
+        poisoned.write_bytes(b"not the addressed content")
         self.assertIsNone(attachments.read_blob(self.digest))
-        second.unlink()
 
-        first.write_bytes(b"")
+        poisoned.write_bytes(b"")
         self.assertIsNone(attachments.read_blob(self.digest))
-        first.unlink()
+        poisoned.unlink()
         oversized = self.root / f"{self.digest}.bin"
         with oversized.open("wb") as stream:
             stream.truncate(16 * 1024 * 1024 + 1)
         self.assertIsNone(attachments.read_blob(self.digest))
+
+    def test_image_mime_is_derived_from_file_signature(self):
+        self.assertEqual(attachments.detect_image_mime(b"\x89PNG\r\n\x1a\nrest"), "image/png")
+        self.assertEqual(attachments.detect_image_mime(b"\xff\xd8\xffrest"), "image/jpeg")
+        self.assertEqual(attachments.detect_image_mime(b"GIF89arest"), "image/gif")
+        self.assertEqual(attachments.detect_image_mime(b"RIFF\x00\x00\x00\x00WEBPrest"), "image/webp")
+        self.assertIsNone(attachments.detect_image_mime(b"not-an-image"))
 
 
 if __name__ == "__main__":

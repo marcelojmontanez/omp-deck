@@ -65,6 +65,49 @@ class LifecycleTests(unittest.TestCase):
             )
             self.assertEqual(paths.manifest_path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(json.loads(paths.manifest_path.read_text())["state_root"], str(state))
+            self.assertEqual(state.stat().st_mode & 0o777, 0o700)
+
+    def test_running_service_is_restarted_after_install(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            runner = FakeRunner()
+            with patch.dict(os.environ, self.environment(home), clear=False):
+                lifecycle.install_service(
+                    self.settings(home / "runtime-state"),
+                    home / "config/omp-deck/config.json",
+                    runner=runner,
+                )
+
+            self.assertEqual(
+                [call[0] for call in runner.calls],
+                [
+                    ["systemctl", "--user", "daemon-reload"],
+                    ["systemctl", "--user", "enable", "omp-deck.service"],
+                    ["systemctl", "--user", "restart", "omp-deck.service"],
+                ],
+            )
+
+    def test_install_refuses_unrelated_state_root_without_mutating_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            state = home / "unrelated-state"
+            state.mkdir()
+            sentinel = state / "keep.txt"
+            sentinel.write_text("preserved\n")
+            state.chmod(0o755)
+            with patch.dict(os.environ, self.environment(home), clear=False):
+                with self.assertRaisesRegex(RuntimeError, "non-empty unowned path"):
+                    lifecycle.install_service(
+                        self.settings(state),
+                        home / "config/omp-deck/config.json",
+                        runner=FakeRunner(),
+                        start=False,
+                    )
+
+            self.assertEqual(state.stat().st_mode & 0o777, 0o755)
+            self.assertEqual(sentinel.read_text(), "preserved\n")
+            self.assertFalse((state / ".omp-deck-owned").exists())
+
 
     def test_fresh_setup_can_claim_state_after_auth_initialization(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -87,6 +130,7 @@ class LifecycleTests(unittest.TestCase):
 
             self.assertTrue((state / ".omp-deck-owned").is_file())
             self.assertTrue(paths.manifest_path.is_file())
+            self.assertEqual(state.stat().st_mode & 0o777, 0o700)
 
     def test_service_remove_uses_manifest_without_loading_runtime_config(self):
         with tempfile.TemporaryDirectory() as directory:

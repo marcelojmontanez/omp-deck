@@ -96,14 +96,24 @@ def start_runtime():
 
 
 def stop_runtime():
+    errors = []
     with _terminal_manager_lock:
         terminal = _terminal_manager
     if terminal is not None:
-        terminal.close()
+        try:
+            terminal.close()
+        except Exception as error:
+            errors.append(("terminal", error))
     with _rpc_manager_lock:
         manager = _rpc_manager
     if manager is not None:
-        manager.close()
+        try:
+            manager.close()
+        except Exception as error:
+            errors.append(("RPC", error))
+    if errors:
+        detail = "; ".join(f"{label}: {error}" for label, error in errors)
+        raise RuntimeError(f"runtime shutdown failed: {detail}") from errors[0][1]
 
 
 def launch_rpc_project(project, request_id, create=False, title=None):

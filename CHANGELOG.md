@@ -18,3 +18,4 @@
 - Keep rollback plugin backups alive while linked, retain failed-start transports until cleanup succeeds, and report unjoinable Collab reader shutdowns.
 - Reject malformed Collab links before reserving durable request IDs.
 - Surface oversized extension events as an explicit degraded transport state.
+- Bound RPC refresh shutdown and isolate terminal and RPC cleanup failures.

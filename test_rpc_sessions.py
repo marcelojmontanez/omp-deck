@@ -464,6 +464,28 @@ class TestRpcSessionManager(unittest.TestCase):
 
         self.assertTrue(second_refresh.wait(timeout=1))
 
+    def test_refresh_scheduler_close_is_bounded(self):
+        entered = Event()
+        release = Event()
+
+        def refresh(_session_id):
+            entered.set()
+            release.wait()
+
+        scheduler = RpcRefreshScheduler(
+            refresh, lambda *_: None, lambda *_: None
+        )
+        scheduler.request(["session"])
+        self.assertTrue(entered.wait(timeout=1))
+
+        started = time.monotonic()
+        with self.assertRaisesRegex(RuntimeError, "workers did not stop"):
+            scheduler.close(timeout=0.01)
+        self.assertLess(time.monotonic() - started, 0.2)
+
+        release.set()
+        scheduler.close(timeout=1)
+
     def test_dispatch_deduplicates_and_rejects_conflicting_request_id_reuse(self):
         session_id = self.launch()["id"]
         payload = {"message": "hello"}

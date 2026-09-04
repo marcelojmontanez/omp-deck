@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable, Iterable
 
 from .rpc_adapter import AdapterDisconnectedError, AdapterError
@@ -32,15 +33,20 @@ class RpcRefreshScheduler:
         for session_id in session_ids:
             self._schedule(session_id)
 
-    def close(self) -> None:
+    def close(self, timeout: float = 5.0) -> None:
+        if timeout < 0:
+            raise ValueError("timeout must not be negative")
         with self._lock:
             self._closed = True
             self._pending.clear()
             threads = tuple(self._threads.values())
+        deadline = time.monotonic() + timeout
         current = threading.current_thread()
         for thread in threads:
             if thread is not current:
-                thread.join()
+                thread.join(max(0.0, deadline - time.monotonic()))
+        if any(thread is not current and thread.is_alive() for thread in threads):
+            raise RuntimeError("RPC refresh workers did not stop")
     def _schedule(self, session_id: str) -> None:
         with self._lock:
             if self._closed:

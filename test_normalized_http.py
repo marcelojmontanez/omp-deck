@@ -387,6 +387,33 @@ class NormalizedHttpTests(unittest.TestCase):
         self.assertEqual(payload, {"error": "authentication and CSRF token required"})
         self.assertEqual(self.rpc.calls, [])
 
+    def test_stop_runtime_closes_rpc_after_terminal_failure(self):
+        calls = []
+
+        class Manager:
+            def __init__(self, label, failure=None):
+                self.label = label
+                self.failure = failure
+
+            def close(self):
+                calls.append(self.label)
+                if self.failure is not None:
+                    raise self.failure
+
+        with (
+            patch.object(
+                server,
+                "_terminal_manager",
+                Manager("terminal", RuntimeError("terminal failed")),
+            ),
+            patch.object(server, "_rpc_manager", Manager("RPC")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "terminal failed"):
+                server.stop_runtime()
+
+        self.assertEqual(calls, ["terminal", "RPC"])
+
+
 
 if __name__ == "__main__":
     unittest.main()

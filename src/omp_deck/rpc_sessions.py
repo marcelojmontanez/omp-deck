@@ -268,7 +268,6 @@ class RpcSessionManager:
         with self._lock:
             self._closed = True
             runtimes = tuple(self._runtimes.values())
-        self._refreshes.close()
         for runtime in runtimes:
             with self._operation_lock(runtime.session_id):
                 try:
@@ -286,6 +285,7 @@ class RpcSessionManager:
                 with self._lock:
                     if self._runtimes.get(runtime.session_id) is runtime:
                         self._runtimes.pop(runtime.session_id)
+        self._refreshes.close()
 
     def _connect(self, record: Mapping[str, Any], *, resume: str | None) -> None:
         runtime = _Runtime(

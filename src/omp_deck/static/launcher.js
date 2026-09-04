@@ -61,6 +61,7 @@ el['project-launch'].addEventListener('click', async () => {
     if (!response.ok || !payload.session) {
       const error = new Error(payload.error || `Launch failed (${response.status})`);
       error.reuseRequestId = ompDeckApi.shouldReuseRequestId(response, payload);
+      error.projectCreated = payload.created === true;
       throw error;
     }
     pendingLaunch = null;
@@ -71,6 +72,7 @@ el['project-launch'].addEventListener('click', async () => {
     selectAgent(payload.session.id);
   } catch (error) {
     if (error.reuseRequestId === false) pendingLaunch = null;
+    if (error.projectCreated) await loadLaunchableProjects();
     el['launch-state'].textContent = error.message;
   } finally {
     el['project-select'].disabled = false;

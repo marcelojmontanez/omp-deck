@@ -73,7 +73,7 @@ class RpcRequestCoordinator:
                         "session": self.model.get(persisted["sessionId"]),
                         "created": persisted["created"],
                     }
-                return {**persisted, "created": False}
+                return dict(persisted)
             created = False
             try:
                 if create:
@@ -95,19 +95,13 @@ class RpcRequestCoordinator:
                     "created": created,
                 }
             except Exception:
-                if created:
-                    project_path.rmdir()
                 result = {
                     "requestId": request_id,
                     "status": "failed",
                     "errorCode": "launch_failed",
-                    "created": False,
+                    "created": created,
                 }
-                durable = {
-                    "requestId": request_id,
-                    "status": "failed",
-                    "errorCode": "launch_failed",
-                }
+                durable = dict(result)
             self.ledger.complete("rpc-launch", request_id, fingerprint, durable)
             return result
 

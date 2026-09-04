@@ -224,6 +224,37 @@ class TestRpcSessionManager(unittest.TestCase):
         )
         self.assertEqual(len(FakeRpcClient.instances), 1)
 
+    def test_failed_created_launch_preserves_directory_and_durable_outcome(self):
+        def fail_after_writing(_project_name, project_path, *, title=None):
+            (project_path / "work-in-progress.txt").write_text("preserve me")
+            raise RuntimeError("launch failed")
+
+        with patch.object(self.manager, "launch", side_effect=fail_after_writing) as launch:
+            result = self.manager.launch_request(
+                "failed-created-launch",
+                "new-project",
+                create=True,
+            )
+            duplicate = self.manager.launch_request(
+                "failed-created-launch",
+                "new-project",
+                create=True,
+            )
+
+        expected = {
+            "requestId": "failed-created-launch",
+            "status": "failed",
+            "errorCode": "launch_failed",
+            "created": True,
+        }
+        self.assertEqual(result, expected)
+        self.assertEqual(duplicate, expected)
+        self.assertEqual(
+            (self.settings.project_root / "new-project/work-in-progress.txt").read_text(),
+            "preserve me",
+        )
+        self.assertEqual(launch.call_count, 1)
+
     def test_callback_updates_normalized_public_state(self):
         session_id = self.launch()["id"]
         FakeRpcClient.instances[-1].emit_event({"type": "turn_start", "turn": 4})

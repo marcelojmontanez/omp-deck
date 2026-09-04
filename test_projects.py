@@ -49,6 +49,26 @@ class ProjectPathTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "invalid project"):
                 resolve_project_path(root, "missing/nested", must_exist=False)
 
+    def test_rejects_noncanonical_and_control_character_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "parent").mkdir()
+            invalid = (
+                " parent/new",
+                "parent/new ",
+                "parent//new",
+                "parent/./new",
+                "parent/new/",
+                "parent\\new",
+                "parent/\nnew",
+                "parent/\x7fnew",
+            )
+
+            for project in invalid:
+                with self.subTest(project=project):
+                    with self.assertRaisesRegex(ValueError, "invalid project"):
+                        resolve_project_path(root, project, must_exist=False)
+
     def test_creation_uses_directory_descriptors_and_rejects_replacement(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -120,7 +120,6 @@ def stop_runtime():
 def launch_rpc_project(project, request_id, create=False, title=None):
     if not isinstance(project, str):
         raise ValueError("invalid project")
-    project = project.strip()
     if not create and project not in launchable_projects():
         raise ValueError("invalid project")
     return rpc_manager().launch_request(

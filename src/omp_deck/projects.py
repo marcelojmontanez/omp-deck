@@ -49,14 +49,18 @@ def _reject_symlink_components(root, relative, *, allow_missing_leaf):
 def resolve_project_path(root, project, *, must_exist=True):
     if not isinstance(project, str):
         raise ValueError("invalid project")
-    project = project.strip()
-    relative = Path(project)
+    parts = project.split("/")
     if (
         not project
         or len(project) > 240
-        or relative.is_absolute()
-        or any(part in {"", ".", ".."} or part.startswith(".") for part in relative.parts)
+        or project != project.strip()
+        or "\\" in project
+        or any(ord(character) < 32 or ord(character) == 127 for character in project)
+        or any(not part or part in {".", ".."} or part.startswith(".") for part in parts)
     ):
+        raise ValueError("invalid project")
+    relative = Path(*parts)
+    if relative.is_absolute() or relative.as_posix() != project:
         raise ValueError("invalid project")
     resolved_root = _resolved_project_root(root)
     _reject_symlink_components(resolved_root, relative, allow_missing_leaf=not must_exist)

@@ -41,6 +41,7 @@ include-package-data = false
 
 [tool.setuptools.packages.find]
 where = ["src"]
+exclude = ["omp_deck.plugin.node_modules*"]
 
 [tool.setuptools.package-data]
 omp_deck = ["static/*", "plugin/*"]

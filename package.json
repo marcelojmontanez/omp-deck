@@ -6,6 +6,6 @@
     "test:browser": "node --test --test-concurrency=1 browser_e2e_test.mjs"
   },
   "devDependencies": {
-    "puppeteer": "24.16.0"
+    "puppeteer": "25.10.0"
   }
 }

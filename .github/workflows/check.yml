@@ -48,7 +48,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: python3 -m pip install build
+      - name: Seed excluded plugin dependencies
+        run: mkdir -p src/omp_deck/plugin/node_modules/injected && printf 'SHOULD_NOT_SHIP = True\n' > src/omp_deck/plugin/node_modules/injected/sentinel.py
       - run: python3 -m build
+      - name: Verify wheel contents
+        run: python3 -c "import glob, zipfile; names = zipfile.ZipFile(glob.glob('dist/*.whl')[0]).namelist(); assert not [name for name in names if '/node_modules/' in name], names"
       - run: python3 -m pip install dist/*.whl
       - run: omp-deck --help
       - name: Reinstall and uninstall wheel

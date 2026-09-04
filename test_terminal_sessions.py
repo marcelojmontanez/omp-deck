@@ -403,6 +403,14 @@ class TerminalSessionManagerTests(unittest.TestCase):
                 "collab-import-1", secret, title="Different"
             )
 
+    def test_invalid_collab_import_does_not_reserve_request(self):
+        manager = self.manager()
+
+        with self.assertRaisesRegex(ValueError, "invalid collab link"):
+            manager.add_collab_request("invalid-import", "not a collab link")
+
+        self.assertFalse((self.settings.state_root / "requests.json").exists())
+
     def test_real_read_only_collab_adapter_rejects_mutation_before_socket_write(self):
         frames = [host({**WELCOME, "readOnly": True}), host(EMPTY_CHUNK)]
         sock = CollabSocket(frames)

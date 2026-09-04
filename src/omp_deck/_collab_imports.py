@@ -48,6 +48,7 @@ class CollabImportCoordinator:
         *,
         title: str | None = None,
     ) -> dict[str, Any]:
+        parse_collab_link(link)
         request_fingerprint = fingerprint({"link": link, "title": title})
         scope = "collab-import"
         import_lock = self._locks[

@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import dataclasses
-import hashlib
-import json
 import threading
 import uuid
 from enum import Enum
-from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -15,6 +12,7 @@ from omp_rpc import RpcClient
 from .fleet_model import FleetModel
 from .projects import resolve_project_path
 from .registry_store import RegistryStore
+from .request_ledger import RequestConflictError, RequestLedger
 from .rpc_adapter import (
     AdapterError,
     AdapterEvent,
@@ -22,6 +20,7 @@ from .rpc_adapter import (
     SessionAdapter,
 )
 from .rpc_refresh import RpcRefreshScheduler
+from .rpc_requests import RpcRequestCoordinator
 from .settings import Settings
 
 
@@ -56,20 +55,25 @@ class _Runtime:
 class RpcSessionManager:
     """Owns Deck-launched RPC processes without making process state fleet state."""
 
-    def __init__(self, settings: Settings, model: FleetModel, registry: RegistryStore | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        model: FleetModel,
+        registry: RegistryStore | None = None,
+        requests: RequestLedger | None = None,
+    ) -> None:
         self.settings = settings
         self.model = model
         self.registry = registry or RegistryStore(settings.state_root / "registry.json")
+        self.requests = requests or RequestLedger(settings.state_root / "requests.json")
+        self._requests = RpcRequestCoordinator(settings, model, self.requests)
         self._lock = threading.RLock()
         self._runtimes: dict[str, _Runtime] = {}
-        self._command_locks: dict[str, threading.Lock] = {}
-        self._command_results: OrderedDict[tuple[str, str], tuple[str, dict[str, Any]]] = OrderedDict()
-        self._command_result_limit = 1_000
-        self._launch_locks: dict[str, threading.Lock] = {}
-        self._launch_results: OrderedDict[str, tuple[str, dict[str, Any]]] = OrderedDict()
         self._closed = False
         self._refreshes = RpcRefreshScheduler(
-            self.refresh, self._replace_disconnected, self._mark_refresh_failed
+            self._refresh_or_reconnect,
+            self._replace_disconnected,
+            self._mark_refresh_failed,
         )
         for record in self.registry.load():
             self.model.load_record(record)
@@ -123,43 +127,22 @@ class RpcSessionManager:
         self,
         request_id: str,
         project_name: str,
-        project_path: Path,
         *,
         title: str | None = None,
+        create: bool = False,
     ) -> dict[str, Any]:
-        fingerprint = hashlib.sha256(
-            json.dumps(
-                {"project": project_name, "path": str(project_path), "title": title},
-                sort_keys=True,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
-        with self._lock:
-            previous = self._launch_results.get(request_id)
-            if previous is not None:
-                if previous[0] != fingerprint:
-                    raise SessionCommandConflictError("requestId was already used for another launch")
-                return dict(previous[1])
-            launch_lock = self._launch_locks.setdefault(project_name, threading.Lock())
-        with launch_lock:
-            with self._lock:
-                previous = self._launch_results.get(request_id)
-                if previous is not None:
-                    if previous[0] != fingerprint:
-                        raise SessionCommandConflictError("requestId was already used for another launch")
-                    return dict(previous[1])
-            try:
-                session = self.launch(project_name, project_path, title=title)
-                result = {"requestId": request_id, "status": "accepted", "session": session}
-            except Exception:
-                result = {"requestId": request_id, "status": "failed", "errorCode": "launch_failed"}
-            with self._lock:
-                self._launch_results[request_id] = (fingerprint, result)
-                self._launch_results.move_to_end(request_id)
-                while len(self._launch_results) > self._command_result_limit:
-                    self._launch_results.popitem(last=False)
-            return dict(result)
+        try:
+            return self._requests.launch(
+                request_id,
+                project_name,
+                title=title,
+                create=create,
+                start=self.launch,
+            )
+        except RequestConflictError:
+            raise SessionCommandConflictError(
+                "requestId was already used for another launch"
+            ) from None
 
     def refresh(self, session_id: str) -> dict[str, Any]:
         runtime = self._runtime(session_id)
@@ -167,6 +150,9 @@ class RpcSessionManager:
         if adapter is None:
             raise SessionNotConnectedError(session_id)
         snapshot = adapter.snapshot()
+        record = self._persist_rpc_identity(self._record(session_id), snapshot)
+        runtime.generation = record["generation"]
+        self.model.load_record(record)
         if not self.model.apply_rpc_snapshot(
             session_id,
             instance_id=runtime.instance_id,
@@ -177,14 +163,26 @@ class RpcSessionManager:
         return self.model.get(session_id)
 
     def refresh_connected(self) -> None:
-        with self._lock:
-            session_ids = tuple(self._runtimes)
-        self._refreshes.refresh_now(session_ids)
+        self._refreshes.refresh_now(self._desired_rpc_session_ids())
 
     def request_refresh_connected(self) -> None:
-        with self._lock:
-            session_ids = tuple(self._runtimes)
-        self._refreshes.request(session_ids)
+        self._refreshes.request(self._desired_rpc_session_ids())
+
+    def _desired_rpc_session_ids(self) -> tuple[str, ...]:
+        return tuple(
+            record["id"]
+            for record in self.registry.load()
+            if record["adapterKind"] == "rpc" and record["desiredRpcRunning"]
+        )
+
+    def _refresh_or_reconnect(self, session_id: str) -> dict[str, Any]:
+        if self._runtime_or_none(session_id) is not None:
+            return self.refresh(session_id)
+        record = self._record(session_id)
+        if record["adapterKind"] != "rpc" or not record["desiredRpcRunning"]:
+            raise SessionNotConnectedError(session_id)
+        self._connect(record, resume=record.get("ompSessionId"))
+        return self.model.get(session_id)
 
     def dispatch(
         self,
@@ -193,52 +191,18 @@ class RpcSessionManager:
         action: str,
         payload: Mapping[str, Any],
     ) -> dict[str, Any]:
-        fingerprint = hashlib.sha256(
-            json.dumps(
-                {"action": action, "payload": payload},
-                sort_keys=True,
-                ensure_ascii=False,
-                allow_nan=False,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
-        key = (session_id, request_id)
-        with self._lock:
-            previous = self._command_results.get(key)
-            if previous is not None:
-                if previous[0] != fingerprint:
-                    raise SessionCommandConflictError("requestId was already used for another command")
-                return dict(previous[1])
-            command_lock = self._command_locks.setdefault(session_id, threading.Lock())
-        with command_lock:
-            with self._lock:
-                previous = self._command_results.get(key)
-                if previous is not None:
-                    if previous[0] != fingerprint:
-                        raise SessionCommandConflictError("requestId was already used for another command")
-                    return dict(previous[1])
-            try:
-                command_result = self.command(session_id, action, payload)
-                outcome = command_result.get("result")
-                status = "stale" if outcome == "stale" else "accepted"
-                result = {
-                    "requestId": request_id,
-                    "status": status,
-                    "result": outcome,
-                }
-            except AdapterError as error:
-                status = "cancelled" if error.kind == "cancelled" else "failed"
-                result = {
-                    "requestId": request_id,
-                    "status": status,
-                    "errorCode": error.kind,
-                }
-            with self._lock:
-                self._command_results[key] = (fingerprint, result)
-                self._command_results.move_to_end(key)
-                while len(self._command_results) > self._command_result_limit:
-                    self._command_results.popitem(last=False)
-            return dict(result)
+        try:
+            return self._requests.dispatch(
+                session_id,
+                request_id,
+                action,
+                payload,
+                execute=self.command,
+            )
+        except RequestConflictError:
+            raise SessionCommandConflictError(
+                "requestId was already used for another command"
+            ) from None
 
     def command(self, session_id: str, action: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         runtime = self._runtime(session_id)
@@ -275,17 +239,20 @@ class RpcSessionManager:
             return {"accepted": True, "result": None}
         else:
             raise ValueError(f"unsupported RPC action: {action}")
-        snapshot = adapter.snapshot()
-        if action in {"branch", "switchSession"}:
-            final = self._persist_rpc_identity(self._record(session_id), snapshot)
-            runtime.generation = final["generation"]
-            self.model.load_record(final)
-        self.model.apply_rpc_snapshot(
-            session_id,
-            instance_id=runtime.instance_id,
-            generation=runtime.generation,
-            snapshot=snapshot,
-        )
+        try:
+            snapshot = adapter.snapshot()
+            if action in {"branch", "switchSession"}:
+                final = self._persist_rpc_identity(self._record(session_id), snapshot)
+                runtime.generation = final["generation"]
+                self.model.load_record(final)
+            self.model.apply_rpc_snapshot(
+                session_id,
+                instance_id=runtime.instance_id,
+                generation=runtime.generation,
+                snapshot=snapshot,
+            )
+        except Exception:
+            self._refreshes.request((session_id,))
         return {"accepted": True, "result": _plain(result)}
 
     def shutdown(self, session_id: str) -> None:
@@ -403,16 +370,25 @@ class RpcSessionManager:
                     pass
             raise
 
-    def _persist_rpc_identity(self, record: Mapping[str, Any], snapshot: AdapterSnapshot) -> dict[str, Any]:
+    def _persist_rpc_identity(
+        self, record: Mapping[str, Any], snapshot: AdapterSnapshot
+    ) -> dict[str, Any]:
         state = snapshot.state
         recovery: dict[str, Any] = {}
         session_file = state.get("session_file")
         if isinstance(session_file, str) and session_file:
             recovery["sessionFile"] = session_file
         omp_session_id = state.get("session_id")
+        if not isinstance(omp_session_id, str) or not omp_session_id:
+            omp_session_id = record.get("ompSessionId")
+        if (
+            record.get("ompSessionId") == omp_session_id
+            and record.get("recoveryMetadata") == recovery
+        ):
+            return dict(record)
         return self.registry.update(
             record["id"],
-            omp_session_id=omp_session_id if isinstance(omp_session_id, str) and omp_session_id else record.get("ompSessionId"),
+            omp_session_id=omp_session_id,
             recovery_metadata=recovery,
         )
 
@@ -434,12 +410,22 @@ class RpcSessionManager:
     def _mark_refresh_failed(self, session_id: str, reason: str) -> None:
         runtime = self._runtime_or_none(session_id)
         if runtime is None:
-            return
+            try:
+                record = self._record(session_id)
+            except KeyError:
+                return
+            instance_id = None
+            generation = record["generation"]
+            status = "disconnected"
+        else:
+            instance_id = runtime.instance_id
+            generation = runtime.generation
+            status = "degraded"
         self.model.set_transport(
             session_id,
-            instance_id=runtime.instance_id,
-            generation=runtime.generation,
-            status="degraded",
+            instance_id=instance_id,
+            generation=generation,
+            status=status,
             reason=reason,
         )
 

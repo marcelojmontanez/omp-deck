@@ -150,7 +150,7 @@ def setup(*, tailscale=False):
     if shutil.which(settings.omp_bin) is None and not Path(settings.omp_bin).is_file():
         raise RuntimeError("stock OMP is not installed or not on PATH")
     plugin_preexisting = plugin_installed(settings)
-    service_snapshot = capture_service_state()
+    service_snapshot = capture_service_state(settings=settings, config_path=path)
     plugin_backup = None
     plugin_touched = False
     service_touched = False

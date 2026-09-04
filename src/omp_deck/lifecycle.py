@@ -7,11 +7,13 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
+import time
 from pathlib import Path
 
 from .installation_paths import (
     MANIFEST_NAME,
     OWNERSHIP_MARKER,
+    InstallationPaths,
     has_ownership_marker,
     installation_paths,
     manifest_content,
@@ -25,6 +27,14 @@ PLUGIN_NAME = "omp-deck"
 PLUGIN_ROOT = Path(__file__).resolve().parent / "plugin"
 
 @dataclass(frozen=True)
+class RootSnapshot:
+    path: Path
+    existed: bool
+    mode: int | None
+    marker_existed: bool
+
+
+@dataclass(frozen=True)
 class ServiceSnapshot:
     unit: bytes | None
     unit_mode: int | None
@@ -32,6 +42,10 @@ class ServiceSnapshot:
     manifest_mode: int | None
     enabled: bool
     active: bool
+    installation: InstallationPaths | None = None
+    roots: tuple[RootSnapshot, ...] = ()
+    config: bytes | None = None
+    config_mode: int | None = None
 
 
 def _file_snapshot(path):
@@ -40,11 +54,16 @@ def _file_snapshot(path):
     return path.read_bytes(), path.stat().st_mode & 0o777
 
 
-def capture_service_state(*, runner=None):
+def capture_service_state(*, settings=None, config_path=None, runner=None):
     runner = runner or run
-    paths = installation_paths()
+    paths = (
+        installation_paths(config_file=config_path, state_root=settings.state_root)
+        if settings is not None and config_path is not None
+        else installation_paths()
+    )
     unit, unit_mode = _file_snapshot(paths.unit_path)
     manifest, manifest_mode = _file_snapshot(paths.manifest_path)
+    config, config_mode = _file_snapshot(paths.config_path)
     enabled = runner(
         ["systemctl", "--user", "is-enabled", "omp-deck.service"],
         check=False,
@@ -55,12 +74,36 @@ def capture_service_state(*, runner=None):
         check=False,
         capture_output=True,
     ).returncode == 0
-    return ServiceSnapshot(unit, unit_mode, manifest, manifest_mode, enabled, active)
+    roots = []
+    for root in dict.fromkeys(
+        (paths.install_root, paths.config_root, paths.state_root)
+    ):
+        existed = root.exists() and not root.is_symlink()
+        roots.append(
+            RootSnapshot(
+                root,
+                existed,
+                root.stat().st_mode & 0o777 if existed else None,
+                has_ownership_marker(root) if existed else False,
+            )
+        )
+    return ServiceSnapshot(
+        unit,
+        unit_mode,
+        manifest,
+        manifest_mode,
+        enabled,
+        active,
+        paths,
+        tuple(roots),
+        config,
+        config_mode,
+    )
 
 
 def restore_service_state(snapshot, *, runner=None):
     runner = runner or run
-    paths = installation_paths()
+    paths = snapshot.installation or installation_paths()
     if snapshot.unit is None:
         runner(
             ["systemctl", "--user", "disable", "--now", "omp-deck.service"],
@@ -75,24 +118,45 @@ def restore_service_state(snapshot, *, runner=None):
         else:
             write_atomic(path, content.decode("utf-8"), mode)
     runner(["systemctl", "--user", "daemon-reload"])
-    if snapshot.unit is None:
+    if snapshot.unit is not None:
+        runner(
+            [
+                "systemctl",
+                "--user",
+                "enable" if snapshot.enabled else "disable",
+                "omp-deck.service",
+            ]
+        )
+        runner(
+            [
+                "systemctl",
+                "--user",
+                "start" if snapshot.active else "stop",
+                "omp-deck.service",
+            ]
+        )
+    if snapshot.installation is None:
         return
-    runner(
-        [
-            "systemctl",
-            "--user",
-            "enable" if snapshot.enabled else "disable",
-            "omp-deck.service",
-        ]
+    config_root = next(
+        root for root in snapshot.roots if root.path == paths.config_root
     )
-    runner(
-        [
-            "systemctl",
-            "--user",
-            "start" if snapshot.active else "stop",
-            "omp-deck.service",
-        ]
-    )
+    if config_root.existed:
+        if snapshot.config is None:
+            paths.config_path.unlink(missing_ok=True)
+        else:
+            write_atomic(
+                paths.config_path,
+                snapshot.config.decode("utf-8"),
+                snapshot.config_mode,
+            )
+    for root in reversed(snapshot.roots):
+        if not root.existed:
+            remove_owned_root(root.path, (root.path,))
+            continue
+        if not root.marker_existed:
+            (root.path / OWNERSHIP_MARKER).unlink(missing_ok=True)
+        if root.mode is not None:
+            root.path.chmod(root.mode)
 
 
 def _plugin_record(settings, *, runner=None):
@@ -216,7 +280,7 @@ def service_unit(config_path, executable=sys.executable):
 def prepare_installation(settings, config_path):
     paths = installation_paths(config_file=config_path, state_root=settings.state_root)
     mark_owned(paths.install_root)
-    mark_owned(paths.config_root, allowed_existing=(paths.config_path,))
+    mark_owned(paths.config_root, allowed_existing=(paths.config_path,), mode=0o700)
     mark_owned(
         paths.state_root,
         allowed_existing=(paths.state_root / "auth.json", paths.state_root / ".auth.lock"),
@@ -224,6 +288,8 @@ def prepare_installation(settings, config_path):
     )
     if not paths.config_path.exists():
         write_atomic(paths.config_path, "{}\n", 0o600)
+    else:
+        paths.config_path.chmod(0o600)
     write_atomic(paths.manifest_path, manifest_content(paths), 0o600)
     return paths
 
@@ -312,22 +378,44 @@ def purge_installation(omp_bin="omp", *, runner=run):
 
 
 def check_health(settings, *, timeout=5.0):
+    if timeout <= 0:
+        raise ValueError("health timeout must be positive")
     url = f"http://{settings.host}:{settings.port}/healthz"
-    request = urllib.request.Request(url, headers={"Host": f"{settings.host}:{settings.port}"})
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = json.loads(response.read())
-    except (OSError, urllib.error.URLError, json.JSONDecodeError) as error:
-        raise RuntimeError(f"OMP Deck health check failed: {error}") from error
-    required = {"ok", "configuration", "authentication"}
-    if (
-        response.status != 200
-        or not isinstance(payload, dict)
-        or not required.issubset(payload)
-        or not all(payload[key] is True for key in required)
-    ):
-        raise RuntimeError("OMP Deck health check reported an unhealthy service")
-    return payload
+    request = urllib.request.Request(
+        url, headers={"Host": f"{settings.host}:{settings.port}"}
+    )
+    deadline = time.monotonic() + timeout
+    last_error = None
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            with urllib.request.urlopen(
+                request, timeout=min(1.0, remaining)
+            ) as response:
+                payload = json.loads(response.read())
+            required = {"ok", "configuration", "authentication"}
+            if (
+                response.status == 200
+                and isinstance(payload, dict)
+                and required.issubset(payload)
+                and all(payload[key] is True for key in required)
+            ):
+                return payload
+            last_error = RuntimeError(
+                "OMP Deck health check reported an unhealthy service"
+            )
+        except (
+            OSError,
+            urllib.error.URLError,
+            json.JSONDecodeError,
+        ) as error:
+            last_error = error
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(0.1, remaining))
+    raise RuntimeError(f"OMP Deck health check failed: {last_error}") from last_error
 
 
 def plugin_status(settings, *, runner=run):

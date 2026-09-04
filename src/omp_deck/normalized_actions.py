@@ -3,6 +3,7 @@ import re
 from .request_parsing import (
     bounded_text,
     client_request_id,
+    decoded_project,
     decoded_segment,
     rpc_command_for_route,
 )
@@ -24,7 +25,7 @@ _ACTION_ROUTE = re.compile(
     r"/api/sessions/([^/]+)/(messages|follow-ups|interrupt|shutdown|model|thinking|branch|switch|resume|compact)"
 )
 _UI_ROUTE = re.compile(r"/api/sessions/([^/]+)/ui-requests/([^/]+)/(respond|cancel)")
-_PROJECT_ROUTE = re.compile(r"/api/projects/([^/]+)/sessions")
+_PROJECT_ROUTE = re.compile(r"/api/projects/(.+)/sessions")
 _READ_ROUTE = re.compile(r"/api/sessions/([^/]+)/read")
 _REMOVE_ROUTE = re.compile(r"/api/sessions/([^/]+)/remove")
 
@@ -65,12 +66,18 @@ class NormalizedActionDispatcher:
 
     def _remove(self, match):
         session_id = decoded_segment(match.group(1), "session")
+        try:
+            session = self.fleet_model.get(session_id)
+        except KeyError:
+            session = None
+        if session is not None and session["transport"]["kind"] == "rpc":
+            return 409, {"error": "session is not removable"}
         if not self.terminal_manager().remove(session_id):
             return 404, {"error": "session not found"}
         return 200, {"status": "removed"}
 
     def _launch(self, match, data):
-        project = decoded_segment(match.group(1), "project")
+        project = decoded_project(match.group(1))
         request_id = client_request_id(data)
         create = data.get("create", False)
         if not isinstance(create, bool):

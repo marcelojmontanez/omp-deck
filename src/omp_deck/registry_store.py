@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 import re
+import stat
 import math
 import threading
 import uuid
@@ -19,6 +20,7 @@ SCHEMA_VERSION = 1
 DEFAULT_MAX_RECORDS = 1_000
 _ADAPTER_KINDS = frozenset({"rpc", "collab", "extension"})
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 _FORBIDDEN_METADATA_MARKERS = (
     "authorization",
     "content",
@@ -243,37 +245,90 @@ class RegistryStore:
     @contextmanager
     def _locked(self) -> Iterator[None]:
         with self._lock:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(self._lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            self._ensure_parent()
+            directory_fd = os.open(
+                self.path.parent,
+                _DIRECTORY_FLAGS,
+            )
             try:
-                os.fchmod(fd, 0o600)
-                fcntl.flock(fd, fcntl.LOCK_EX)
-                yield
+                try:
+                    fd = os.open(
+                        self._lock_path.name,
+                        os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+                        0o600,
+                        dir_fd=directory_fd,
+                    )
+                except OSError as error:
+                    raise RegistryError("cannot safely open registry lock") from error
+                try:
+                    if not stat.S_ISREG(os.fstat(fd).st_mode):
+                        raise RegistryError("registry lock is not a regular file")
+                    os.fchmod(fd, 0o600)
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                    yield
+                finally:
+                    os.close(fd)
             finally:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-                os.close(fd)
+                os.close(directory_fd)
+
+    def _ensure_parent(self) -> None:
+        try:
+            info = self.path.parent.lstat()
+        except FileNotFoundError:
+            self.path.parent.mkdir(parents=True, mode=0o700)
+            info = self.path.parent.lstat()
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.geteuid()
+        ):
+            raise RegistryError("registry root is unsafe")
+        os.chmod(self.path.parent, 0o700)
 
     def _empty(self) -> dict[str, Any]:
         return {"version": SCHEMA_VERSION, "generation": 0, "sessions": []}
 
     def _read_or_quarantine(self) -> dict[str, Any]:
-        if not self.path.exists():
-            return self._empty()
+        directory_fd = os.open(
+            self.path.parent,
+            _DIRECTORY_FLAGS,
+        )
         try:
-            raw = self.path.read_bytes()
+            try:
+                fd = os.open(
+                    self.path.name,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=directory_fd,
+                )
+            except FileNotFoundError:
+                return self._empty()
+            except OSError as error:
+                raise RegistryError("cannot safely open registry") from error
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise RegistryError("registry is not a regular file")
+                raw = os.read(fd, 8 * 1024 * 1024 + 1)
+                os.fchmod(fd, 0o600)
+            finally:
+                os.close(fd)
+        finally:
+            os.close(directory_fd)
+        try:
             if len(raw) > 8 * 1024 * 1024:
                 raise RegistryValidationError("registry file is too large")
             data = json.loads(raw)
             self._validate_store(data)
-            os.chmod(self.path, 0o600)
             return data
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, RegistryValidationError) as exc:
-            if isinstance(exc, OSError) and not self.path.exists():
-                raise
+        except (
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            RecursionError,
+            RegistryValidationError,
+        ) as error:
             quarantine = self._quarantine()
             raise RegistryCorruptionError(
                 f"invalid registry quarantined at {quarantine}", quarantine
-            ) from exc
+            ) from error
 
     def _validate_store(self, data: Any) -> None:
         if not isinstance(data, dict) or set(data) != {"version", "generation", "sessions"}:
@@ -353,39 +408,89 @@ class RegistryStore:
 
     def _quarantine(self) -> Path:
         stamp = re.sub(r"[^0-9]", "", self._timestamp()) or "unknown"
-        base = self.path.with_name(f"{self.path.name}.corrupt.{stamp}")
-        quarantine = base
+        base_name = f"{self.path.name}.corrupt.{stamp}"
+        quarantine_name = base_name
         suffix = 0
-        while quarantine.exists():
-            suffix += 1
-            quarantine = base.with_name(f"{base.name}.{suffix}")
-        os.replace(self.path, quarantine)
-        self._fsync_directory()
-        return quarantine
+        directory_fd = os.open(
+            self.path.parent,
+            _DIRECTORY_FLAGS,
+        )
+        try:
+            while True:
+                try:
+                    os.stat(
+                        quarantine_name,
+                        dir_fd=directory_fd,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    break
+                suffix += 1
+                quarantine_name = f"{base_name}.{suffix}"
+            os.replace(
+                self.path.name,
+                quarantine_name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            fd = os.open(
+                quarantine_name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd,
+            )
+            try:
+                os.fchmod(fd, 0o600)
+            finally:
+                os.close(fd)
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        return self.path.parent / quarantine_name
 
     def _write(self, data: dict[str, Any]) -> None:
         self._validate_store(data)
-        payload = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        payload = json.dumps(
+            data, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        if len(payload) > 8 * 1024 * 1024:
+            raise RegistryValidationError("registry file is too large")
+        temporary_name = (
+            f".{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        directory_fd = os.open(
+            self.path.parent,
+            _DIRECTORY_FLAGS,
+        )
+        fd = -1
         try:
+            fd = os.open(
+                temporary_name,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=directory_fd,
+            )
             with os.fdopen(fd, "wb") as handle:
+                fd = -1
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, self.path)
-            os.chmod(self.path, 0o600)
-            self._fsync_directory()
+            os.replace(
+                temporary_name,
+                self.path.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            os.fsync(directory_fd)
         except BaseException:
+            if fd >= 0:
+                os.close(fd)
             try:
-                temporary.unlink()
+                os.unlink(temporary_name, dir_fd=directory_fd)
             except FileNotFoundError:
                 pass
             raise
-
-    def _fsync_directory(self) -> None:
-        directory_fd = os.open(self.path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory_fd)
         finally:
             os.close(directory_fd)

@@ -52,25 +52,40 @@ class RpcRefreshScheduler:
         ).start()
 
     def _worker(self, session_id: str) -> None:
-        while True:
-            with self._lock:
-                if self._closed:
-                    self._running.discard(session_id)
+        restart = False
+        try:
+            while True:
+                with self._lock:
+                    if self._closed:
+                        self._pending.discard(session_id)
+                        return
                     self._pending.discard(session_id)
-                    return
-                self._pending.discard(session_id)
-            self._refresh_one(session_id)
+                self._refresh_one(session_id)
+                with self._lock:
+                    if self._closed or session_id not in self._pending:
+                        return
+        finally:
             with self._lock:
-                if self._closed or session_id not in self._pending:
-                    self._running.discard(session_id)
-                    return
+                self._running.discard(session_id)
+                restart = not self._closed and session_id in self._pending
+            if restart:
+                self._schedule(session_id)
 
     def _refresh_one(self, session_id: str) -> None:
         try:
             self._refresh(session_id)
         except AdapterDisconnectedError as error:
-            self._disconnected(session_id, error)
+            try:
+                self._disconnected(session_id, error)
+            except Exception:
+                self._report_failure(session_id, "reconnect failed")
         except AdapterError as error:
-            self._failed(session_id, f"refresh failed: {error.kind}")
+            self._report_failure(session_id, f"refresh failed: {error.kind}")
         except Exception:
-            self._failed(session_id, "refresh failed")
+            self._report_failure(session_id, "refresh failed")
+
+    def _report_failure(self, session_id: str, reason: str) -> None:
+        try:
+            self._failed(session_id, reason)
+        except Exception:
+            pass

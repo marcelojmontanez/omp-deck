@@ -13,6 +13,7 @@ function createComposer({
   const pendingMessages = new Map();
   const sending = new Set();
   const outboundQueues = new Map();
+  const retryBatches = new Map();
   const revokedAttachmentUrls = new Set();
   let sessionId = null;
   let dataGeneration = 0;
@@ -40,6 +41,7 @@ function createComposer({
     attachments.clear();
     pendingMessages.clear();
     outboundQueues.clear();
+    retryBatches.clear();
     elements.message.value = '';
     elements['send-state'].textContent = '';
     updateCommandMode();
@@ -151,45 +153,79 @@ function createComposer({
   }
 
   async function deliver(job) {
-    const {agent, id, message, outgoingAttachments, pending, generation} = job;
-    try {
-      const useFollowUp = displayStatus(agent) === 'working' && agent.capabilities?.followUp;
-      const route = useFollowUp ? 'follow-ups' : 'messages';
-      const response = await ompDeckApi.request(`/api/sessions/${encodeURIComponent(id)}/${route}`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          requestId: pending?.id || requestId(),
-          message,
-          attachments: outgoingAttachments.map(({name, type, data}) => ({name, type, data})),
-        }),
-      });
-      if (generation !== dataGeneration) return;
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({}));
-        throw new Error(payload.error || `Send failed (${response.status})`);
-      }
-      if (pending) {
-        pending.accepted = true;
-        touchRender();
-        renderDetail();
-      }
-    } catch (error) {
-      if (generation !== dataGeneration) return;
-      if (pending) pendingMessages.set(id, pendingFor(id).filter(item => item.id !== pending.id));
-      const currentDraft = loadDraft(id);
-      saveDraft(id, currentDraft ? `${message}\n${currentDraft}` : message);
-      attachments.set(id, mergeAttachments(outgoingAttachments, attachmentsFor(id)));
-      elements['send-state'].textContent = '';
-      showToast(`Message not sent: ${error.message}`, 'error');
+    const {id, message, outgoingAttachments, pending, generation} = job;
+    const agent = state.agents.find(candidate => candidate.id === id);
+    if (!agent) {
+      const error = new Error('Session is no longer available');
+      error.reuseRequestId = false;
+      throw error;
+    }
+    const route = composerDeliveryRoute(agent);
+    const response = await ompDeckApi.request(`/api/sessions/${encodeURIComponent(id)}/${route}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        requestId: pending?.id || requestId(),
+        message,
+        attachments: outgoingAttachments.map(({name, type, data}) => ({name, type, data})),
+      }),
+    });
+    if (generation !== dataGeneration) return;
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      const error = new Error(payload.error || `Send failed (${response.status})`);
+      error.reuseRequestId = (
+        payload.status === 'uncertain'
+        || payload.errorCode === 'outcome_unknown'
+      );
+      throw error;
+    }
+    if (pending) {
+      pending.accepted = true;
       touchRender();
-      if (sessionId === id) {
-        elements.message.value = loadDraft(id);
-        renderAttachments();
-        elements.message.focus();
-      }
       renderDetail();
     }
+  }
+
+  function restoreUndelivered(jobs, error) {
+    const active = jobs.filter(job => job.generation === dataGeneration);
+    if (!active.length) return;
+    const id = active[0].id;
+    const pendingIds = new Set(active.map(job => job.pending?.id).filter(Boolean));
+    pendingMessages.set(
+      id,
+      pendingFor(id).filter(item => !pendingIds.has(item.id)),
+    );
+    const currentDraft = loadDraft(id);
+    const currentAttachments = attachmentsFor(id);
+    const restoredDraft = [
+      ...active.map(job => job.message),
+      currentDraft,
+    ].filter(Boolean).join('\n');
+    saveDraft(id, restoredDraft);
+    const restoredAttachments = mergeAttachments(
+      ...active.map(job => job.outgoingAttachments),
+      currentAttachments,
+    );
+    attachments.set(id, restoredAttachments);
+    if (
+      error.reuseRequestId !== false
+      && !currentDraft
+      && currentAttachments.length === 0
+    ) {
+      retryBatches.set(id, {draft: restoredDraft, jobs: active});
+    } else {
+      retryBatches.delete(id);
+    }
+    elements['send-state'].textContent = '';
+    showToast(`Message not sent: ${error.message}`, 'error');
+    touchRender();
+    if (sessionId === id) {
+      elements.message.value = loadDraft(id);
+      renderAttachments();
+      elements.message.focus();
+    }
+    renderDetail();
   }
 
   async function drain(id) {
@@ -197,7 +233,7 @@ function createComposer({
     sending.add(id);
     try {
       const queue = outboundQueues.get(id);
-      while (queue?.length) await deliver(queue.shift());
+      if (queue) await drainComposerQueue(queue, deliver, restoreUndelivered);
     } finally {
       sending.delete(id);
       if (!outboundQueues.get(id)?.length) outboundQueues.delete(id);
@@ -214,6 +250,34 @@ function createComposer({
     const typedMessage = elements.message.value.trim();
     const message = typedMessage || (outgoingAttachments.length ? 'Files attached.' : '');
     if (!message) return;
+    const retry = retryBatches.get(id);
+    const retryAttachments = retry
+      ? mergeAttachments(...retry.jobs.map(job => job.outgoingAttachments))
+      : [];
+    const matchesRetry = retry
+      && retry.draft === message
+      && retryAttachments.length === outgoingAttachments.length
+      && retryAttachments.every(
+        (attachment, index) => attachment.url === outgoingAttachments[index]?.url
+      );
+    retryBatches.delete(id);
+    if (matchesRetry) {
+      saveDraft(id, '');
+      attachments.set(id, []);
+      elements.message.value = '';
+      renderAttachments();
+      for (const job of retry.jobs) {
+        job.generation = dataGeneration;
+        job.pending.accepted = false;
+        pendingFor(id).push(job.pending);
+      }
+      if (!outboundQueues.has(id)) outboundQueues.set(id, []);
+      outboundQueues.get(id).push(...retry.jobs);
+      touchRender();
+      renderDetail();
+      void drain(id);
+      return;
+    }
     const pending = {
       id: requestId(),
       text: message,
@@ -235,7 +299,6 @@ function createComposer({
 
     if (!outboundQueues.has(id)) outboundQueues.set(id, []);
     outboundQueues.get(id).push({
-      agent,
       id,
       message,
       outgoingAttachments,
@@ -296,6 +359,7 @@ function createComposer({
       attachments.delete(id);
       pendingMessages.delete(id);
       outboundQueues.delete(id);
+      retryBatches.delete(id);
       sending.delete(id);
     }
   }

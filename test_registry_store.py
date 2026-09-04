@@ -9,6 +9,7 @@ from pathlib import Path
 from omp_deck.registry_store import (
     RegistryCapacityError,
     RegistryCorruptionError,
+    RegistryError,
     RegistryStore,
     RegistryValidationError,
 )
@@ -68,6 +69,19 @@ class RegistryStoreTests(unittest.TestCase):
 
         self.assertEqual(store.path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(store._lock_path.stat().st_mode & 0o777, 0o600)
+    def test_symlinked_lock_is_rejected_without_changing_target(self):
+        victim = self.tmp_path / "victim"
+        victim.write_text("unrelated", encoding="utf-8")
+        victim.chmod(0o644)
+        store = self.make_store()
+        store._lock_path.symlink_to(victim)
+
+        with self.assertRaises(RegistryError):
+            store.load()
+
+        self.assertTrue(store._lock_path.is_symlink())
+        self.assertEqual(victim.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(victim.read_text(encoding="utf-8"), "unrelated")
 
     def test_invalid_persisted_schema_is_quarantined_with_explicit_error(self):
         path = self.tmp_path / "registry.json"

@@ -19,6 +19,7 @@ from .collab_store import CollabStore
 from .extension_adapter import ExtensionAdapter
 from .fleet_model import FleetModel
 from .registry_store import RegistryStore
+from .request_ledger import RequestConflictError, RequestLedger
 from .rpc_adapter import AdapterEvent
 from .settings import Settings
 
@@ -67,6 +68,7 @@ class TerminalSessionManager:
         *,
         registry: RegistryStore | None = None,
         credentials: CollabStore | None = None,
+        requests: RequestLedger | None = None,
         discovery_interval: float = _DISCOVERY_INTERVAL,
     ) -> None:
         if discovery_interval <= 0:
@@ -75,6 +77,7 @@ class TerminalSessionManager:
         self.model = model
         self.registry = registry or RegistryStore(settings.state_root / "registry.json")
         self.credentials = credentials or CollabStore(settings.state_root)
+        self.requests = requests or RequestLedger(settings.state_root / "requests.json")
         self.discovery_interval = discovery_interval
         self._lock = threading.RLock()
         self._runtimes: dict[str, _Runtime] = {}
@@ -181,6 +184,12 @@ class TerminalSessionManager:
         return self.model.get(record["id"])
 
     def remove(self, session_id: str) -> bool:
+        try:
+            record = self._record(session_id)
+        except KeyError:
+            return False
+        if record["adapterKind"] not in {"collab", "extension"}:
+            return False
         with self._lock:
             runtime = self._runtimes.pop(session_id, None)
             if runtime is not None and runtime.kind == "extension":
@@ -234,7 +243,6 @@ class TerminalSessionManager:
         }.get(action)
         if capability is None or not self.model.supports(session_id, capability):
             raise ValueError("action is unavailable for this terminal transport")
-        runtime = self._runtime(session_id)
         fingerprint = hashlib.sha256(json.dumps(
             {"action": action, "payload": _plain(payload)}, sort_keys=True,
             ensure_ascii=False, allow_nan=False, separators=(",", ":"),
@@ -254,6 +262,16 @@ class TerminalSessionManager:
                     if previous[0] != fingerprint:
                         raise TerminalCommandConflict("requestId was already used for another command")
                     return dict(previous[1])
+            scope = f"terminal-command:{session_id}"
+            try:
+                persisted = self.requests.reserve(scope, request_id, fingerprint)
+            except RequestConflictError:
+                raise TerminalCommandConflict(
+                    "requestId was already used for another command"
+                ) from None
+            if persisted is not None:
+                return persisted
+            runtime = self._runtime(session_id)
             current = self._runtime(session_id)
             if current is not runtime:
                 raise TerminalSessionNotConnected(session_id)
@@ -282,6 +300,7 @@ class TerminalSessionManager:
             else:
                 raise ValueError("action is unavailable for this terminal transport")
             result = {"requestId": request_id, "status": "accepted"}
+            self.requests.complete(scope, request_id, fingerprint, result)
             with self._lock:
                 self._results[key] = (fingerprint, result)
                 self._results.move_to_end(key)

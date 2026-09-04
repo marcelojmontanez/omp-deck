@@ -78,6 +78,18 @@ class MigrationTests(unittest.TestCase):
         )
         self.assertEqual(repeated["sessionsImported"], 0)
         self.assertEqual(len(RegistryStore(self.state / "registry.json").load()), 1)
+    def test_apply_accepts_authentication_lock_created_by_auth_manager(self):
+        auth = self.state / "auth.json"
+        auth.write_text('{"version":1}', encoding="utf-8")
+        auth.chmod(0o600)
+        lock = self.state / ".auth.lock"
+        lock.write_text("", encoding="utf-8")
+        lock.chmod(0o600)
+
+        result = apply_migration(self.settings)
+
+        self.assertEqual(result["sessionsImported"], 0)
+        self.assertTrue((self.state / ".omp-deck-owned").is_file())
 
     def test_unsafe_metadata_and_project_escape_are_ignored(self):
         outside = self.root / "outside"

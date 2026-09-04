@@ -14,7 +14,7 @@ from .auth import (
     PairingRateLimited,
 )
 from .attachments import detect_image_mime, read_blob
-from .projects import create_project_directory, list_launchable_projects, resolve_project_path
+from .projects import list_launchable_projects, resolve_project_path
 from .fleet_model import FleetModel
 from .rpc_sessions import (
     RpcSessionManager,
@@ -46,8 +46,9 @@ SESSION_ROOT = SETTINGS.session_root
 DEV_ROOT = SETTINGS.project_root
 _auth_manager = None
 _auth_lock = threading.Lock()
-_cursor_store = CursorStore(SETTINGS.cursor_path)
-_fleet_model = FleetModel(cursor_store=_cursor_store)
+_cursor_store = None
+_cursor_store_lock = threading.Lock()
+_fleet_model = FleetModel()
 _usage_service = UsageService(SETTINGS.omp_bin)
 _rpc_manager = None
 _rpc_manager_lock = threading.Lock()
@@ -58,6 +59,16 @@ class ThreadingHTTPServer(_ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
 _terminal_manager_lock = threading.Lock()
+def cursor_store():
+    global _cursor_store
+    auth_manager()
+    with _cursor_store_lock:
+        if _cursor_store is None:
+            _cursor_store = CursorStore(SETTINGS.cursor_path)
+            _fleet_model.cursor_store = _cursor_store
+        return _cursor_store
+
+
 
 
 def rpc_manager():
@@ -78,6 +89,7 @@ def terminal_manager():
 
 def start_runtime():
     auth_manager()
+    cursor_store()
     failures = dict(rpc_manager().recover_desired())
     failures.update(terminal_manager().start())
     return failures
@@ -98,17 +110,14 @@ def launch_rpc_project(project, request_id, create=False, title=None):
     if not isinstance(project, str):
         raise ValueError("invalid project")
     project = project.strip()
-    path = project_path(project, must_exist=not create)
-    created = False
-    if create:
-        path = create_project_directory(DEV_ROOT, project)
-        created = True
-    elif project not in launchable_projects():
+    if not create and project not in launchable_projects():
         raise ValueError("invalid project")
-    result = rpc_manager().launch_request(request_id, project, path, title=title)
-    if result["status"] == "failed" and created:
-        path.rmdir()
-    return {**result, "created": created and result["status"] == "accepted"}
+    return rpc_manager().launch_request(
+        request_id,
+        project,
+        title=title,
+        create=create,
+    )
 
 
 def dispatch_session_command(session_id, request_id, action, payload):
@@ -217,11 +226,13 @@ class Handler(SimpleHTTPRequestHandler):
             return
         else:
             cursor = int(raw_cursor)
-            if cursor > _fleet_model.journal.latest_id:
-                self.reply(400, {"error": "invalid Last-Event-ID"})
-                return
             try:
-                initial = [(event.id, event.public()) for event in _fleet_model.journal.replay_after(cursor)]
+                if cursor > _fleet_model.journal.latest_id:
+                    raise ReplayUnavailableError
+                initial = [
+                    (event.id, event.public())
+                    for event in _fleet_model.journal.replay_after(cursor)
+                ]
             except ReplayUnavailableError:
                 cursor = _fleet_model.journal.latest_id
                 initial = [(
@@ -297,6 +308,7 @@ class Handler(SimpleHTTPRequestHandler):
         if request_path == "/healthz":
             try:
                 auth_manager()
+                cursors = cursor_store().healthy
             except Exception:
                 self.reply(503, {"ok": False, "configuration": True, "authentication": False})
                 return
@@ -306,7 +318,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "ok": True,
                     "configuration": True,
                     "authentication": True,
-                    "cursors": _cursor_store.healthy,
+                    "cursors": cursors,
                 },
             )
             return

@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from dataclasses import replace
@@ -78,6 +81,38 @@ class CursorStoreTests(unittest.TestCase):
             self.assertFalse(store.healthy)
             self.assertEqual(store.last_read("secret"), None)
             self.assertEqual(target.read_text(), json.dumps({"version": 1, "sessions": {"secret": {"messageId": "x"}}}))
+            self.assertTrue(path.is_symlink())
+            self.assertIsNone(store.quarantined_path)
+    def test_importing_server_does_not_touch_cursor_state_before_authentication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_root = root / "config"
+            state_root = root / "state"
+            config_root.mkdir(mode=0o700)
+            state_root.mkdir(mode=0o700)
+            config = config_root / "config.json"
+            config.write_text(json.dumps({"state_root": str(state_root)}), encoding="utf-8")
+            config.chmod(0o600)
+            victim = root / "victim"
+            victim.write_text("private", encoding="utf-8")
+            cursor = state_root / "cursors.json"
+            cursor.symlink_to(victim)
+            environment = {
+                **os.environ,
+                "OMP_DECK_CONFIG": str(config),
+                "PYTHONPATH": str(Path(__file__).parent / "src"),
+            }
+
+            result = subprocess.run(
+                [sys.executable, "-c", "import omp_deck.server"],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(cursor.is_symlink())
+            self.assertEqual(victim.read_text(encoding="utf-8"), "private")
 
 
 if __name__ == "__main__":

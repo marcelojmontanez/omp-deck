@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from threading import Event, Thread
@@ -12,7 +13,9 @@ from omp_rpc import ReadyEvent, RpcProcessExitError
 
 from omp_deck.fleet_model import FleetModel
 from omp_deck.registry_store import RegistryStore
-from omp_deck.rpc_sessions import RpcSessionManager
+from omp_deck.rpc_adapter import AdapterError
+from omp_deck.rpc_refresh import RpcRefreshScheduler
+from omp_deck.rpc_sessions import RpcSessionManager, SessionCommandConflictError
 from omp_deck.settings import Settings
 
 
@@ -183,6 +186,22 @@ class TestRpcSessionManager(unittest.TestCase):
         self.assertEqual(record["recoveryMetadata"], {"sessionFile": "/sessions/omp-official-1.jsonl"})
         self.assertTrue(record["desiredRpcRunning"])
         self.assertEqual(session["transport"]["status"], "connected")
+    def test_completed_launch_request_is_not_replayed_after_manager_restart(self):
+        first = self.manager.launch_request(
+            "durable-launch", "project", title="RPC test"
+        )
+        self.manager.close()
+        self.manager = RpcSessionManager(self.settings, FleetModel(), self.registry)
+
+        duplicate = self.manager.launch_request(
+            "durable-launch", "project", title="RPC test"
+        )
+
+        self.assertEqual(duplicate["status"], "accepted")
+        self.assertEqual(
+            duplicate["session"]["id"], first["session"]["id"]
+        )
+        self.assertEqual(len(FakeRpcClient.instances), 1)
 
     def test_callback_updates_normalized_public_state(self):
         session_id = self.launch()["id"]
@@ -377,6 +396,50 @@ class TestRpcSessionManager(unittest.TestCase):
         self.assertEqual(self.model.get(second_id)["thinking"], "low")
         self.assertEqual(self.model.get(first_id)["thinking"], "medium")
         first_client.get_state_release.set()
+    def test_failed_reconnect_is_retried_on_next_connected_refresh(self):
+        session_id = self.launch()["id"]
+        FakeRpcClient.fail_get_state_once = RpcProcessExitError("RPC process exited")
+        FakeRpcClient.fail_start = True
+
+        self.manager.refresh_connected()
+        self.assertEqual(self.model.get(session_id)["transport"]["status"], "disconnected")
+
+        FakeRpcClient.fail_start = False
+        self.manager.request_refresh_connected()
+        deadline = time.monotonic() + 2
+        while (
+            self.model.get(session_id)["transport"]["status"] != "connected"
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+
+        self.assertEqual(self.model.get(session_id)["transport"]["status"], "connected")
+        self.assertEqual(len(FakeRpcClient.instances), 3)
+
+    def test_refresh_scheduler_releases_slot_when_failure_callback_raises(self):
+        calls = []
+        first_failure = Event()
+        second_refresh = Event()
+
+        def refresh(session_id):
+            calls.append(session_id)
+            if len(calls) == 2:
+                second_refresh.set()
+            raise RuntimeError("refresh failed")
+
+        def failed(session_id, reason):
+            if len(calls) == 1:
+                first_failure.set()
+                raise RuntimeError("failure callback failed")
+
+        scheduler = RpcRefreshScheduler(refresh, lambda *_: None, failed)
+        self.addCleanup(scheduler.close)
+        scheduler.request(["session"])
+        self.assertTrue(first_failure.wait(timeout=1))
+
+        scheduler.request(["session"])
+
+        self.assertTrue(second_refresh.wait(timeout=1))
 
     def test_dispatch_deduplicates_and_rejects_conflicting_request_id_reuse(self):
         session_id = self.launch()["id"]
@@ -394,6 +457,53 @@ class TestRpcSessionManager(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "already used for another command"):
             self.manager.dispatch(
                 session_id, "request-1", "sendMessage", {"message": "different"}
+            )
+    def test_accepted_command_is_not_failed_when_followup_snapshot_is_busy(self):
+        session_id = self.launch()["id"]
+        adapter = self.manager._runtime(session_id).adapter
+
+        with patch.object(
+            adapter,
+            "snapshot",
+            side_effect=AdapterError("state kept changing", kind="snapshot_busy"),
+        ):
+            result = self.manager.dispatch(
+                session_id, "accepted-before-snapshot", "sendMessage", {"message": "hello"}
+            )
+
+        self.assertEqual(result["status"], "accepted")
+        self.assertEqual(
+            [call[0] for call in FakeRpcClient.instances[-1].calls],
+            ["prompt"],
+        )
+
+    def test_completed_request_is_not_replayed_after_manager_restart(self):
+        session_id = self.launch()["id"]
+        first = self.manager.dispatch(
+            session_id, "durable-request", "sendMessage", {"message": "once"}
+        )
+        self.manager.close()
+        self.manager = RpcSessionManager(self.settings, FleetModel(), self.registry)
+
+        duplicate = self.manager.dispatch(
+            session_id, "durable-request", "sendMessage", {"message": "once"}
+        )
+
+        self.assertEqual(duplicate, first)
+        self.assertEqual(
+            sum(
+                call[0] == "prompt"
+                for client in FakeRpcClient.instances
+                for call in client.calls
+            ),
+            1,
+        )
+        with self.assertRaises(SessionCommandConflictError):
+            self.manager.dispatch(
+                session_id,
+                "durable-request",
+                "sendMessage",
+                {"message": "different"},
             )
 
     def test_dispatch_serializes_each_session_without_blocking_other_sessions(self):

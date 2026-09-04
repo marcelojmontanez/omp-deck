@@ -66,6 +66,8 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(paths.manifest_path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(json.loads(paths.manifest_path.read_text())["state_root"], str(state))
             self.assertEqual(state.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(paths.config_root.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(paths.config_path.stat().st_mode & 0o777, 0o600)
 
     def test_running_service_is_restarted_after_install(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -266,6 +268,58 @@ class LifecycleTests(unittest.TestCase):
                     ["systemctl", "--user", "start", "omp-deck.service"],
                 ],
             )
+    def test_health_check_retries_startup_race_until_service_is_ready(self):
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            @staticmethod
+            def read():
+                return b'{"ok":true,"configuration":true,"authentication":true}'
+
+        with patch.object(
+            lifecycle.urllib.request,
+            "urlopen",
+            side_effect=[lifecycle.urllib.error.URLError("starting"), Response()],
+        ) as urlopen:
+            payload = lifecycle.check_health(self.settings(Path("/tmp/state")), timeout=1)
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(urlopen.call_count, 2)
+
+    def test_fresh_installation_rollback_removes_every_created_owned_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            state = home / "state/omp-deck"
+            config = home / "config/omp-deck/config.json"
+            settings = self.settings(state)
+            capture_runner = FakeRunner(
+                [
+                    SimpleNamespace(returncode=1, stdout="disabled\n"),
+                    SimpleNamespace(returncode=1, stdout="inactive\n"),
+                ]
+            )
+            with patch.dict(os.environ, self.environment(home), clear=False):
+                snapshot = lifecycle.capture_service_state(
+                    settings=settings,
+                    config_path=config,
+                    runner=capture_runner,
+                )
+                paths = lifecycle.install_service(
+                    settings, config, runner=FakeRunner(), start=False
+                )
+                (state / "auth.json").write_text("generated", encoding="utf-8")
+                lifecycle.restore_service_state(snapshot, runner=FakeRunner())
+
+            self.assertFalse(paths.unit_path.exists())
+            self.assertFalse(paths.install_root.exists())
+            self.assertFalse(paths.config_root.exists())
+            self.assertFalse(paths.state_root.exists())
     def test_plugin_backup_is_restorable_through_official_manager(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -4,6 +4,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const source = await readFile(new URL('./src/omp_deck/static/fleet-projection.js', import.meta.url), 'utf8');
+const helperSource = await readFile(new URL('./src/omp_deck/static/ui-helpers.js', import.meta.url), 'utf8');
 
 function loadProjection(overrides = {}) {
   const context = vm.createContext({
@@ -15,6 +16,21 @@ function loadProjection(overrides = {}) {
   return {
     projectSession: vm.runInContext('projectSession', context),
     requestId: vm.runInContext('requestId', context),
+  };
+}
+function loadUiHelpers() {
+  const context = vm.createContext({
+    URL,
+    location: {href: 'http://deck.test/', origin: 'http://deck.test'},
+    window: {visualViewport: null},
+    document: {},
+    thinkingOverrides: new Map(),
+    displayStatus: agent => agent.executionState,
+  });
+  vm.runInContext(helperSource, context, {filename: 'ui-helpers.js'});
+  return {
+    composerDeliveryRoute: vm.runInContext('composerDeliveryRoute', context),
+    drainComposerQueue: vm.runInContext('drainComposerQueue', context),
   };
 }
 
@@ -184,4 +200,33 @@ test('request IDs are nonempty and unique with a deterministic crypto stub', () 
   assert.deepEqual(ids, ['uuid-1', 'uuid-2', 'uuid-3']);
   assert(ids.every(id => typeof id === 'string' && id.length > 0));
   assert.equal(new Set(ids).size, ids.length);
+});
+test('composer resolves delivery route from current state and stops a failed queue', async () => {
+  const {composerDeliveryRoute, drainComposerQueue} = loadUiHelpers();
+  assert.equal(
+    composerDeliveryRoute({executionState: 'working', capabilities: {followUp: true}}),
+    'follow-ups',
+  );
+  assert.equal(
+    composerDeliveryRoute({executionState: 'idle', capabilities: {followUp: true}}),
+    'messages',
+  );
+
+  const queue = [{id: 1}, {id: 2}];
+  const attempted = [];
+  let restored = [];
+  await drainComposerQueue(
+    queue,
+    async job => {
+      attempted.push(job.id);
+      throw new Error('offline');
+    },
+    jobs => {
+      restored = jobs.map(job => job.id);
+    },
+  );
+
+  assert.deepEqual(attempted, [1]);
+  assert.deepEqual(restored, [1, 2]);
+  assert.deepEqual(queue, []);
 });

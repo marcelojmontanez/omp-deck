@@ -69,7 +69,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     socket_root: path.join(state, 'sockets'),
     state_root: state,
     omp_bin: process.execPath,
-  }));
+  }), {mode: 0o600});
   const environment = {
     ...process.env,
     PYTHONPATH: path.join(ROOT, 'src'),
@@ -264,6 +264,169 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   assert.equal(recovery.staleIgnoredTitle, 'Newest event');
   assert.equal(recovery.restartedTitle, 'Restarted server');
   assert.equal(recovery.snapshotGeneration > 0, true);
+
+  const queueBehavior = await page.evaluate(async () => {
+    const originalRequest = ompDeckApi.request;
+    const agent = {
+      id: 'queue-session',
+      project: 'demo',
+      label: 'Queue session',
+      status: 'idle',
+      executionState: 'idle',
+      inboxState: 'read',
+      bridgeConnected: true,
+      capabilities: {sendMessage: true, followUp: true},
+      transport: {kind: 'rpc', status: 'connected', label: 'RPC'},
+      subagents: [],
+      session: {activity: [], todo: '', updatedMs: Date.now()},
+    };
+    state.agents = [agent];
+    state.selectedId = agent.id;
+    composer.select(agent.id);
+    const response = {ok: true, status: 202, json: async () => ({})};
+    const submit = message => {
+      document.getElementById('message').value = message;
+      document.getElementById('composer').requestSubmit();
+    };
+    const waitUntil = async (predicate, label) => {
+      const deadline = Date.now() + 1000;
+      while (!predicate()) {
+        if (Date.now() >= deadline) {
+          throw new Error(`composer queue timed out: ${label}; ${JSON.stringify({
+            selectedId: state.selectedId,
+            selectedAgent: selectedAgent()?.id,
+            message: document.getElementById('message').value,
+            sendDisabled: document.getElementById('send').disabled,
+            toast: document.getElementById('toast').textContent,
+          })}`);
+        }
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+    };
+
+    try {
+      const routes = [];
+      let releaseFirst;
+      ompDeckApi.request = path => {
+        routes.push(path);
+        if (routes.length === 1) {
+          return new Promise(resolve => {
+            releaseFirst = () => resolve(response);
+          });
+        }
+        return Promise.resolve(response);
+      };
+      submit('first');
+      await waitUntil(() => Boolean(releaseFirst), 'first request');
+      submit('second');
+      agent.status = 'working';
+      agent.executionState = 'working';
+      releaseFirst();
+      await waitUntil(() => routes.length === 2, 'follow-up request');
+
+      agent.status = 'idle';
+      agent.executionState = 'idle';
+      const failedRequests = [];
+      let rejectFirst;
+      ompDeckApi.request = (path, options) => {
+        failedRequests.push({path, body: JSON.parse(options.body)});
+        return new Promise((resolve, reject) => {
+          rejectFirst = reject;
+        });
+      };
+      submit('failed first');
+      await waitUntil(() => Boolean(rejectFirst), 'failed request');
+      submit('preserved second');
+      rejectFirst(new Error('offline'));
+      await waitUntil(
+        () => document.getElementById('toast').textContent.includes('offline'),
+        'failure restoration',
+      );
+      const restoredDraft = document.getElementById('message').value;
+      const retryRequests = [];
+      ompDeckApi.request = (path, options) => {
+        retryRequests.push({path, body: JSON.parse(options.body)});
+        return Promise.resolve(response);
+      };
+      submit(restoredDraft);
+      await waitUntil(() => retryRequests.length === 2, 'safe request retry');
+
+      return {
+        routes,
+        failedRequests,
+        retryRequests,
+        restoredDraft,
+      };
+    } finally {
+      ompDeckApi.request = originalRequest;
+    }
+  });
+  assert.deepEqual(queueBehavior.routes, [
+    '/api/sessions/queue-session/messages',
+    '/api/sessions/queue-session/follow-ups',
+  ]);
+  assert.deepEqual(
+    queueBehavior.failedRequests.map(request => request.path),
+    ['/api/sessions/queue-session/messages'],
+  );
+  assert.equal(queueBehavior.restoredDraft, 'failed first\npreserved second');
+  assert.deepEqual(
+    queueBehavior.retryRequests.map(request => request.body.message),
+    ['failed first', 'preserved second'],
+  );
+  assert.equal(
+    queueBehavior.retryRequests[0].body.requestId,
+    queueBehavior.failedRequests[0].body.requestId,
+  );
+
+  const launchRetry = await page.evaluate(async () => {
+    const originalRequest = ompDeckApi.request;
+    const select = document.getElementById('project-select');
+    const button = document.getElementById('project-launch');
+    select.value = 'demo';
+    select.dispatchEvent(new Event('change'));
+    const requests = [];
+    let rejectFirst;
+    const waitUntil = async predicate => {
+      const deadline = Date.now() + 1000;
+      while (!predicate()) {
+        if (Date.now() >= deadline) throw new Error('launcher retry timed out');
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+    };
+    try {
+      ompDeckApi.request = (path, options) => {
+        requests.push({path, body: JSON.parse(options.body)});
+        if (requests.length === 1) {
+          return new Promise((resolve, reject) => {
+            rejectFirst = reject;
+          });
+        }
+        return Promise.resolve({
+          ok: false,
+          status: 502,
+          json: async () => ({
+            status: 'uncertain',
+            errorCode: 'outcome_unknown',
+          }),
+        });
+      };
+      button.click();
+      await waitUntil(() => Boolean(rejectFirst));
+      rejectFirst(new Error('offline'));
+      await waitUntil(() => !button.disabled);
+      button.click();
+      await waitUntil(() => requests.length === 2);
+      return requests;
+    } finally {
+      ompDeckApi.request = originalRequest;
+    }
+  });
+  assert.deepEqual(
+    launchRetry.map(request => request.path),
+    ['/api/projects/demo/sessions', '/api/projects/demo/sessions'],
+  );
+  assert.equal(launchRetry[0].body.requestId, launchRetry[1].body.requestId);
 
   assert.equal(device.httpOnly, true);
   assert.equal(device.secure, true);

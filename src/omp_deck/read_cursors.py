@@ -16,11 +16,12 @@ class CursorStore:
         self.path = Path(path)
         self._lock = threading.Lock()
         self.quarantined_path = None
+        self._load_error = None
         self._data = self._load()
 
     @property
     def healthy(self):
-        return self.quarantined_path is None
+        return self.quarantined_path is None and self._load_error is None
 
     def last_read(self, session_id):
         with self._lock:
@@ -49,8 +50,8 @@ class CursorStore:
             descriptor = os.open(self.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         except FileNotFoundError:
             return {"version": 1, "sessions": {}}
-        except OSError:
-            self.quarantined_path = self._quarantine()
+        except OSError as error:
+            self._load_error = str(error)
             return {"version": 1, "sessions": {}}
         try:
             info = os.fstat(descriptor)

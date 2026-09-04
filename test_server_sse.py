@@ -143,15 +143,26 @@ class ServerSseBoundaryTests(unittest.TestCase):
             {"id": current, "type": "snapshot", "payload": self.model.snapshot_value},
         )
 
-    def test_invalid_and_future_cursors_are_rejected_without_hanging(self):
+    def test_invalid_cursor_is_rejected_without_hanging(self):
         self._publish(1)
-        for cursor in ("not-a-number", 2):
-            with self.subTest(cursor=cursor):
-                started = time.monotonic()
-                _, response = self._request(cursor=cursor)
-                self.assertEqual(response.status, 400)
-                self.assertEqual(json.loads(response.read()), {"error": "invalid Last-Event-ID"})
-                self.assertLess(time.monotonic() - started, 1)
+        started = time.monotonic()
+        _, response = self._request(cursor="not-a-number")
+        self.assertEqual(response.status, 400)
+        self.assertEqual(json.loads(response.read()), {"error": "invalid Last-Event-ID"})
+        self.assertLess(time.monotonic() - started, 1)
+
+    def test_future_cursor_from_previous_server_epoch_receives_snapshot(self):
+        current = self._publish(1).id
+
+        _, response = self._request(cursor=current + 20)
+        frame = self._read_frame(response)
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(frame["id"], str(current))
+        self.assertEqual(
+            json.loads(frame["data"]),
+            {"id": current, "type": "snapshot", "payload": self.model.snapshot_value},
+        )
 
     def test_event_published_after_connection_arrives_live(self):
         _, response = self._request()

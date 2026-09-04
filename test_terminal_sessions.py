@@ -17,6 +17,7 @@ from omp_deck.collab_protocol import b64url_encode, open_frame, pack_envelope, s
 from omp_deck.extension_adapter import ExtensionRegistration, ExtensionSnapshot
 from omp_deck.fleet_model import FleetModel
 from omp_deck.rpc_adapter import AdapterError, AdapterEvent
+from omp_deck.registry_store import RegistryStore
 from omp_deck.settings import Settings
 from omp_deck.terminal_sessions import (
     TerminalCommandConflict,
@@ -304,6 +305,21 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.assertEqual(manager.registry.load(), [])
         with self.assertRaises(KeyError):
             self.model.get(session_id)
+    def test_remove_refuses_rpc_session_owned_by_rpc_manager(self):
+        registry = RegistryStore(self.settings.state_root / "registry.json")
+        record = registry.create(
+            adapter_kind="rpc",
+            project_name="project",
+            project_path=str(self.settings.project_root),
+            title="RPC",
+            desired_rpc_running=True,
+        )
+        self.model.load_record(record)
+        manager = self.manager(registry=registry)
+
+        self.assertFalse(manager.remove(record["id"]))
+        self.assertEqual(registry.load(), [record])
+        self.assertEqual(self.model.get(record["id"])["id"], record["id"])
 
     def test_collab_connection_failure_is_reported_and_remains_disconnected(self):
         manager = self.manager()
@@ -350,6 +366,30 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.assertEqual(adapter.calls.count(("send_message", "once", None)), 1)
         with self.assertRaises(TerminalCommandConflict):
             manager.command(session_id, "same", "sendMessage", {"message": "different"})
+    def test_completed_terminal_request_is_not_replayed_after_manager_restart(self):
+        manager = self.manager()
+        with patch("omp_deck.terminal_sessions.CollabAdapter", FakeCollabAdapter):
+            session_id = manager.add_collab(collab_link())["id"]
+        first_adapter = FakeCollabAdapter.instances[-1]
+        first = manager.command(
+            session_id, "durable-terminal", "sendMessage", {"message": "once"}
+        )
+        manager.close()
+        restarted = self.manager()
+        with patch("omp_deck.terminal_sessions.CollabAdapter", FakeCollabAdapter):
+            restarted.start()
+
+        duplicate = restarted.command(
+            session_id, "durable-terminal", "sendMessage", {"message": "once"}
+        )
+
+        self.assertEqual(duplicate, first)
+        self.assertEqual(
+            first_adapter.calls.count(("send_message", "once", None)), 1
+        )
+        self.assertNotIn(
+            ("send_message", "once", None), FakeCollabAdapter.instances[-1].calls
+        )
 
     def test_extension_commands_route_and_unadvertised_capability_is_rejected(self):
         manager = self.manager()

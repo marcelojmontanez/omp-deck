@@ -36,6 +36,18 @@ def decoded_segment(value, name):
     if not value or len(value) > 128 or "/" in value or "\\" in value:
         raise ValueError(f"invalid {name}")
     return value
+def decoded_project(value):
+    value = unquote(value)
+    if (
+        not value
+        or len(value) > 240
+        or "\\" in value
+        or any(ord(character) < 32 for character in value)
+    ):
+        raise ValueError("invalid project")
+    return value
+
+
 
 
 def bounded_text(value, name, max_length):

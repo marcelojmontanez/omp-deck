@@ -34,6 +34,9 @@ el['project-select'].addEventListener('change', () => {
   el['launch-state'].textContent = '';
 });
 el['project-new'].addEventListener('input', syncProjectLauncher);
+let pendingLaunch = null;
+
+
 
 el['project-launch'].addEventListener('click', async () => {
   const creating = el['project-select'].value === '__new__';
@@ -43,22 +46,34 @@ el['project-launch'].addEventListener('click', async () => {
   el['project-select'].disabled = true;
   el['project-new'].disabled = true;
   el['launch-state'].textContent = creating ? `Creating ${project}…` : `Starting ${project}…`;
+  const signature = JSON.stringify({project, creating});
+  const launchRequestId = pendingLaunch?.signature === signature
+    ? pendingLaunch.requestId
+    : requestId();
+  pendingLaunch = {signature, requestId: launchRequestId};
   try {
     const response = await ompDeckApi.request(`/api/projects/${encodeURIComponent(project)}/sessions`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({requestId: requestId(), create: creating}),
+      body: JSON.stringify({requestId: launchRequestId, create: creating}),
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok || !payload.session) {
-      throw new Error(payload.error || `Launch failed (${response.status})`);
+      const error = new Error(payload.error || `Launch failed (${response.status})`);
+      error.reuseRequestId = (
+        payload.status === 'uncertain'
+        || payload.errorCode === 'outcome_unknown'
+      );
+      throw error;
     }
+    pendingLaunch = null;
     applyFleetSession(payload.session);
     el['launch-state'].textContent = '';
     showToast(`Started OMP in ${project}`, 'success');
     if (creating) await loadLaunchableProjects();
     selectAgent(payload.session.id);
   } catch (error) {
+    if (error.reuseRequestId === false) pendingLaunch = null;
     el['launch-state'].textContent = error.message;
   } finally {
     el['project-select'].disabled = false;

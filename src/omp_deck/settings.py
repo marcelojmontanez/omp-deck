@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,15 +44,44 @@ def allowed_hosts(values, host):
         raise RuntimeError("allowed_hosts must be a list of hostnames")
     return tuple(dict.fromkeys([host, "localhost", "127.0.0.1", "::1", *configured]))
 
+def _read_config(path):
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        return {}
+    except OSError as error:
+        raise RuntimeError(f"cannot read {path}: {error}") from error
+    try:
+        info = os.fstat(descriptor)
+        try:
+            parent = path.parent.stat(follow_symlinks=False)
+        except OSError as error:
+            raise RuntimeError(f"cannot read {path}: {error}") from error
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077
+            or stat.S_ISLNK(parent.st_mode)
+            or not stat.S_ISDIR(parent.st_mode)
+            or parent.st_uid != os.geteuid()
+            or parent.st_mode & 0o022
+        ):
+            raise RuntimeError(f"{path} has unsafe ownership or permissions")
+        raw = os.read(descriptor, 64 * 1024 + 1)
+        if len(raw) > 64 * 1024:
+            raise RuntimeError(f"{path} is too large")
+        return json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"cannot read {path}: {error}") from error
+    finally:
+        os.close(descriptor)
+
+
 
 def load_settings(path=None):
     path = config_path() if path is None else Path(path).expanduser()
-    try:
-        values = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        values = {}
-    except (OSError, json.JSONDecodeError) as error:
-        raise RuntimeError(f"cannot read {path}: {error}") from error
+    values = _read_config(path)
     if not isinstance(values, dict):
         raise RuntimeError(f"{path} must contain a JSON object")
 

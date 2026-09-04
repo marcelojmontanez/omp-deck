@@ -163,6 +163,26 @@ class NormalizedHttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(projects["rootLabel"], "projects-private-root/")
         self.assertNotIn(str(self.project_root), json.dumps(projects))
+    def test_listed_nested_project_can_be_launched_through_encoded_route(self):
+        nested = self.project_root / "team/service"
+        nested.mkdir(parents=True)
+        accepted = {
+            "requestId": "nested-launch",
+            "status": "accepted",
+            "session": {"id": "nested-session"},
+            "created": False,
+        }
+
+        with patch.object(server, "launch_rpc_project", return_value=accepted) as launch:
+            status, _, payload = self.post(
+                "/api/projects/team%2Fservice/sessions",
+                {"requestId": "nested-launch"},
+            )
+
+        self.assertEqual((status, payload), (201, accepted))
+        launch.assert_called_once_with(
+            "team/service", "nested-launch", False, None
+        )
 
     def test_collab_import_failure_never_returns_or_logs_the_import_link(self):
         link = "omp://collab/import?secret=never-expose-this"
@@ -309,6 +329,10 @@ class NormalizedHttpTests(unittest.TestCase):
             "/api/sessions/terminal-1/remove", {"requestId": "remove-1"}
         )
         self.assertEqual((status, payload), (200, {"status": "removed"}))
+        status, _, payload = self.post(
+            "/api/sessions/rpc-1/remove", {"requestId": "remove-rpc"}
+        )
+        self.assertEqual((status, payload), (409, {"error": "session is not removable"}))
         status, _, payload = self.post(
             "/api/sessions/missing/remove", {"requestId": "remove-2"}
         )

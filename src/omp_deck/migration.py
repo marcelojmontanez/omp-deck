@@ -166,8 +166,17 @@ def _validate_adoptable_state_root(settings) -> None:
         raise RuntimeError("legacy state root has unsafe ownership or permissions")
     allowed_directories = {"sockets", "uploads"}
     allowed_files = {
-        "read-cursors.json", "registry.json", "cursors.json", "auth.json", "collab.json",
-        ".registry.json.lock", ".collab.json.lock", OWNERSHIP_MARKER,
+        "read-cursors.json",
+        "registry.json",
+        "requests.json",
+        "cursors.json",
+        "auth.json",
+        "collab.json",
+        ".auth.lock",
+        ".registry.json.lock",
+        ".requests.json.lock",
+        ".collab.json.lock",
+        OWNERSHIP_MARKER,
     }
     count = 0
     pending = [root]

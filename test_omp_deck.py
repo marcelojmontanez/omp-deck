@@ -23,6 +23,7 @@ class SettingsTests(unittest.TestCase):
                     }
                 )
             )
+            config.chmod(0o600)
 
             configured = load_settings(config)
 
@@ -35,11 +36,21 @@ class SettingsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "config.json"
             config.write_text('{"port": 70000}')
+            config.chmod(0o600)
             with self.assertRaisesRegex(RuntimeError, "port"):
                 load_settings(config)
 
             config.write_text('{"allowed_hosts": ["https://attacker.example"]}')
+            config.chmod(0o600)
             with self.assertRaisesRegex(RuntimeError, "allowed_hosts"):
+                load_settings(config)
+    def test_world_writable_configuration_is_rejected_before_values_are_used(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.json"
+            config.write_text('{"omp_bin":"/tmp/attacker-controlled"}')
+            config.chmod(0o666)
+
+            with self.assertRaisesRegex(RuntimeError, "unsafe ownership or permissions"):
                 load_settings(config)
 
 

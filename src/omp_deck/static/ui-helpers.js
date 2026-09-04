@@ -1,6 +1,25 @@
 function thinkingLevel(agent) {
   return thinkingOverrides.get(agent.id) || agent.session?.thinking || 'auto';
 }
+function composerDeliveryRoute(agent) {
+  const status = agent?.executionState || agent?.status || 'idle';
+  return status === 'working' && agent.capabilities?.followUp ? 'follow-ups' : 'messages';
+}
+
+
+async function drainComposerQueue(queue, deliver, restore) {
+  while (queue.length) {
+    try {
+      await deliver(queue[0]);
+      queue.shift();
+    } catch (error) {
+      restore(queue.splice(0), error);
+      return;
+    }
+  }
+}
+
+
 
 
 function safeAttachmentUrl(value) {

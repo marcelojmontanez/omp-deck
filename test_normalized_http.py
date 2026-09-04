@@ -13,7 +13,7 @@ from unittest.mock import patch
 from omp_deck import server
 from omp_deck.fleet_model import FleetModel
 from omp_deck.rpc_sessions import SessionCommandConflictError
-from omp_deck.terminal_sessions import TerminalCommandConflict
+from omp_deck._terminal_commands import TerminalCommandConflict
 
 
 class _Manager:
@@ -21,6 +21,7 @@ class _Manager:
         self.conflict_type = conflict_type
         self.calls = []
         self.removals = []
+        self.imports = []
         self.import_error = None
         self._requests = {}
 
@@ -42,10 +43,15 @@ class _Manager:
     def command(self, session_id, request_id, action, payload):
         return self._dispatch(session_id, request_id, action, payload)
 
-    def add_collab(self, link, title=None):
+    def add_collab_request(self, request_id, link, title=None):
+        self.imports.append((request_id, link, title))
         if self.import_error is not None:
             raise RuntimeError(self.import_error)
-        return {"id": "imported", "title": title or "Imported"}
+        return {
+            "requestId": request_id,
+            "status": "accepted",
+            "session": {"id": "imported", "title": title or "Imported"},
+        }
 
     def remove(self, session_id):
         self.removals.append(session_id)
@@ -190,7 +196,12 @@ class NormalizedHttpTests(unittest.TestCase):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             status, _, payload = self.post(
-                "/api/terminal-sessions/collab", {"link": link, "title": "Remote"}
+                "/api/terminal-sessions/collab",
+                {
+                    "requestId": "private-import",
+                    "link": link,
+                    "title": "Remote",
+                },
             )
         self.assertEqual(status, 502)
         self.assertEqual(payload, {"error": "Collaboration connection unavailable"})
@@ -309,6 +320,12 @@ class NormalizedHttpTests(unittest.TestCase):
             {"requestId": "ui-bool", "value": False},
         )
         self.assertEqual(status, 202)
+        self.enable("terminal-1", "answerUiRequest")
+        status, _, _ = self.post(
+            "/api/sessions/terminal-1/ui-requests/7/respond",
+            {"requestId": "ui-multi", "value": ["alpha", "beta"]},
+        )
+        self.assertEqual(status, 202)
         status, _, _ = self.post(
             "/api/sessions/rpc-1/ui-requests/prompt-2/cancel",
             {"requestId": "ui-cancel"},
@@ -322,6 +339,11 @@ class NormalizedHttpTests(unittest.TestCase):
                 "requestId": "confirm-1", "value": False
             }),
             ("rpc-1", "ui-cancel", "cancelUi", {"requestId": "prompt-2"}),
+        ])
+        self.assertEqual(self.terminal.calls, [
+            ("terminal-1", "ui-multi", "respondToUi", {
+                "requestId": "7", "value": ["alpha", "beta"]
+            }),
         ])
 
     def test_terminal_session_removal_reports_removed_and_missing(self):

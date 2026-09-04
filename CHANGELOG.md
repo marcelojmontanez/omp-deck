@@ -14,3 +14,4 @@
 - Validate OMP 18.1.10 RPC and extension compatibility and update the pinned Python and plugin dependencies.
 - Exclude plugin development dependencies from Python artifacts and update the browser test runtime to a vulnerability-free Puppeteer release.
 - Validate the Deck plugin independently so unrelated OMP plugin-doctor warnings do not block setup.
+- Harden setup rollback, malformed-config purge, RPC and Collab request idempotency, concurrent cursor persistence, transport shutdown/reconnect ownership, cleared browser queues, multi-select Ask responses, and oversized plugin-event sequencing.

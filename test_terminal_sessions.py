@@ -12,6 +12,8 @@ from pathlib import Path
 from types import MappingProxyType
 from unittest.mock import patch
 
+from omp_deck._collab_imports import CollabImportError
+from omp_deck._terminal_commands import TerminalCommandConflict
 from omp_deck.collab_adapter import CollabAdapter, CollabSnapshot
 from omp_deck.collab_protocol import b64url_encode, open_frame, pack_envelope, seal_frame, unpack_envelope
 from omp_deck.extension_adapter import ExtensionRegistration, ExtensionSnapshot
@@ -19,12 +21,7 @@ from omp_deck.fleet_model import FleetModel
 from omp_deck.rpc_adapter import AdapterError, AdapterEvent
 from omp_deck.registry_store import RegistryStore
 from omp_deck.settings import Settings
-from omp_deck.terminal_sessions import (
-    TerminalCommandConflict,
-    TerminalSessionError,
-    TerminalSessionManager,
-    _terminal_id,
-)
+from omp_deck.terminal_sessions import TerminalSessionManager, _terminal_id
 
 
 KEY = bytes(range(32))
@@ -321,19 +318,40 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.assertEqual(registry.load(), [record])
         self.assertEqual(self.model.get(record["id"])["id"], record["id"])
 
-    def test_collab_connection_failure_is_reported_and_remains_disconnected(self):
+    def test_collab_connection_failure_rolls_back_every_owned_resource(self):
         manager = self.manager()
         FakeCollabAdapter.fail_start = True
 
         with patch("omp_deck.terminal_sessions.CollabAdapter", FakeCollabAdapter):
-            with self.assertRaisesRegex(TerminalSessionError, "connection unavailable"):
+            with self.assertRaisesRegex(CollabImportError, "connection unavailable"):
                 manager.add_collab(collab_link())
 
-        session = self.model.snapshot()["sessions"][0]
-        self.assertEqual(session["transport"]["status"], "disconnected")
-        self.assertEqual(session["transport"]["reason"], "Collaboration connection unavailable")
-        self.assertIsNotNone(manager.credentials.get_link(session["id"]))
-        self.assertEqual(manager.registry.load()[0]["id"], session["id"])
+        self.assertEqual(self.model.snapshot()["sessions"], [])
+        self.assertEqual(manager.credentials.list(), [])
+        self.assertEqual(manager.registry.load(), [])
+        self.assertTrue(FakeCollabAdapter.instances[-1].closed)
+
+    def test_collab_import_request_is_durable_and_does_not_store_secret(self):
+        manager = self.manager()
+        secret = collab_link()
+        with patch("omp_deck.terminal_sessions.CollabAdapter", FakeCollabAdapter):
+            first = manager.add_collab_request(
+                "collab-import-1", secret, title="Private"
+            )
+            duplicate = manager.add_collab_request(
+                "collab-import-1", secret, title="Private"
+            )
+
+        self.assertEqual(duplicate["session"]["id"], first["session"]["id"])
+        self.assertEqual(len(FakeCollabAdapter.instances), 1)
+        self.assertNotIn(
+            secret,
+            (self.settings.state_root / "requests.json").read_text(),
+        )
+        with self.assertRaises(TerminalCommandConflict):
+            manager.add_collab_request(
+                "collab-import-1", secret, title="Different"
+            )
 
     def test_real_read_only_collab_adapter_rejects_mutation_before_socket_write(self):
         frames = [host({**WELCOME, "readOnly": True}), host(EMPTY_CHUNK)]
@@ -445,6 +463,8 @@ class TerminalSessionManagerTests(unittest.TestCase):
                 "kind": "select",
                 "title": "Proceed?",
                 "options": ["Yes", "No"],
+                "selectionMarker": "checkbox",
+                "checkedIndices": [0],
             }),),
             sequence=2,
             transport_status="connected",
@@ -461,6 +481,13 @@ class TerminalSessionManagerTests(unittest.TestCase):
         )
         self.assertEqual(public["subagents"], [{"id": "agent", "status": "running"}])
         self.assertEqual(public["pendingUiRequest"]["id"], "12")
+        self.assertTrue(
+            public["pendingUiRequest"]["questions"][0]["multi"]
+        )
+        self.assertEqual(
+            public["pendingUiRequest"]["questions"][0]["checkedIndices"],
+            [0],
+        )
         self.assertEqual(public["state"], "needs_input")
 
     def test_close_joins_watcher_and_closes_all_adapters(self):

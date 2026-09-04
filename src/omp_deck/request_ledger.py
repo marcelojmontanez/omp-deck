@@ -10,6 +10,7 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Mapping
+from ._atomic_file import replace_bytes
 
 _SCHEMA_VERSION = 1
 _MAX_FILE_BYTES = 2 * 1024 * 1024
@@ -34,6 +35,27 @@ class RequestLedger:
         self.lock_path = self.path.with_name(f".{self.path.name}.lock")
         self.max_records = max_records
         self._thread_lock = threading.RLock()
+
+    def lookup(
+        self, scope: str, request_id: str, fingerprint: str
+    ) -> dict[str, Any] | None:
+        self._validate_identity(scope, request_id, fingerprint)
+        with self._locked():
+            data = self._read()
+            record = self._find(data, scope, request_id)
+            if record is None:
+                return None
+            if record["fingerprint"] != fingerprint:
+                raise RequestConflictError(
+                    "requestId was already used for another operation"
+                )
+            if record["state"] == "pending":
+                return {
+                    "requestId": request_id,
+                    "status": "uncertain",
+                    "errorCode": "outcome_unknown",
+                }
+            return copy.deepcopy(record["outcome"])
 
     def reserve(self, scope: str, request_id: str, fingerprint: str) -> dict[str, Any] | None:
         self._validate_identity(scope, request_id, fingerprint)
@@ -259,41 +281,20 @@ class RequestLedger:
 
     def _write(self, data: dict[str, Any]) -> None:
         self._validate_store(data)
-        payload = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        payload = json.dumps(
+            data,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
         if len(payload) > _MAX_FILE_BYTES:
             raise RequestLedgerError("request ledger is too large")
-        temporary_name = f".{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
         directory_fd = os.open(
             self.path.parent,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
         )
-        descriptor = -1
         try:
-            descriptor = os.open(
-                temporary_name,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-                0o600,
-                dir_fd=directory_fd,
-            )
-            with os.fdopen(descriptor, "wb") as stream:
-                descriptor = -1
-                stream.write(payload)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(
-                temporary_name,
-                self.path.name,
-                src_dir_fd=directory_fd,
-                dst_dir_fd=directory_fd,
-            )
-            os.fsync(directory_fd)
-        except BaseException:
-            if descriptor >= 0:
-                os.close(descriptor)
-            try:
-                os.unlink(temporary_name, dir_fd=directory_fd)
-            except FileNotFoundError:
-                pass
-            raise
+            replace_bytes(directory_fd, self.path.name, payload)
         finally:
             os.close(directory_fd)

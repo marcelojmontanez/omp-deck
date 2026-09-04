@@ -193,9 +193,17 @@ def _ui_value(data):
     value = data.get("value")
     if isinstance(value, str):
         return bounded_text(value, "UI response", 16_000)
-    if not isinstance(value, bool):
-        raise ValueError("UI response must be text or boolean")
-    return value
+    if isinstance(value, bool):
+        return value
+    if (
+        not isinstance(value, list)
+        or not value
+        or len(value) > 128
+        or any(not isinstance(item, str) for item in value)
+        or sum(len(item) for item in value) > 16_000
+    ):
+        raise ValueError("UI response must be text, boolean, or selected values")
+    return [bounded_text(item, "UI response value", 1_000) for item in value]
 
 
 def request_host(headers, allowed_hosts):

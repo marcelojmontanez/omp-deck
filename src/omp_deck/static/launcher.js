@@ -57,11 +57,12 @@ el['project-launch'].addEventListener('click', async () => {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({requestId: launchRequestId, create: creating}),
     });
-    const payload = await response.json().catch(() => ({}));
+    const payload = await response.json();
     if (!response.ok || !payload.session) {
       const error = new Error(payload.error || `Launch failed (${response.status})`);
       error.reuseRequestId = (
-        payload.status === 'uncertain'
+        response.ok
+        || payload.status === 'uncertain'
         || payload.errorCode === 'outcome_unknown'
       );
       throw error;
@@ -85,6 +86,7 @@ el['project-launch'].addEventListener('click', async () => {
 const collabLink = document.getElementById('collab-link');
 const collabConnect = document.getElementById('collab-connect');
 const collabState = document.getElementById('collab-state');
+let pendingCollab = null;
 
 collabConnect.addEventListener('click', async () => {
   const link = collabLink.value.trim();
@@ -92,7 +94,10 @@ collabConnect.addEventListener('click', async () => {
     collabState.textContent = 'Paste a writable Collab link.';
     return;
   }
-  collabLink.value = '';
+  const collabRequestId = pendingCollab?.link === link
+    ? pendingCollab.requestId
+    : requestId();
+  pendingCollab = {link, requestId: collabRequestId};
   collabConnect.disabled = true;
   collabLink.disabled = true;
   collabState.textContent = 'Connecting…';
@@ -100,18 +105,26 @@ collabConnect.addEventListener('click', async () => {
     const response = await ompDeckApi.request('/api/terminal-sessions/collab', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({link}),
+      body: JSON.stringify({requestId: collabRequestId, link}),
     });
-    const payload = await response.json().catch(() => ({}));
+    const payload = await response.json();
     if (!response.ok || !payload.session) {
-      throw new Error(payload.error || `Connection failed (${response.status})`);
+      const error = new Error(payload.error || `Connection failed (${response.status})`);
+      error.reuseRequestId = (
+        response.ok
+        || payload.status === 'uncertain'
+        || payload.errorCode === 'outcome_unknown'
+      );
+      throw error;
     }
+    pendingCollab = null;
     collabLink.value = '';
     collabState.textContent = '';
     applyFleetSession(payload.session);
     selectAgent(payload.session.id);
     showToast('Terminal connected through Collab', 'success');
   } catch (error) {
+    if (error.reuseRequestId === false) pendingCollab = null;
     collabState.textContent = error.message;
   } finally {
     collabLink.disabled = false;

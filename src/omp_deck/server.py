@@ -14,6 +14,7 @@ from .auth import (
     PairingRateLimited,
 )
 from .attachments import detect_image_mime, read_blob
+from ._terminal_commands import TerminalCommandConflict
 from .projects import list_launchable_projects, resolve_project_path
 from .fleet_model import FleetModel
 from .rpc_sessions import (
@@ -22,7 +23,6 @@ from .rpc_sessions import (
     SessionNotConnectedError,
 )
 from .terminal_sessions import (
-    TerminalCommandConflict,
     TerminalSessionManager,
     TerminalSessionNotConnected,
 )

@@ -15,7 +15,11 @@ from omp_deck.fleet_model import FleetModel
 from omp_deck.registry_store import RegistryStore
 from omp_deck.rpc_adapter import AdapterError
 from omp_deck.rpc_refresh import RpcRefreshScheduler
-from omp_deck.rpc_sessions import RpcSessionManager, SessionCommandConflictError
+from omp_deck.rpc_sessions import (
+    RpcSessionManager,
+    SessionCommandConflictError,
+    SessionNotConnectedError,
+)
 from omp_deck.settings import Settings
 
 
@@ -248,19 +252,38 @@ class TestRpcSessionManager(unittest.TestCase):
         self.assertEqual(self.model.get(session_id)["transport"]["status"], "disconnected")
         self.assertEqual(self.model.get(session_id)["transport"]["reason"], "shut down")
 
-    def test_shutdown_failure_still_clears_runtime_intent_and_public_connection(self):
+    def test_shutdown_failure_retains_runtime_ownership_for_retry(self):
         session_id = self.launch()["id"]
         FakeRpcClient.fail_stop = True
 
         with self.assertRaisesRegex(RuntimeError, "stop failed"):
             self.manager.shutdown(session_id)
-        FakeRpcClient.fail_stop = False
 
         self.assertFalse(self.registry.load()[0]["desiredRpcRunning"])
-        self.assertIsNone(self.manager._runtime_or_none(session_id))
+        self.assertIsNotNone(self.manager._runtime_or_none(session_id))
         transport = self.model.get(session_id)["transport"]
         self.assertEqual(transport["status"], "disconnected")
         self.assertEqual(transport["reason"], "shutdown failed")
+
+        FakeRpcClient.fail_stop = False
+        self.manager.shutdown(session_id)
+        self.assertIsNone(self.manager._runtime_or_none(session_id))
+        self.assertTrue(FakeRpcClient.instances[-1].stopped)
+
+    def test_shutdown_registry_failure_keeps_live_runtime_owned(self):
+        session_id = self.launch()["id"]
+        runtime = self.manager._runtime(session_id)
+        client = FakeRpcClient.instances[-1]
+
+        with patch.object(
+            self.registry, "update", side_effect=OSError("disk full")
+        ):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                self.manager.shutdown(session_id)
+
+        self.assertIs(self.manager._runtime_or_none(session_id), runtime)
+        self.assertFalse(client.stopped)
+        self.assertTrue(self.registry.load()[0]["desiredRpcRunning"])
 
     def test_close_stops_transport_but_preserves_restart_intent(self):
         session_id = self.launch()["id"]
@@ -505,6 +528,50 @@ class TestRpcSessionManager(unittest.TestCase):
                 "sendMessage",
                 {"message": "different"},
             )
+
+    def test_ambiguous_transport_failure_is_not_replayed(self):
+        session_id = self.launch()["id"]
+        adapter = self.manager._runtime(session_id).adapter
+        expected = {
+            "requestId": "ambiguous-request",
+            "status": "uncertain",
+            "errorCode": "outcome_unknown",
+        }
+        with patch.object(
+            adapter,
+            "send_message",
+            side_effect=AdapterError("slow", kind="timeout"),
+        ) as send:
+            first = self.manager.dispatch(
+                session_id,
+                "ambiguous-request",
+                "sendMessage",
+                {"message": "once"},
+            )
+            retry = self.manager.dispatch(
+                session_id,
+                "ambiguous-request",
+                "sendMessage",
+                {"message": "once"},
+            )
+
+        self.assertEqual(first, expected)
+        self.assertEqual(retry, expected)
+        send.assert_called_once()
+
+    def test_disconnected_command_is_rejected_before_request_reservation(self):
+        session_id = self.launch()["id"]
+        self.manager.shutdown(session_id)
+
+        with self.assertRaises(SessionNotConnectedError):
+            self.manager.dispatch(
+                session_id,
+                "not-dispatched",
+                "sendMessage",
+                {"message": "never"},
+            )
+
+        self.assertFalse((self.settings.state_root / "requests.json").exists())
 
     def test_dispatch_serializes_each_session_without_blocking_other_sessions(self):
         first_id = self.launch()["id"]

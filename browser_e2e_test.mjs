@@ -379,6 +379,104 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     queueBehavior.failedRequests[0].body.requestId,
   );
 
+  const clearedQueue = await page.evaluate(async () => {
+    const originalRequest = ompDeckApi.request;
+    const agent = state.agents.find(item => item.id === 'queue-session');
+    state.agents = [agent];
+    state.selectedId = agent.id;
+    agent.status = 'idle';
+    agent.executionState = 'idle';
+    composer.select(agent.id);
+    const routes = [];
+    let releaseFirst;
+    const response = {ok: true, status: 202, json: async () => ({})};
+    const waitUntil = async predicate => {
+      const deadline = Date.now() + 1000;
+      while (!predicate()) {
+        if (Date.now() >= deadline) throw new Error('composer clear timed out');
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+    };
+    try {
+      ompDeckApi.request = path => {
+        routes.push(path);
+        if (routes.length === 1) {
+          return new Promise(resolve => {
+            releaseFirst = () => resolve(response);
+          });
+        }
+        return Promise.resolve(response);
+      };
+      document.getElementById('message').value = 'in flight';
+      document.getElementById('composer').requestSubmit();
+      await waitUntil(() => Boolean(releaseFirst));
+      document.getElementById('message').value = 'must be cancelled';
+      document.getElementById('composer').requestSubmit();
+      composer.clearLocalData();
+      releaseFirst();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      return routes;
+    } finally {
+      ompDeckApi.request = originalRequest;
+    }
+  });
+  assert.deepEqual(clearedQueue, ['/api/sessions/queue-session/messages']);
+
+  const multiAsk = await page.evaluate(async () => {
+    const originalRequest = ompDeckApi.request;
+    const pending = {
+      id: 'ask-1',
+      kind: 'select',
+      title: 'Choose',
+      questionIndex: 0,
+      questions: [{
+        prompt: 'Pick values',
+        multi: true,
+        checkedIndices: [0],
+        options: [
+          {label: 'First', value: 'first'},
+          {label: 'Second', value: 'second'},
+        ],
+      }],
+    };
+    const agent = {
+      id: 'ask-session',
+      bridgeConnected: false,
+      capabilities: {answerUiRequest: true},
+      pendingUiRequest: pending,
+    };
+    state.agents = [agent];
+    state.selectedId = agent.id;
+    renderPendingRequest(agent);
+    const disconnectedHasForm = Boolean(
+      el['pending-request'].querySelector('[data-pending-form]'),
+    );
+    agent.bridgeConnected = true;
+    renderPendingRequest(agent);
+    const choices = [
+      ...el['pending-request'].querySelectorAll('[name="pending-choice"]'),
+    ];
+    choices[1].checked = true;
+    let body;
+    try {
+      ompDeckApi.request = async (_path, options) => {
+        body = JSON.parse(options.body);
+        return {ok: true, status: 202, json: async () => ({})};
+      };
+      await settlePendingRequest();
+    } finally {
+      ompDeckApi.request = originalRequest;
+    }
+    return {
+      disconnectedHasForm,
+      inputTypes: choices.map(choice => choice.type),
+      value: body?.value,
+    };
+  });
+  assert.equal(multiAsk.disconnectedHasForm, false);
+  assert.deepEqual(multiAsk.inputTypes, ['checkbox', 'checkbox']);
+  assert.deepEqual(multiAsk.value, ['first', 'second']);
+
   const launchRetry = await page.evaluate(async () => {
     const originalRequest = ompDeckApi.request;
     const select = document.getElementById('project-select');

@@ -118,7 +118,8 @@ class RpcRequestCoordinator:
         action: str,
         payload: Mapping[str, Any],
         *,
-        execute: Callable[[str, str, Mapping[str, Any]], dict[str, Any]],
+        prepare: Callable[[], Any] | None = None,
+        execute: Callable[[Any, str, Mapping[str, Any]], dict[str, Any]],
     ) -> dict[str, Any]:
         fingerprint = _fingerprint({"action": action, "payload": payload})
         with self._lock:
@@ -127,11 +128,15 @@ class RpcRequestCoordinator:
             )
         with command_lock:
             scope = f"rpc-command:{session_id}"
+            persisted = self.ledger.lookup(scope, request_id, fingerprint)
+            if persisted is not None:
+                return persisted
+            prepared = prepare() if prepare is not None else session_id
             persisted = self.ledger.reserve(scope, request_id, fingerprint)
             if persisted is not None:
                 return persisted
             try:
-                command_result = execute(session_id, action, payload)
+                command_result = execute(prepared, action, payload)
                 outcome = command_result.get("result")
                 status = "stale" if outcome == "stale" else "accepted"
                 result = {
@@ -140,6 +145,12 @@ class RpcRequestCoordinator:
                     "result": outcome,
                 }
             except AdapterError as error:
+                if error.kind not in {"cancelled", "command"}:
+                    return {
+                        "requestId": request_id,
+                        "status": "uncertain",
+                        "errorCode": "outcome_unknown",
+                    }
                 status = "cancelled" if error.kind == "cancelled" else "failed"
                 result = {
                     "requestId": request_id,

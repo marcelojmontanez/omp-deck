@@ -180,6 +180,8 @@ def setup(*, tailscale=False):
                 restore_plugin(settings, plugin_backup)
             except Exception as cleanup_error:
                 rollback_errors.append(f"plugin: {cleanup_error}")
+            finally:
+                discard_plugin_backup(plugin_backup)
         if service_touched:
             try:
                 restore_service_state(service_snapshot)
@@ -356,7 +358,11 @@ def main(argv=None):
     elif arguments.command == "serve":
         serve()
     elif arguments.command == "purge":
-        purge_installation(load_settings().omp_bin)
+        try:
+            omp_bin = load_settings().omp_bin
+        except RuntimeError:
+            omp_bin = "omp"
+        purge_installation(omp_bin)
     elif arguments.command == "migrate":
         from .migration import apply_migration, migration_plan
 

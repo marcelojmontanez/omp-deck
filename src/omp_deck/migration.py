@@ -176,6 +176,7 @@ def _validate_adoptable_state_root(settings) -> None:
         ".registry.json.lock",
         ".requests.json.lock",
         ".collab.json.lock",
+        ".cursors.json.lock",
         OWNERSHIP_MARKER,
     }
     count = 0

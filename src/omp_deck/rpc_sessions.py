@@ -3,12 +3,12 @@ from __future__ import annotations
 import dataclasses
 import threading
 import uuid
-from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
 
 from omp_rpc import RpcClient
 
+from . import _rpc_commands
 from .fleet_model import FleetModel
 from .projects import resolve_project_path
 from .registry_store import RegistryStore
@@ -32,16 +32,6 @@ class SessionCommandConflictError(ValueError):
 
 
 
-def _plain(value: Any) -> Any:
-    if dataclasses.is_dataclass(value):
-        return {field.name: _plain(getattr(value, field.name)) for field in dataclasses.fields(value)}
-    if isinstance(value, Enum):
-        return value.value
-    if isinstance(value, Mapping):
-        return {str(key): _plain(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [_plain(item) for item in value]
-    return value
 
 
 @dataclasses.dataclass(slots=True)
@@ -69,6 +59,7 @@ class RpcSessionManager:
         self._requests = RpcRequestCoordinator(settings, model, self.requests)
         self._lock = threading.RLock()
         self._runtimes: dict[str, _Runtime] = {}
+        self._operation_locks: dict[str, threading.RLock] = {}
         self._closed = False
         self._refreshes = RpcRefreshScheduler(
             self._refresh_or_reconnect,
@@ -191,54 +182,42 @@ class RpcSessionManager:
         action: str,
         payload: Mapping[str, Any],
     ) -> dict[str, Any]:
-        try:
-            return self._requests.dispatch(
-                session_id,
-                request_id,
-                action,
-                payload,
-                execute=self.command,
-            )
-        except RequestConflictError:
-            raise SessionCommandConflictError(
-                "requestId was already used for another command"
-            ) from None
+        with self._operation_lock(session_id):
+            try:
+                return self._requests.dispatch(
+                    session_id,
+                    request_id,
+                    action,
+                    payload,
+                    prepare=lambda: self._prepare_command(
+                        session_id, action, payload
+                    ),
+                    execute=self._command,
+                )
+            except RequestConflictError:
+                raise SessionCommandConflictError(
+                    "requestId was already used for another command"
+                ) from None
 
-    def command(self, session_id: str, action: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        runtime = self._runtime(session_id)
+    def command(
+        self, session_id: str, action: str, payload: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        with self._operation_lock(session_id):
+            return self._command(
+                self._connected_runtime(session_id), action, payload
+            )
+
+    def _command(
+        self, runtime: _Runtime, action: str, payload: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        session_id = runtime.session_id
         adapter = runtime.adapter
         if adapter is None:
             raise SessionNotConnectedError(session_id)
-        result: Any = None
-        if action == "sendMessage":
-            adapter.send_message(
-                payload["message"],
-                images=payload.get("images"),
-                streaming_behavior=payload.get("streamingBehavior"),
-            )
-        elif action == "followUp":
-            adapter.follow_up(payload["message"], images=payload.get("images"))
-        elif action == "interrupt":
-            adapter.interrupt()
-        elif action == "setModel":
-            result = adapter.set_model(payload["provider"], payload["modelId"])
-        elif action == "setThinking":
-            adapter.set_thinking(payload["level"])
-        elif action == "branch":
-            result = adapter.branch(payload["entryId"])
-        elif action == "switchSession":
-            result = adapter.switch(payload["sessionPath"])
-        elif action == "compact":
-            result = adapter.compact(payload.get("customInstructions"))
-        elif action == "respondToUi":
-            result = adapter.respond_ui(payload["requestId"], payload["value"])
-        elif action == "cancelUi":
-            result = adapter.cancel_ui(payload["requestId"])
-        elif action == "shutdown":
+        if action == "shutdown":
             self.shutdown(session_id)
             return {"accepted": True, "result": None}
-        else:
-            raise ValueError(f"unsupported RPC action: {action}")
+        result = _rpc_commands.invoke(adapter, action, payload)
         try:
             snapshot = adapter.snapshot()
             if action in {"branch", "switchSession"}:
@@ -253,45 +232,48 @@ class RpcSessionManager:
             )
         except Exception:
             self._refreshes.request((session_id,))
-        return {"accepted": True, "result": _plain(result)}
+        return {"accepted": True, "result": _rpc_commands.plain(result)}
 
     def shutdown(self, session_id: str) -> None:
-        with self._lock:
-            runtime = self._runtimes.pop(session_id, None)
-        record = self.registry.update(session_id, desired_rpc_running=False)
-        if runtime is not None:
-            runtime.generation = record["generation"]
-        self.model.load_record(record)
-        try:
-            if runtime is not None and runtime.adapter is not None:
-                runtime.adapter.shutdown()
-        except Exception:
+        with self._operation_lock(session_id):
+            runtime = self._runtime_or_none(session_id)
+            record = self.registry.update(session_id, desired_rpc_running=False)
+            if runtime is not None:
+                runtime.generation = record["generation"]
+            self.model.load_record(record)
+            try:
+                if runtime is not None and runtime.adapter is not None:
+                    runtime.adapter.shutdown()
+            except Exception:
+                self.model.set_transport(
+                    session_id,
+                    instance_id=runtime.instance_id,
+                    generation=record["generation"],
+                    status="disconnected",
+                    reason="shutdown failed",
+                )
+                raise
+            with self._lock:
+                if self._runtimes.get(session_id) is runtime:
+                    self._runtimes.pop(session_id)
             self.model.set_transport(
                 session_id,
-                instance_id=runtime.instance_id,
+                instance_id=runtime.instance_id if runtime else None,
                 generation=record["generation"],
                 status="disconnected",
-                reason="shutdown failed",
+                reason="shut down",
             )
-            raise
-        self.model.set_transport(
-            session_id,
-            instance_id=runtime.instance_id if runtime else None,
-            generation=record["generation"],
-            status="disconnected",
-            reason="shut down",
-        )
 
     def close(self) -> None:
         with self._lock:
             self._closed = True
             runtimes = tuple(self._runtimes.values())
-            self._runtimes.clear()
         self._refreshes.close()
         for runtime in runtimes:
-            if runtime.adapter is not None:
+            with self._operation_lock(runtime.session_id):
                 try:
-                    runtime.adapter.close()
+                    if runtime.adapter is not None:
+                        runtime.adapter.close()
                 except Exception as error:
                     self.model.set_transport(
                         runtime.session_id,
@@ -300,6 +282,10 @@ class RpcSessionManager:
                         status="disconnected",
                         reason=f"close failed: {error}",
                     )
+                    continue
+                with self._lock:
+                    if self._runtimes.get(runtime.session_id) is runtime:
+                        self._runtimes.pop(runtime.session_id)
 
     def _connect(self, record: Mapping[str, Any], *, resume: str | None) -> None:
         runtime = _Runtime(
@@ -430,39 +416,49 @@ class RpcSessionManager:
         )
 
     def _replace_disconnected(self, session_id: str, error: Exception) -> None:
-        with self._lock:
-            runtime = self._runtimes.pop(session_id, None)
-        if runtime is None:
-            return
-        if runtime.adapter is not None:
-            try:
-                runtime.adapter.close()
-            except Exception:
-                pass
-        self.model.set_transport(
-            session_id,
-            instance_id=runtime.instance_id,
-            generation=runtime.generation,
-            status="disconnected",
-            reason=str(error),
-        )
-        record = self._record(session_id)
-        if not record["desiredRpcRunning"]:
-            return
-        with self._lock:
-            if self._closed:
+        with self._operation_lock(session_id):
+            runtime = self._runtime_or_none(session_id)
+            if runtime is None:
                 return
-        try:
-            self._connect(record, resume=record.get("ompSessionId"))
-        except Exception as reconnect_error:
-            current = self._record(session_id)
+            if runtime.adapter is not None:
+                try:
+                    runtime.adapter.close()
+                except Exception as close_error:
+                    self.model.set_transport(
+                        session_id,
+                        instance_id=runtime.instance_id,
+                        generation=runtime.generation,
+                        status="disconnected",
+                        reason=f"{error}; close failed: {close_error}",
+                    )
+                    return
+            with self._lock:
+                if self._runtimes.get(session_id) is runtime:
+                    self._runtimes.pop(session_id)
             self.model.set_transport(
                 session_id,
-                instance_id=None,
-                generation=current["generation"],
+                instance_id=runtime.instance_id,
+                generation=runtime.generation,
                 status="disconnected",
-                reason=f"reconnect failed: {reconnect_error}",
+                reason=str(error),
             )
+            record = self._record(session_id)
+            if not record["desiredRpcRunning"]:
+                return
+            with self._lock:
+                if self._closed:
+                    return
+            try:
+                self._connect(record, resume=record.get("ompSessionId"))
+            except Exception as reconnect_error:
+                current = self._record(session_id)
+                self.model.set_transport(
+                    session_id,
+                    instance_id=None,
+                    generation=current["generation"],
+                    status="disconnected",
+                    reason=f"reconnect failed: {reconnect_error}",
+                )
 
     def _on_event(self, runtime: _Runtime, event: AdapterEvent) -> None:
         self.model.apply_adapter_event(
@@ -471,6 +467,27 @@ class RpcSessionManager:
             generation=runtime.generation,
             event=event,
         )
+
+    def _operation_lock(self, session_id: str) -> threading.RLock:
+        with self._lock:
+            return self._operation_locks.setdefault(session_id, threading.RLock())
+
+    def _prepare_command(
+        self,
+        session_id: str,
+        action: str,
+        payload: Mapping[str, Any],
+    ) -> _Runtime:
+        runtime = self._connected_runtime(session_id)
+        if action == "respondToUi" and isinstance(payload.get("value"), list):
+            raise ValueError("RPC UI responses do not support multiple values")
+        return runtime
+
+    def _connected_runtime(self, session_id: str) -> _Runtime:
+        runtime = self._runtime(session_id)
+        if runtime.adapter is None or not self._record(session_id)["desiredRpcRunning"]:
+            raise SessionNotConnectedError(session_id)
+        return runtime
 
     def _runtime(self, session_id: str) -> _Runtime:
         runtime = self._runtime_or_none(session_id)

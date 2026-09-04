@@ -22,6 +22,7 @@ class RpcRefreshScheduler:
         self._running: set[str] = set()
         self._pending: set[str] = set()
         self._closed = False
+        self._threads: dict[str, threading.Thread] = {}
 
     def refresh_now(self, session_ids: Iterable[str]) -> None:
         for session_id in session_ids:
@@ -35,7 +36,11 @@ class RpcRefreshScheduler:
         with self._lock:
             self._closed = True
             self._pending.clear()
-
+            threads = tuple(self._threads.values())
+        current = threading.current_thread()
+        for thread in threads:
+            if thread is not current:
+                thread.join()
     def _schedule(self, session_id: str) -> None:
         with self._lock:
             if self._closed:
@@ -44,12 +49,14 @@ class RpcRefreshScheduler:
             if session_id in self._running:
                 return
             self._running.add(session_id)
-        threading.Thread(
-            target=self._worker,
-            args=(session_id,),
-            name=f"omp-deck-rpc-refresh-{session_id[:16]}",
-            daemon=True,
-        ).start()
+            thread = threading.Thread(
+                target=self._worker,
+                args=(session_id,),
+                name=f"omp-deck-rpc-refresh-{session_id[:16]}",
+                daemon=True,
+            )
+            self._threads[session_id] = thread
+            thread.start()
 
     def _worker(self, session_id: str) -> None:
         restart = False
@@ -67,6 +74,8 @@ class RpcRefreshScheduler:
         finally:
             with self._lock:
                 self._running.discard(session_id)
+                if self._threads.get(session_id) is threading.current_thread():
+                    self._threads.pop(session_id, None)
                 restart = not self._closed and session_id in self._pending
             if restart:
                 self._schedule(session_id)

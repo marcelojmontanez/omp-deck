@@ -189,14 +189,21 @@ class SessionAdapter:
     def _detach_and_stop(self, client: RpcClientLike) -> None:
         with self._lock:
             unsubscribers, self._unsubscribers = self._unsubscribers, []
-            if self._client is client:
-                self._client = None
+            if self._client is not client:
+                return
+            self._client = None
         for unsubscribe in unsubscribers:
             try:
                 unsubscribe()
             except Exception:
                 pass
-        client.stop()
+        try:
+            client.stop()
+        except BaseException:
+            with self._lock:
+                if self._client is None:
+                    self._client = client
+            raise
 
     def _check_compatibility(self) -> None:
         with self._lock:

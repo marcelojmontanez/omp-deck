@@ -75,6 +75,14 @@ class CommandTests(unittest.TestCase):
             self.assertEqual(cli.main(["purge"]), 0)
         purge.assert_called_once_with("/opt/omp/bin/omp")
 
+    def test_purge_falls_back_to_path_when_configuration_is_malformed(self):
+        with (
+            patch.object(cli, "load_settings", side_effect=RuntimeError("malformed")),
+            patch.object(cli, "purge_installation") as purge,
+        ):
+            self.assertEqual(cli.main(["purge"]), 0)
+        purge.assert_called_once_with("omp")
+
     def test_setup_orders_plugin_service_health_and_pairing(self):
         settings = SimpleNamespace(omp_bin="omp", state_root=Path("/tmp/state"))
         calls = []
@@ -163,12 +171,14 @@ class CommandTests(unittest.TestCase):
             patch.object(cli, "check_health", side_effect=[None, RuntimeError("late failure")]),
             patch.object(cli, "restore_service_state") as restore_service,
             patch.object(cli, "restore_plugin") as restore_plugin,
+            patch.object(cli, "discard_plugin_backup") as discard_plugin_backup,
         ):
             with self.assertRaisesRegex(RuntimeError, "late failure"):
                 cli.setup()
 
         restore_plugin.assert_called_once_with(settings, plugin_backup)
         restore_service.assert_called_once_with(service_snapshot)
+        discard_plugin_backup.assert_called_once_with(plugin_backup)
 
     def test_setup_refuses_to_replace_unsnapshottable_existing_plugin(self):
         settings = SimpleNamespace(omp_bin="omp", state_root=Path("/tmp/state"))

@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
+from ._atomic_file import replace_bytes
 
 SCHEMA_VERSION = 1
 DEFAULT_MAX_RECORDS = 1_000
@@ -450,47 +451,14 @@ class RegistryStore:
     def _write(self, data: dict[str, Any]) -> None:
         self._validate_store(data)
         payload = json.dumps(
-            data, ensure_ascii=False, separators=(",", ":")
+            data,
+            ensure_ascii=False,
+            separators=(",", ":"),
         ).encode("utf-8")
         if len(payload) > 8 * 1024 * 1024:
             raise RegistryValidationError("registry file is too large")
-        temporary_name = (
-            f".{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-        )
-        directory_fd = os.open(
-            self.path.parent,
-            _DIRECTORY_FLAGS,
-        )
-        fd = -1
+        directory_fd = os.open(self.path.parent, _DIRECTORY_FLAGS)
         try:
-            fd = os.open(
-                temporary_name,
-                os.O_WRONLY
-                | os.O_CREAT
-                | os.O_EXCL
-                | getattr(os, "O_NOFOLLOW", 0),
-                0o600,
-                dir_fd=directory_fd,
-            )
-            with os.fdopen(fd, "wb") as handle:
-                fd = -1
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(
-                temporary_name,
-                self.path.name,
-                src_dir_fd=directory_fd,
-                dst_dir_fd=directory_fd,
-            )
-            os.fsync(directory_fd)
-        except BaseException:
-            if fd >= 0:
-                os.close(fd)
-            try:
-                os.unlink(temporary_name, dir_fd=directory_fd)
-            except FileNotFoundError:
-                pass
-            raise
+            replace_bytes(directory_fd, self.path.name, payload)
         finally:
             os.close(directory_fd)

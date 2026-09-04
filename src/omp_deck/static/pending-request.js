@@ -1,6 +1,12 @@
 function renderPendingRequest(agent) {
   const pending = agent?.pendingUiRequest;
-  const key = pending ? `${pending.id}:${pending.questionIndex || 0}:${pending.status}` : '';
+  const key = pending ? JSON.stringify([
+    agent?.id,
+    pending,
+    Boolean(agent?.bridgeConnected),
+    Boolean(agent?.capabilities?.answerUiRequest),
+    Boolean(agent?.capabilities?.cancelUiRequest),
+  ]) : '';
   if (!pending) {
     delete el['pending-request'].dataset.requestKey;
     el['pending-request'].hidden = true;
@@ -24,7 +30,7 @@ function renderPendingRequest(agent) {
   const question = pending.questions?.[pending.questionIndex || 0] || {};
   const options = Array.isArray(question.options) ? question.options : [];
   let choices = options.map((option, index) => `<label class="request-option">
-    <input type="radio" name="pending-choice" data-choice-index="${index}" ${!question.toggleSelection && question.checkedIndices?.includes(index) ? 'checked' : ''}>
+    <input type="${question.multi ? 'checkbox' : 'radio'}" name="pending-choice" data-choice-index="${index}" ${question.checkedIndices?.includes(index) ? 'checked' : ''}>
     <span class="${question.checkedIndices?.includes(index) ? 'selected' : ''}"><strong>${escapeHtml(option.label || option.value || '')}</strong>${option.description ? `<small>${escapeHtml(option.description)}</small>` : ''}</span>
     ${question.recommended === index ? '<em>Recommended</em>' : ''}
   </label>`).join('');
@@ -74,7 +80,7 @@ async function settlePendingRequest({cancel = false} = {}) {
         if (status) status.textContent = 'Choose an answer.';
         return;
       }
-      value = values[0];
+      value = question.multi ? values : values[0];
     }
   }
   form?.querySelectorAll('button,input,textarea').forEach(control => { control.disabled = true; });

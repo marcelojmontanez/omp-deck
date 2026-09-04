@@ -183,7 +183,7 @@ def _collab_pending(request: Mapping[str, Any] | None) -> dict[str, Any] | None:
     toggle_selection = request.get("selectionMarker") == "checkbox"
     initial = request.get("initialIndex")
     question = {"id": f"{request_id}:0", "prompt": request.get("title") or kind, "options": options,
-                "multi": False, "toggleSelection": toggle_selection,
+                "multi": toggle_selection, "toggleSelection": toggle_selection,
                 "recommended": initial if isinstance(initial, int) and not isinstance(initial, bool) else None,
                 "checkedIndices": list(request.get("checkedIndices", [])) if toggle_selection else [],
                 "allowCustom": kind == "editor", "customPlaceholder": None,

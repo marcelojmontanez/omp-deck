@@ -15,8 +15,14 @@ function createComposer({
   const outboundQueues = new Map();
   const retryBatches = new Map();
   const revokedAttachmentUrls = new Set();
+  const queueTokens = new Map();
   let sessionId = null;
   let dataGeneration = 0;
+
+  function queueToken(id) {
+    if (!queueTokens.has(id)) queueTokens.set(id, {});
+    return queueTokens.get(id);
+  }
 
   function saveDraft(id, value) {
     if (!id) return;
@@ -42,9 +48,9 @@ function createComposer({
     pendingMessages.clear();
     outboundQueues.clear();
     retryBatches.clear();
+    queueTokens.clear();
     elements.message.value = '';
     elements['send-state'].textContent = '';
-    updateCommandMode();
     renderAttachments();
     touchRender();
   }
@@ -153,7 +159,10 @@ function createComposer({
   }
 
   async function deliver(job) {
-    const {id, message, outgoingAttachments, pending, generation} = job;
+    const {
+      id, message, outgoingAttachments, pending, generation, token,
+    } = job;
+    if (generation !== dataGeneration || queueTokens.get(id) !== token) return;
     const agent = state.agents.find(candidate => candidate.id === id);
     if (!agent) {
       const error = new Error('Session is no longer available');
@@ -170,7 +179,7 @@ function createComposer({
         attachments: outgoingAttachments.map(({name, type, data}) => ({name, type, data})),
       }),
     });
-    if (generation !== dataGeneration) return;
+    if (generation !== dataGeneration || queueTokens.get(id) !== token) return;
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
       const error = new Error(payload.error || `Send failed (${response.status})`);
@@ -188,7 +197,10 @@ function createComposer({
   }
 
   function restoreUndelivered(jobs, error) {
-    const active = jobs.filter(job => job.generation === dataGeneration);
+    const active = jobs.filter(job =>
+      job.generation === dataGeneration
+      && queueTokens.get(job.id) === job.token
+    );
     if (!active.length) return;
     const id = active[0].id;
     const pendingIds = new Set(active.map(job => job.pending?.id).filter(Boolean));
@@ -268,6 +280,7 @@ function createComposer({
       renderAttachments();
       for (const job of retry.jobs) {
         job.generation = dataGeneration;
+        job.token = queueToken(id);
         job.pending.accepted = false;
         pendingFor(id).push(job.pending);
       }
@@ -304,6 +317,7 @@ function createComposer({
       outgoingAttachments,
       pending,
       generation: dataGeneration,
+      token: queueToken(id),
     });
     void drain(id);
   }
@@ -352,6 +366,7 @@ function createComposer({
       ...drafts.keys(), ...attachments.keys(), ...pendingMessages.keys(), ...outboundQueues.keys(),
     ])) {
       if (valid.has(id)) continue;
+      queueTokens.delete(id);
       (attachments.get(id) || []).forEach(revokeAttachment);
       (pendingMessages.get(id) || []).flatMap(item => item.attachments || []).forEach(revokeAttachment);
       (outboundQueues.get(id) || []).flatMap(job => job.outgoingAttachments || []).forEach(revokeAttachment);
@@ -360,7 +375,6 @@ function createComposer({
       pendingMessages.delete(id);
       outboundQueues.delete(id);
       retryBatches.delete(id);
-      sending.delete(id);
     }
   }
 

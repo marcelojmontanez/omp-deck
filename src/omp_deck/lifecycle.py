@@ -32,6 +32,7 @@ class RootSnapshot:
     existed: bool
     mode: int | None
     marker_existed: bool
+    entries: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -79,12 +80,16 @@ def capture_service_state(*, settings=None, config_path=None, runner=None):
         (paths.install_root, paths.config_root, paths.state_root)
     ):
         existed = root.exists() and not root.is_symlink()
+        entries = (
+            tuple(sorted(path.name for path in root.iterdir())) if existed else ()
+        )
         roots.append(
             RootSnapshot(
                 root,
                 existed,
                 root.stat().st_mode & 0o777 if existed else None,
                 has_ownership_marker(root) if existed else False,
+                entries,
             )
         )
     return ServiceSnapshot(
@@ -101,62 +106,70 @@ def capture_service_state(*, settings=None, config_path=None, runner=None):
     )
 
 
+def _restore_root(snapshot):
+    if not snapshot.existed:
+        remove_owned_root(snapshot.path, (snapshot.path,))
+        return
+    if (
+        not snapshot.marker_existed
+        and snapshot.path.is_dir()
+        and not snapshot.path.is_symlink()
+        and has_ownership_marker(snapshot.path)
+    ):
+        preserved = set(snapshot.entries)
+        for child in snapshot.path.iterdir():
+            if child.name in preserved:
+                continue
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child)
+            else:
+                child.unlink(missing_ok=True)
+    if snapshot.mode is not None:
+        snapshot.path.chmod(snapshot.mode)
+
+
 def restore_service_state(snapshot, *, runner=None):
     runner = runner or run
     paths = snapshot.installation or installation_paths()
-    if snapshot.unit is None:
-        runner(
-            ["systemctl", "--user", "disable", "--now", "omp-deck.service"],
-            check=False,
-        )
+    runner(
+        ["systemctl", "--user", "stop", "omp-deck.service"],
+        check=False,
+    )
     for path, content, mode in (
         (paths.unit_path, snapshot.unit, snapshot.unit_mode),
         (paths.manifest_path, snapshot.manifest, snapshot.manifest_mode),
+        (paths.config_path, snapshot.config, snapshot.config_mode),
     ):
         if content is None:
             path.unlink(missing_ok=True)
         else:
             write_atomic(path, content.decode("utf-8"), mode)
+    if snapshot.installation is not None:
+        for root in reversed(snapshot.roots):
+            _restore_root(root)
     runner(["systemctl", "--user", "daemon-reload"])
-    if snapshot.unit is not None:
+    if snapshot.unit is None:
         runner(
-            [
-                "systemctl",
-                "--user",
-                "enable" if snapshot.enabled else "disable",
-                "omp-deck.service",
-            ]
+            ["systemctl", "--user", "disable", "omp-deck.service"],
+            check=False,
         )
-        runner(
-            [
-                "systemctl",
-                "--user",
-                "start" if snapshot.active else "stop",
-                "omp-deck.service",
-            ]
-        )
-    if snapshot.installation is None:
         return
-    config_root = next(
-        root for root in snapshot.roots if root.path == paths.config_root
+    runner(
+        [
+            "systemctl",
+            "--user",
+            "enable" if snapshot.enabled else "disable",
+            "omp-deck.service",
+        ]
     )
-    if config_root.existed:
-        if snapshot.config is None:
-            paths.config_path.unlink(missing_ok=True)
-        else:
-            write_atomic(
-                paths.config_path,
-                snapshot.config.decode("utf-8"),
-                snapshot.config_mode,
-            )
-    for root in reversed(snapshot.roots):
-        if not root.existed:
-            remove_owned_root(root.path, (root.path,))
-            continue
-        if not root.marker_existed:
-            (root.path / OWNERSHIP_MARKER).unlink(missing_ok=True)
-        if root.mode is not None:
-            root.path.chmod(root.mode)
+    runner(
+        [
+            "systemctl",
+            "--user",
+            "restart" if snapshot.active else "stop",
+            "omp-deck.service",
+        ]
+    )
 
 
 def _plugin_record(settings, *, runner=None):

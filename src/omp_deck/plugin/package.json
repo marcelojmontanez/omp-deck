@@ -21,7 +21,7 @@
     "omp-deck.ts"
   ],
   "scripts": {
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && node --test --experimental-strip-types ../../../plugin_behavior_test.mjs",
     "typecheck": "tsc --noEmit",
     "validate": "tsc --noEmit"
   },

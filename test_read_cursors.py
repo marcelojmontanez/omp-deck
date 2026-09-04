@@ -1,5 +1,6 @@
 import json
 import os
+import multiprocessing
 import subprocess
 import sys
 import tempfile
@@ -10,6 +11,14 @@ from pathlib import Path
 from omp_deck.fleet_model import FleetModel
 from omp_deck.read_cursors import CursorStore
 from omp_deck.rpc_adapter import AdapterSnapshot
+
+
+def _mark_cursor_in_process(path, index, start, failures):
+    try:
+        start.wait()
+        CursorStore(path).mark_read(f"session-{index}", f"message-{index}")
+    except BaseException as error:
+        failures.put(f"{type(error).__name__}: {error}")
 
 
 class CursorStoreTests(unittest.TestCase):
@@ -55,6 +64,33 @@ class CursorStoreTests(unittest.TestCase):
             )
             restarted.apply_rpc_snapshot("deck-1", instance_id="two", generation=1, snapshot=newer)
             self.assertTrue(restarted.get("deck-1")["unread"])
+
+    def test_concurrent_processes_do_not_lose_cursor_updates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cursors.json"
+            context = multiprocessing.get_context("fork")
+            start = context.Event()
+            failures = context.Queue()
+            processes = [
+                context.Process(
+                    target=_mark_cursor_in_process,
+                    args=(path, index, start, failures),
+                )
+                for index in range(12)
+            ]
+            for process in processes:
+                process.start()
+            start.set()
+            for process in processes:
+                process.join(10)
+                self.assertEqual(process.exitcode, 0)
+
+            self.assertTrue(failures.empty())
+            store = CursorStore(path)
+            self.assertEqual(
+                {store.last_read(f"session-{index}") for index in range(12)},
+                {f"message-{index}" for index in range(12)},
+            )
 
     def test_corrupt_store_is_quarantined_and_reported_unhealthy(self):
         with tempfile.TemporaryDirectory() as directory:

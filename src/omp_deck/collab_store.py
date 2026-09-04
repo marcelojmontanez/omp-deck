@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
+from ._atomic_file import replace_bytes
 
 from .collab_protocol import parse_collab_link
 
@@ -382,38 +383,25 @@ class CollabStore:
     def _write(self, data: dict[str, Any]) -> None:
         self._validate_store(data)
         try:
-            payload = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            payload = json.dumps(
+                data,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
         except (TypeError, ValueError, UnicodeError, RecursionError):
-            raise CollabStoreValidationError("credential store could not be serialized") from None
+            raise CollabStoreValidationError(
+                "credential store could not be serialized"
+            ) from None
         if len(payload) > MAX_FILE_BYTES:
             raise CollabStoreValidationError("credential store file is too large")
-        temporary_name = f".collab.json.{os.getpid()}.{threading.get_ident()}.tmp"
         directory_fd = os.open(
-            self.state_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            self.state_root,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
         )
         try:
-            fd = os.open(
-                temporary_name,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-                0o600,
-                dir_fd=directory_fd,
-            )
-            try:
-                with os.fdopen(fd, "wb") as handle:
-                    fd = -1
-                    handle.write(payload)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temporary_name, self.path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
-                os.fsync(directory_fd)
-            except BaseException:
-                if fd >= 0:
-                    os.close(fd)
-                try:
-                    os.unlink(temporary_name, dir_fd=directory_fd)
-                except FileNotFoundError:
-                    pass
-                raise
+            replace_bytes(directory_fd, self.path.name, payload)
         finally:
             os.close(directory_fd)
 

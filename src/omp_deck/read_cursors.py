@@ -1,9 +1,13 @@
+import fcntl
 import json
 import os
 import stat
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+from ._atomic_file import replace_bytes
 
 
 _MAX_BYTES = 1024 * 1024
@@ -14,10 +18,16 @@ class CursorStore:
 
     def __init__(self, path):
         self.path = Path(path)
-        self._lock = threading.Lock()
+        self.lock_path = self.path.with_name(f".{self.path.name}.lock")
+        self._lock = threading.RLock()
         self.quarantined_path = None
         self._load_error = None
-        self._data = self._load()
+        self._data = self._empty()
+        try:
+            with self._locked() as directory_fd:
+                self._data = self._read(directory_fd)
+        except OSError as error:
+            self._load_error = str(error)
 
     @property
     def healthy(self):
@@ -25,6 +35,13 @@ class CursorStore:
 
     def last_read(self, session_id):
         with self._lock:
+            try:
+                with self._locked() as directory_fd:
+                    self._data = self._read(directory_fd)
+                self._load_error = None
+            except OSError as error:
+                self._load_error = str(error)
+                return None
             value = self._data["sessions"].get(session_id)
             return value.get("messageId") if isinstance(value, dict) else None
 
@@ -33,41 +50,94 @@ class CursorStore:
             raise ValueError("invalid cursor session ID")
         if not isinstance(message_id, str) or not message_id or len(message_id) > 512:
             raise ValueError("invalid cursor message ID")
-        with self._lock:
-            self._data["sessions"][session_id] = {
+        with self._locked() as directory_fd:
+            data = self._read(directory_fd)
+            data["sessions"][session_id] = {
                 "messageId": message_id,
                 "updatedAt": datetime.now(timezone.utc).isoformat(),
             }
-            self._write_locked()
+            self._write(directory_fd, data)
+            self._data = data
+            self._load_error = None
 
     def remove(self, session_id):
-        with self._lock:
-            if self._data["sessions"].pop(session_id, None) is not None:
-                self._write_locked()
+        with self._locked() as directory_fd:
+            data = self._read(directory_fd)
+            if data["sessions"].pop(session_id, None) is not None:
+                self._write(directory_fd, data)
+            self._data = data
+            self._load_error = None
 
-    def _load(self):
+    @staticmethod
+    def _empty():
+        return {"version": 1, "sessions": {}}
+
+    @contextmanager
+    def _locked(self):
+        with self._lock:
+            self._ensure_root()
+            directory_fd = os.open(
+                self.path.parent,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+            try:
+                lock_fd = os.open(
+                    self.lock_path.name,
+                    os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+                try:
+                    if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
+                        raise OSError("cursor lock is not a regular file")
+                    os.fchmod(lock_fd, 0o600)
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                    yield directory_fd
+                finally:
+                    os.close(lock_fd)
+            finally:
+                os.close(directory_fd)
+
+    def _ensure_root(self):
         try:
-            descriptor = os.open(self.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            info = self.path.parent.lstat()
         except FileNotFoundError:
-            return {"version": 1, "sessions": {}}
-        except OSError as error:
-            self._load_error = str(error)
-            return {"version": 1, "sessions": {}}
+            self.path.parent.mkdir(parents=True, mode=0o700)
+            info = self.path.parent.lstat()
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.geteuid()
+        ):
+            raise OSError("cursor root is unsafe")
+        self.path.parent.chmod(0o700)
+
+    def _read(self, directory_fd):
+        try:
+            descriptor = os.open(
+                self.path.name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd,
+            )
+        except FileNotFoundError:
+            return self._empty()
         try:
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode) or info.st_size > _MAX_BYTES:
                 raise ValueError("invalid cursor store")
-            with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
-                descriptor = -1
-                data = json.load(stream)
+            raw = os.read(descriptor, _MAX_BYTES + 1)
+            os.fchmod(descriptor, 0o600)
+        finally:
+            os.close(descriptor)
+        try:
+            data = json.loads(raw)
             self._validate(data)
             return data
-        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
-            self.quarantined_path = self._quarantine()
-            return {"version": 1, "sessions": {}}
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
+        except (UnicodeError, json.JSONDecodeError, ValueError):
+            self.quarantined_path = self._quarantine(directory_fd)
+            return self._empty()
 
     def _validate(self, data):
         if not isinstance(data, dict) or data.get("version") != 1:
@@ -87,42 +157,24 @@ class CursorStore:
             ):
                 raise ValueError("invalid cursor store")
 
-    def _quarantine(self):
+    def _quarantine(self, directory_fd):
         suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        quarantine = self.path.with_name(f"{self.path.name}.corrupt-{suffix}")
-        os.replace(self.path, quarantine)
-        self._fsync_parent()
-        return quarantine
-
-    def _write_locked(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        descriptor = -1
-        try:
-            descriptor = os.open(
-                temporary,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-                0o600,
-            )
-            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                descriptor = -1
-                json.dump(self._data, stream, separators=(",", ":"), ensure_ascii=False)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self.path)
-            os.chmod(self.path, 0o600)
-            self._fsync_parent()
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
-            temporary.unlink(missing_ok=True)
-
-    def _fsync_parent(self):
-        descriptor = os.open(
-            self.path.parent,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        quarantine_name = f"{self.path.name}.corrupt-{suffix}"
+        os.replace(
+            self.path.name,
+            quarantine_name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
         )
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        os.fsync(directory_fd)
+        return self.path.parent / quarantine_name
+
+    def _write(self, directory_fd, data):
+        payload = json.dumps(
+            data,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        if len(payload) > _MAX_BYTES:
+            raise ValueError("cursor store is too large")
+        replace_bytes(directory_fd, self.path.name, payload)

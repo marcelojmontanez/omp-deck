@@ -59,10 +59,13 @@ class NormalizedActionDispatcher:
         return None
 
     def _add_collab(self, data):
+        request_id = client_request_id(data)
         link = bounded_text(data.get("link"), "Collab link", 8192)
         title = _optional_title(data)
-        session = self.terminal_manager().add_collab(link, title=title)
-        return 201, {"status": "accepted", "session": session}
+        result = self.terminal_manager().add_collab_request(
+            request_id, link, title=title
+        )
+        return (201 if result["status"] == "accepted" else 502), result
 
     def _remove(self, match):
         session_id = decoded_segment(match.group(1), "session")

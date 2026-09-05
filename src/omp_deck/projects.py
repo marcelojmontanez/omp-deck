@@ -73,6 +73,7 @@ def resolve_project_path(root, project, *, must_exist=True):
         raise ValueError("invalid project")
     return candidate
 
+
 def create_project_directory(root, project):
     candidate = resolve_project_path(root, project, must_exist=False)
     resolved_root = _resolved_project_root(root)

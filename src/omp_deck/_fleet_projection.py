@@ -2,25 +2,65 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict
-from datetime import datetime, timezone
-from typing import Any, Mapping, Sequence
+from datetime import UTC, datetime
+from typing import Any
 
 from .rpc_adapter import AdapterSnapshot, PendingUiRequest
 
 CAPABILITIES: dict[str, dict[str, bool]] = {
-    "rpc": {"sendMessage": True, "followUp": True, "interrupt": True, "shutdown": True,
-            "setModel": True, "setThinking": True, "answerUiRequest": True,
-            "cancelUiRequest": True, "subagents": True, "todos": True, "attachments": True,
-            "branch": True, "switch": True, "resume": True, "compact": True},
-    "collab": {"sendMessage": True, "followUp": False, "interrupt": True, "shutdown": False,
-               "setModel": False, "setThinking": False, "answerUiRequest": True,
-               "cancelUiRequest": True, "subagents": True, "todos": True, "attachments": True,
-               "branch": False, "switch": False, "resume": False, "compact": False},
-    "extension": {"sendMessage": True, "followUp": True, "interrupt": True, "shutdown": True,
-                  "setModel": False, "setThinking": False, "answerUiRequest": False,
-                  "cancelUiRequest": False, "subagents": True, "todos": True, "attachments": False,
-                  "branch": False, "switch": False, "resume": False, "compact": False},
+    "rpc": {
+        "sendMessage": True,
+        "followUp": True,
+        "interrupt": True,
+        "shutdown": True,
+        "setModel": True,
+        "setThinking": True,
+        "answerUiRequest": True,
+        "cancelUiRequest": True,
+        "subagents": True,
+        "todos": True,
+        "attachments": True,
+        "branch": True,
+        "switch": True,
+        "resume": True,
+        "compact": True,
+    },
+    "collab": {
+        "sendMessage": True,
+        "followUp": False,
+        "interrupt": True,
+        "shutdown": False,
+        "setModel": False,
+        "setThinking": False,
+        "answerUiRequest": True,
+        "cancelUiRequest": True,
+        "subagents": True,
+        "todos": True,
+        "attachments": True,
+        "branch": False,
+        "switch": False,
+        "resume": False,
+        "compact": False,
+    },
+    "extension": {
+        "sendMessage": True,
+        "followUp": True,
+        "interrupt": True,
+        "shutdown": True,
+        "setModel": False,
+        "setThinking": False,
+        "answerUiRequest": False,
+        "cancelUiRequest": False,
+        "subagents": True,
+        "todos": True,
+        "attachments": False,
+        "branch": False,
+        "switch": False,
+        "resume": False,
+        "compact": False,
+    },
 }
 
 MAX_MESSAGES = 500
@@ -29,7 +69,7 @@ MAX_COLLECTION_ITEMS = 500
 
 
 def now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def plain_json(value: Any) -> Any:
@@ -46,10 +86,10 @@ def strict_clone(value: Any) -> Any:
 
 def _timestamp(value: object) -> str:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return datetime.fromtimestamp(value / 1000, timezone.utc).isoformat()
+        return datetime.fromtimestamp(value / 1000, UTC).isoformat()
     if isinstance(value, str) and value:
         return value
-    return datetime.fromtimestamp(0, timezone.utc).isoformat()
+    return datetime.fromtimestamp(0, UTC).isoformat()
 
 
 def _model_identity(state: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -92,11 +132,17 @@ def normalize_messages(values: Sequence[Mapping[str, Any]], session_id: str) -> 
     for index, raw in enumerate(values[start:], start=start):
         canonical = json.dumps(raw, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
         raw_id = raw.get("id")
-        message_id = raw_id if isinstance(raw_id, str) and raw_id else hashlib.sha256(
-            f"{session_id}\0{index}\0{canonical}".encode("utf-8")
-        ).hexdigest()
-        message = {"id": message_id, "role": str(raw.get("role", "unknown")),
-                   "content": _message_content(raw), "createdAt": _timestamp(raw.get("timestamp"))}
+        message_id = (
+            raw_id
+            if isinstance(raw_id, str) and raw_id
+            else hashlib.sha256(f"{session_id}\0{index}\0{canonical}".encode()).hexdigest()
+        )
+        message = {
+            "id": message_id,
+            "role": str(raw.get("role", "unknown")),
+            "content": _message_content(raw),
+            "createdAt": _timestamp(raw.get("timestamp")),
+        }
         encoded_size = len(json.dumps(message, ensure_ascii=False, allow_nan=False).encode("utf-8"))
         normalized.append(message)
         retained_bytes += encoded_size
@@ -178,39 +224,83 @@ def _collab_pending(request: Mapping[str, Any] | None) -> dict[str, Any] | None:
         if isinstance(option, str):
             options.append({"label": option, "description": None})
         elif isinstance(option, Mapping):
-            options.append({"label": str(option.get("label", "")),
-                            "description": option.get("description") if isinstance(option.get("description"), str) else None})
+            options.append(
+                {
+                    "label": str(option.get("label", "")),
+                    "description": option.get("description") if isinstance(option.get("description"), str) else None,
+                }
+            )
     toggle_selection = request.get("selectionMarker") == "checkbox"
     initial = request.get("initialIndex")
-    question = {"id": f"{request_id}:0", "prompt": request.get("title") or kind, "options": options,
-                "multi": toggle_selection, "toggleSelection": toggle_selection,
-                "recommended": initial if isinstance(initial, int) and not isinstance(initial, bool) else None,
-                "checkedIndices": list(request.get("checkedIndices", [])) if toggle_selection else [],
-                "allowCustom": kind == "editor", "customPlaceholder": None,
-                "prefill": request.get("prefill") if isinstance(request.get("prefill"), str) else None}
-    return {"id": str(request_id), "kind": kind, "title": request.get("title"),
-            "message": request.get("helpText"), "questions": [question], "questionIndex": 0,
-            "allowCancel": True, "expiresAt": None, "status": "pending"}
+    question = {
+        "id": f"{request_id}:0",
+        "prompt": request.get("title") or kind,
+        "options": options,
+        "multi": toggle_selection,
+        "toggleSelection": toggle_selection,
+        "recommended": initial if isinstance(initial, int) and not isinstance(initial, bool) else None,
+        "checkedIndices": list(request.get("checkedIndices", [])) if toggle_selection else [],
+        "allowCustom": kind == "editor",
+        "customPlaceholder": None,
+        "prefill": request.get("prefill") if isinstance(request.get("prefill"), str) else None,
+    }
+    return {
+        "id": str(request_id),
+        "kind": kind,
+        "title": request.get("title"),
+        "message": request.get("helpText"),
+        "questions": [question],
+        "questionIndex": 0,
+        "allowCancel": True,
+        "expiresAt": None,
+        "status": "pending",
+    }
 
 
-def rpc_projection(session: Mapping[str, Any], snapshot: AdapterSnapshot, session_id: str,
-                   instance_id: str, generation: int) -> dict[str, Any]:
+def rpc_projection(
+    session: Mapping[str, Any], snapshot: AdapterSnapshot, session_id: str, instance_id: str, generation: int
+) -> dict[str, Any]:
     pending = pending_ui_projection(snapshot.pending_ui_request)
     state = snapshot.state
-    public_state = "disconnected" if snapshot.transport_status != "connected" else (
-        "needs_input" if pending is not None else "working" if state.get("is_streaming") or state.get("is_compacting") else "idle")
-    return {"ompSessionId": state.get("session_id") or session.get("ompSessionId"), "state": public_state,
-            "transport": {"kind": "rpc", "status": snapshot.transport_status, "label": "Managed RPC",
-                          "instanceId": instance_id, "reason": snapshot.reason},
-            "messages": normalize_messages(snapshot.messages, session_id), "todos": bounded_collection(snapshot.todos),
-            "subagents": bounded_collection(snapshot.subagents), "pendingUiRequest": pending, "updatedAt": now(),
-            "workingOn": None if not state.get("is_streaming") else session.get("workingOn"),
-            "model": _model_identity(state), "thinking": state.get("thinking_level"), "_generation": generation,
-            "_adapterSequence": snapshot.sequence, "_resyncRequired": False, "_resyncWatermark": 0}
+    public_state = (
+        "disconnected"
+        if snapshot.transport_status != "connected"
+        else (
+            "needs_input"
+            if pending is not None
+            else "working"
+            if state.get("is_streaming") or state.get("is_compacting")
+            else "idle"
+        )
+    )
+    return {
+        "ompSessionId": state.get("session_id") or session.get("ompSessionId"),
+        "state": public_state,
+        "transport": {
+            "kind": "rpc",
+            "status": snapshot.transport_status,
+            "label": "Managed RPC",
+            "instanceId": instance_id,
+            "reason": snapshot.reason,
+        },
+        "messages": normalize_messages(snapshot.messages, session_id),
+        "todos": bounded_collection(snapshot.todos),
+        "subagents": bounded_collection(snapshot.subagents),
+        "pendingUiRequest": pending,
+        "updatedAt": now(),
+        "workingOn": None if not state.get("is_streaming") else session.get("workingOn"),
+        "model": _model_identity(state),
+        "thinking": state.get("thinking_level"),
+        "_generation": generation,
+        "_adapterSequence": snapshot.sequence,
+        "_resyncRequired": False,
+        "_resyncWatermark": 0,
+    }
 
 
-def collab_projection(session: Mapping[str, Any], snapshot: Any, session_id: str,
-                      instance_id: str, generation: int) -> dict[str, Any]:
+def collab_projection(
+    session: Mapping[str, Any], snapshot: Any, session_id: str, instance_id: str, generation: int
+) -> dict[str, Any]:
     pending = _collab_pending(snapshot.pending_ui_requests[-1] if snapshot.pending_ui_requests else None)
     state = snapshot.state
     capabilities = dict(CAPABILITIES["collab"])
@@ -233,20 +323,39 @@ def collab_projection(session: Mapping[str, Any], snapshot: Any, session_id: str
         message["id"] = entry.get("id")
         message["timestamp"] = entry.get("timestamp")
         entries.append(message)
-    public_state = "disconnected" if snapshot.transport_status != "connected" else (
-        "needs_input" if pending is not None else "working" if state.get("isStreaming") else "idle")
-    return {"ompSessionId": snapshot.header.get("id") or session.get("ompSessionId"), "state": public_state,
-            "transport": {"kind": "collab", "status": snapshot.transport_status,
-                          "label": "Terminal session via Collab", "instanceId": instance_id, "reason": snapshot.reason},
-            "capabilities": capabilities, "messages": normalize_messages(entries, session_id),
-            "subagents": bounded_collection(snapshot.agents), "pendingUiRequest": pending, "updatedAt": now(),
-            "workingOn": session.get("workingOn") if state.get("isStreaming") else None,
-            "model": _model_identity(state), "thinking": state.get("thinkingLevel"), "_generation": generation,
-            "_adapterSequence": snapshot.sequence, "_resyncRequired": False, "_resyncWatermark": 0}
+    public_state = (
+        "disconnected"
+        if snapshot.transport_status != "connected"
+        else ("needs_input" if pending is not None else "working" if state.get("isStreaming") else "idle")
+    )
+    return {
+        "ompSessionId": snapshot.header.get("id") or session.get("ompSessionId"),
+        "state": public_state,
+        "transport": {
+            "kind": "collab",
+            "status": snapshot.transport_status,
+            "label": "Terminal session via Collab",
+            "instanceId": instance_id,
+            "reason": snapshot.reason,
+        },
+        "capabilities": capabilities,
+        "messages": normalize_messages(entries, session_id),
+        "subagents": bounded_collection(snapshot.agents),
+        "pendingUiRequest": pending,
+        "updatedAt": now(),
+        "workingOn": session.get("workingOn") if state.get("isStreaming") else None,
+        "model": _model_identity(state),
+        "thinking": state.get("thinkingLevel"),
+        "_generation": generation,
+        "_adapterSequence": snapshot.sequence,
+        "_resyncRequired": False,
+        "_resyncWatermark": 0,
+    }
 
 
-def extension_projection(session: Mapping[str, Any], registration: Any, snapshot: Any,
-                         instance_id: str, generation: int) -> dict[str, Any]:
+def extension_projection(
+    session: Mapping[str, Any], registration: Any, snapshot: Any, instance_id: str, generation: int
+) -> dict[str, Any]:
     capabilities = dict(CAPABILITIES["extension"])
     for capability in capabilities:
         if capability in registration.capabilities:
@@ -257,11 +366,27 @@ def extension_projection(session: Mapping[str, Any], registration: Any, snapshot
     if not isinstance(async_jobs, Sequence) or isinstance(async_jobs, (str, bytes)):
         async_jobs = []
     subagents = [item for item in async_jobs if isinstance(item, Mapping)]
-    public_state = "disconnected" if snapshot.transport_status != "connected" else "idle" if snapshot.idle else "working"
-    return {"ompSessionId": registration.session_id, "title": registration.title or session["title"],
-            "project": {"name": session["project"]["name"], "path": registration.project}, "state": public_state,
-            "transport": {"kind": "extension", "status": snapshot.transport_status,
-                          "label": "Terminal session via extension", "instanceId": instance_id, "reason": snapshot.reason},
-            "capabilities": capabilities, "subagents": bounded_collection(subagents), "updatedAt": now(),
-            "model": _model_identity({"model": snapshot.model}), "_generation": generation,
-            "_adapterSequence": snapshot.sequence, "_resyncRequired": False, "_resyncWatermark": 0}
+    public_state = (
+        "disconnected" if snapshot.transport_status != "connected" else "idle" if snapshot.idle else "working"
+    )
+    return {
+        "ompSessionId": registration.session_id,
+        "title": registration.title or session["title"],
+        "project": {"name": session["project"]["name"], "path": registration.project},
+        "state": public_state,
+        "transport": {
+            "kind": "extension",
+            "status": snapshot.transport_status,
+            "label": "Terminal session via extension",
+            "instanceId": instance_id,
+            "reason": snapshot.reason,
+        },
+        "capabilities": capabilities,
+        "subagents": bounded_collection(subagents),
+        "updatedAt": now(),
+        "model": _model_identity({"model": snapshot.model}),
+        "_generation": generation,
+        "_adapterSequence": snapshot.sequence,
+        "_resyncRequired": False,
+        "_resyncWatermark": 0,
+    }

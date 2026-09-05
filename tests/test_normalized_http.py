@@ -11,9 +11,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from omp_deck import server
+from omp_deck._terminal_commands import TerminalCommandConflict
 from omp_deck.fleet_model import FleetModel
 from omp_deck.rpc_sessions import SessionCommandConflictError
-from omp_deck._terminal_commands import TerminalCommandConflict
 
 
 class _Manager:
@@ -141,34 +141,27 @@ class NormalizedHttpTests(unittest.TestCase):
         }
 
     def post(self, path, body, headers=None):
-        return self.request(
-            "POST", path, body, self.authenticated_headers() if headers is None else headers
-        )
+        return self.request("POST", path, body, self.authenticated_headers() if headers is None else headers)
 
     def enable(self, session_id, capability):
         with self.model._lock:
             self.model._sessions[session_id]["capabilities"][capability] = True
 
     def test_get_sessions_merges_normalized_transports_and_project_root_is_only_a_label(self):
-        status, _, payload = self.request(
-            "GET", "/api/sessions", headers={"Cookie": self.cookie}
-        )
+        status, _, payload = self.request("GET", "/api/sessions", headers={"Cookie": self.cookie})
         self.assertEqual(status, 200)
         sessions = {item["id"]: item for item in payload["sessions"]}
         self.assertEqual(set(sessions), {"rpc-1", "terminal-1"})
         self.assertEqual(sessions["rpc-1"]["transport"]["kind"], "rpc")
         self.assertEqual(sessions["terminal-1"]["transport"]["kind"], "collab")
-        self.assertEqual(sessions["rpc-1"]["project"], {
-            "name": "rpc-1", "path": "/secret/work/rpc"
-        })
+        self.assertEqual(sessions["rpc-1"]["project"], {"name": "rpc-1", "path": "/secret/work/rpc"})
         self.assertIn("capabilities", sessions["terminal-1"])
 
-        status, _, projects = self.request(
-            "GET", "/api/projects", headers={"Cookie": self.cookie}
-        )
+        status, _, projects = self.request("GET", "/api/projects", headers={"Cookie": self.cookie})
         self.assertEqual(status, 200)
         self.assertEqual(projects["rootLabel"], "projects-private-root/")
         self.assertNotIn(str(self.project_root), json.dumps(projects))
+
     def test_listed_nested_project_can_be_launched_through_encoded_route(self):
         nested = self.project_root / "team/service"
         nested.mkdir(parents=True)
@@ -186,9 +179,7 @@ class NormalizedHttpTests(unittest.TestCase):
             )
 
         self.assertEqual((status, payload), (201, accepted))
-        launch.assert_called_once_with(
-            "team/service", "nested-launch", False, None
-        )
+        launch.assert_called_once_with("team/service", "nested-launch", False, None)
 
     def test_collab_import_failure_never_returns_or_logs_the_import_link(self):
         link = "omp://collab/import?secret=never-expose-this"
@@ -209,21 +200,22 @@ class NormalizedHttpTests(unittest.TestCase):
         self.assertNotIn(link, output.getvalue())
 
     def test_commands_dispatch_to_rpc_or_terminal_manager(self):
-        status, _, _ = self.post(
-            "/api/sessions/rpc-1/messages", {"requestId": "rpc-msg", "message": " hello "}
-        )
+        status, _, _ = self.post("/api/sessions/rpc-1/messages", {"requestId": "rpc-msg", "message": " hello "})
         self.assertEqual(status, 202)
-        status, _, _ = self.post(
-            "/api/sessions/terminal-1/interrupt", {"requestId": "terminal-stop"}
-        )
+        status, _, _ = self.post("/api/sessions/terminal-1/interrupt", {"requestId": "terminal-stop"})
         self.assertEqual(status, 202)
-        self.assertEqual(self.rpc.calls, [(
-            "rpc-1", "rpc-msg", "sendMessage",
-            {"message": "hello", "streamingBehavior": None, "images": None},
-        )])
-        self.assertEqual(self.terminal.calls, [
-            ("terminal-1", "terminal-stop", "interrupt", {})
-        ])
+        self.assertEqual(
+            self.rpc.calls,
+            [
+                (
+                    "rpc-1",
+                    "rpc-msg",
+                    "sendMessage",
+                    {"message": "hello", "streamingBehavior": None, "images": None},
+                )
+            ],
+        )
+        self.assertEqual(self.terminal.calls, [("terminal-1", "terminal-stop", "interrupt", {})])
 
     def test_capability_rejection_occurs_before_any_dispatch(self):
         status, _, payload = self.post(
@@ -231,9 +223,7 @@ class NormalizedHttpTests(unittest.TestCase):
             {"requestId": "unsupported", "message": "later"},
         )
         self.assertEqual(status, 409)
-        self.assertEqual(payload, {
-            "requestId": "unsupported", "status": "failed", "errorCode": "unsupported"
-        })
+        self.assertEqual(payload, {"requestId": "unsupported", "status": "failed", "errorCode": "unsupported"})
         self.assertEqual(self.rpc.calls, [])
         self.assertEqual(self.terminal.calls, [])
 
@@ -255,26 +245,34 @@ class NormalizedHttpTests(unittest.TestCase):
             "type": "image/png",
             "data": f"data:image/png;base64,{encoded}",
         }
-        status, _, _ = self.post("/api/sessions/rpc-1/messages", {
-            "requestId": "image-message",
-            "message": " inspect ",
-            "streamingBehavior": "steer",
-            "attachments": [attachment],
-        })
+        status, _, _ = self.post(
+            "/api/sessions/rpc-1/messages",
+            {
+                "requestId": "image-message",
+                "message": " inspect ",
+                "streamingBehavior": "steer",
+                "attachments": [attachment],
+            },
+        )
         self.assertEqual(status, 202)
-        status, _, _ = self.post("/api/sessions/rpc-1/follow-ups", {
-            "requestId": "image-follow-up", "message": "next", "attachments": [attachment]
-        })
+        status, _, _ = self.post(
+            "/api/sessions/rpc-1/follow-ups",
+            {"requestId": "image-follow-up", "message": "next", "attachments": [attachment]},
+        )
         self.assertEqual(status, 202)
         image = {"type": "image", "data": encoded, "mimeType": "image/png"}
-        self.assertEqual(self.rpc.calls, [
-            ("rpc-1", "image-message", "sendMessage", {
-                "message": "inspect", "streamingBehavior": "steer", "images": [image]
-            }),
-            ("rpc-1", "image-follow-up", "followUp", {
-                "message": "next", "images": [image]
-            }),
-        ])
+        self.assertEqual(
+            self.rpc.calls,
+            [
+                (
+                    "rpc-1",
+                    "image-message",
+                    "sendMessage",
+                    {"message": "inspect", "streamingBehavior": "steer", "images": [image]},
+                ),
+                ("rpc-1", "image-follow-up", "followUp", {"message": "next", "images": [image]}),
+            ],
+        )
 
     def test_image_validation_rejects_count_type_base64_and_decoded_size(self):
         self.enable("rpc-1", "attachments")
@@ -286,25 +284,44 @@ class NormalizedHttpTests(unittest.TestCase):
         }
         cases = (
             ([valid] * 5, "invalid attachments"),
-            ([{"name": "x", "type": "text/plain", "data": "data:text/plain;base64,AA=="}],
-             "invalid image attachment"),
-            ([{"name": "x", "type": "image/png", "data": "data:image/png;base64,%%%"}],
-             "invalid image attachment"),
-            ([{"name": "fake.png", "type": "image/png", "data": "data:image/png;base64,AA=="}],
-             "invalid image attachment"),
-            ([{"name": "x.png", "type": "image/png", "data": "data:image/png;base64," +
-               base64.b64encode(b"\xff\xd8\xffjpeg").decode("ascii")}],
-             "invalid image attachment"),
-            ([{"name": "x", "type": "image/png", "data": "data:image/png;base64," +
-               base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * (700 * 1024)).decode("ascii")}],
-             "image attachments exceed 700 KiB"),
+            ([{"name": "x", "type": "text/plain", "data": "data:text/plain;base64,AA=="}], "invalid image attachment"),
+            ([{"name": "x", "type": "image/png", "data": "data:image/png;base64,%%%"}], "invalid image attachment"),
+            (
+                [{"name": "fake.png", "type": "image/png", "data": "data:image/png;base64,AA=="}],
+                "invalid image attachment",
+            ),
+            (
+                [
+                    {
+                        "name": "x.png",
+                        "type": "image/png",
+                        "data": "data:image/png;base64," + base64.b64encode(b"\xff\xd8\xffjpeg").decode("ascii"),
+                    }
+                ],
+                "invalid image attachment",
+            ),
+            (
+                [
+                    {
+                        "name": "x",
+                        "type": "image/png",
+                        "data": "data:image/png;base64,"
+                        + base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * (700 * 1024)).decode("ascii"),
+                    }
+                ],
+                "image attachments exceed 700 KiB",
+            ),
         )
         for index, (attachments, error) in enumerate(cases):
             with self.subTest(error=error):
-                status, _, payload = self.post("/api/sessions/rpc-1/messages", {
-                    "requestId": f"bad-image-{index}", "message": "x",
-                    "attachments": attachments,
-                })
+                status, _, payload = self.post(
+                    "/api/sessions/rpc-1/messages",
+                    {
+                        "requestId": f"bad-image-{index}",
+                        "message": "x",
+                        "attachments": attachments,
+                    },
+                )
                 self.assertEqual(status, 400)
                 self.assertEqual(payload, {"error": error})
         self.assertEqual(self.rpc.calls, [])
@@ -331,33 +348,27 @@ class NormalizedHttpTests(unittest.TestCase):
             {"requestId": "ui-cancel"},
         )
         self.assertEqual(status, 202)
-        self.assertEqual(self.rpc.calls, [
-            ("rpc-1", "ui-text", "respondToUi", {
-                "requestId": "prompt-1", "value": "typed value"
-            }),
-            ("rpc-1", "ui-bool", "respondToUi", {
-                "requestId": "confirm-1", "value": False
-            }),
-            ("rpc-1", "ui-cancel", "cancelUi", {"requestId": "prompt-2"}),
-        ])
-        self.assertEqual(self.terminal.calls, [
-            ("terminal-1", "ui-multi", "respondToUi", {
-                "requestId": "7", "value": ["alpha", "beta"]
-            }),
-        ])
+        self.assertEqual(
+            self.rpc.calls,
+            [
+                ("rpc-1", "ui-text", "respondToUi", {"requestId": "prompt-1", "value": "typed value"}),
+                ("rpc-1", "ui-bool", "respondToUi", {"requestId": "confirm-1", "value": False}),
+                ("rpc-1", "ui-cancel", "cancelUi", {"requestId": "prompt-2"}),
+            ],
+        )
+        self.assertEqual(
+            self.terminal.calls,
+            [
+                ("terminal-1", "ui-multi", "respondToUi", {"requestId": "7", "value": ["alpha", "beta"]}),
+            ],
+        )
 
     def test_terminal_session_removal_reports_removed_and_missing(self):
-        status, _, payload = self.post(
-            "/api/sessions/terminal-1/remove", {"requestId": "remove-1"}
-        )
+        status, _, payload = self.post("/api/sessions/terminal-1/remove", {"requestId": "remove-1"})
         self.assertEqual((status, payload), (200, {"status": "removed"}))
-        status, _, payload = self.post(
-            "/api/sessions/rpc-1/remove", {"requestId": "remove-rpc"}
-        )
+        status, _, payload = self.post("/api/sessions/rpc-1/remove", {"requestId": "remove-rpc"})
         self.assertEqual((status, payload), (409, {"error": "session is not removable"}))
-        status, _, payload = self.post(
-            "/api/sessions/missing/remove", {"requestId": "remove-2"}
-        )
+        status, _, payload = self.post("/api/sessions/missing/remove", {"requestId": "remove-2"})
         self.assertEqual((status, payload), (404, {"error": "session not found"}))
         self.assertEqual(self.terminal.removals, ["terminal-1", "missing"])
 
@@ -366,21 +377,23 @@ class NormalizedHttpTests(unittest.TestCase):
         self.assertEqual((status, payload), (401, {"error": "authentication required"}))
 
         status, _, payload = self.request(
-            "POST", "/api/sessions/rpc-1/interrupt", {"requestId": "bad-origin"},
+            "POST",
+            "/api/sessions/rpc-1/interrupt",
+            {"requestId": "bad-origin"},
             {**self.authenticated_headers(), "Origin": "https://attacker.invalid"},
         )
         self.assertEqual((status, payload), (403, {"error": "request origin is not allowed"}))
 
         headers = self.authenticated_headers()
         headers.pop("X-OMP-Deck-CSRF")
-        status, _, payload = self.request(
-            "POST", "/api/sessions/rpc-1/interrupt", {"requestId": "no-csrf"}, headers
-        )
+        status, _, payload = self.request("POST", "/api/sessions/rpc-1/interrupt", {"requestId": "no-csrf"}, headers)
         self.assertEqual(status, 403)
         self.assertEqual(payload, {"error": "authentication and CSRF token required"})
 
         status, _, payload = self.request(
-            "POST", "/api/sessions/rpc-1/interrupt", {"requestId": "no-auth"},
+            "POST",
+            "/api/sessions/rpc-1/interrupt",
+            {"requestId": "no-auth"},
             {"Origin": self.origin, "Sec-Fetch-Site": "same-origin"},
         )
         self.assertEqual(status, 403)
@@ -412,7 +425,6 @@ class NormalizedHttpTests(unittest.TestCase):
                 server.stop_runtime()
 
         self.assertEqual(calls, ["terminal", "RPC"])
-
 
 
 if __name__ == "__main__":

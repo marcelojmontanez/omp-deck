@@ -44,6 +44,7 @@ class SettingsTests(unittest.TestCase):
             config.chmod(0o600)
             with self.assertRaisesRegex(RuntimeError, "allowed_hosts"):
                 load_settings(config)
+
     def test_world_writable_configuration_is_rejected_before_values_are_used(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "config.json"
@@ -127,9 +128,7 @@ class CommandTests(unittest.TestCase):
 
     def test_setup_rolls_back_new_plugin_and_service_after_failed_health(self):
         settings = SimpleNamespace(omp_bin="omp", state_root=Path("/tmp/state"))
-        manager = SimpleNamespace(
-            begin_pairing=lambda: SimpleNamespace(token="secret", expires_at=1)
-        )
+        manager = SimpleNamespace(begin_pairing=lambda: SimpleNamespace(token="secret", expires_at=1))
         service_snapshot = object()
         with (
             patch.object(cli, "load_settings", return_value=settings),
@@ -155,9 +154,7 @@ class CommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             settings = SimpleNamespace(omp_bin="omp", state_root=root / "state")
-            manager = SimpleNamespace(
-                begin_pairing=lambda: SimpleNamespace(token="secret", expires_at=1)
-            )
+            manager = SimpleNamespace(begin_pairing=lambda: SimpleNamespace(token="secret", expires_at=1))
             service_snapshot = object()
             plugin_backup = settings.state_root / "setup-rollback/plugin"
             plugin_backup.mkdir(parents=True)
@@ -191,9 +188,7 @@ class CommandTests(unittest.TestCase):
 
     def test_setup_refuses_to_replace_unsnapshottable_existing_plugin(self):
         settings = SimpleNamespace(omp_bin="omp", state_root=Path("/tmp/state"))
-        manager = SimpleNamespace(
-            begin_pairing=lambda: SimpleNamespace(token="secret", expires_at=1)
-        )
+        manager = SimpleNamespace(begin_pairing=lambda: SimpleNamespace(token="secret", expires_at=1))
         with (
             patch.object(cli, "load_settings", return_value=settings),
             patch.object(cli, "config_path", return_value=Path("/tmp/config.json")),
@@ -254,7 +249,6 @@ class CommandTests(unittest.TestCase):
                 cli.setup(tailscale=True)
         disable.assert_called_once_with(settings)
 
-
     def test_tailscale_refuses_to_overwrite_existing_routes(self):
         existing = SimpleNamespace(returncode=0, stdout='{"Web": {"443": {}}}', stderr="")
         with (
@@ -274,13 +268,9 @@ class CommandTests(unittest.TestCase):
         empty = SimpleNamespace(returncode=0, stdout="{}", stderr="")
         configured = SimpleNamespace(
             returncode=0,
-            stdout=json.dumps({
-                "Web": {
-                    "deck.example.ts.net:443": {
-                        "Handlers": {"/": {"Proxy": "http://127.0.0.1:8787"}}
-                    }
-                }
-            }),
+            stdout=json.dumps(
+                {"Web": {"deck.example.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8787"}}}}}
+            ),
             stderr="",
         )
         command = SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -297,13 +287,9 @@ class CommandTests(unittest.TestCase):
         command = SimpleNamespace(returncode=0, stdout="", stderr="")
         mismatched = SimpleNamespace(
             returncode=0,
-            stdout=json.dumps({
-                "Web": {
-                    "deck.example.ts.net:443": {
-                        "Handlers": {"/": {"Proxy": "http://127.0.0.1:9999"}}
-                    }
-                }
-            }),
+            stdout=json.dumps(
+                {"Web": {"deck.example.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:9999"}}}}}
+            ),
             stderr="",
         )
         with (
@@ -321,16 +307,18 @@ class CommandTests(unittest.TestCase):
     def test_tailscale_cleanup_refuses_concurrent_routes(self):
         configured = SimpleNamespace(
             returncode=0,
-            stdout=json.dumps({
-                "Web": {
-                    "deck.example.ts.net:443": {
-                        "Handlers": {
-                            "/": {"Proxy": "http://127.0.0.1:8787"},
-                            "/other": {"Proxy": "http://127.0.0.1:9999"},
+            stdout=json.dumps(
+                {
+                    "Web": {
+                        "deck.example.ts.net:443": {
+                            "Handlers": {
+                                "/": {"Proxy": "http://127.0.0.1:8787"},
+                                "/other": {"Proxy": "http://127.0.0.1:9999"},
+                            }
                         }
                     }
                 }
-            }),
+            ),
             stderr="",
         )
         with patch.object(cli.subprocess, "run", return_value=configured) as run:

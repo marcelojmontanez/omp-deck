@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
-from .auth import AuthError, AuthenticationFailed
+from .auth import AuthenticationFailed, AuthError
 from .event_stream import ReplayUnavailableError
 
 

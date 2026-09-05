@@ -2,41 +2,48 @@
 import json
 import re
 import threading
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer as _ThreadingHTTPServer
+from http.server import SimpleHTTPRequestHandler
+from http.server import ThreadingHTTPServer as _ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
+
+from ._sse import send_stream
+from ._terminal_commands import TerminalCommandConflict
+from .attachments import detect_image_mime, read_blob
 from .auth import (
-    COOKIE_NAME,
+    COOKIE_NAME as COOKIE_NAME,
+)
+from .auth import (
+    AuthenticationFailed,
     AuthError,
     AuthManager,
-    AuthenticationFailed,
     PairingFailed,
     PairingRateLimited,
 )
-from .attachments import detect_image_mime, read_blob
-from ._sse import send_stream
-from ._terminal_commands import TerminalCommandConflict
-from .projects import list_launchable_projects, resolve_project_path
 from .fleet_model import FleetModel
+from .normalized_actions import NormalizedActionDispatcher
+from .projects import list_launchable_projects, resolve_project_path
+from .read_cursors import CursorStore
+from .request_parsing import (
+    cookie_credential,
+    read_json_request,
+)
+from .request_parsing import (
+    request_host as parse_request_host,
+)
+from .request_parsing import (
+    trusted_browser_request as parse_trusted_browser_request,
+)
 from .rpc_sessions import (
     RpcSessionManager,
     SessionCommandConflictError,
     SessionNotConnectedError,
 )
+from .settings import load_settings
 from .terminal_sessions import (
     TerminalSessionManager,
     TerminalSessionNotConnected,
 )
-from .event_stream import ReplayUnavailableError
-from .normalized_actions import NormalizedActionDispatcher
-from .request_parsing import (
-    cookie_credential,
-    read_json_request,
-    request_host as parse_request_host,
-    trusted_browser_request as parse_trusted_browser_request,
-)
-from .read_cursors import CursorStore
-from .settings import load_settings
 from .usage import UsageService
 
 ROOT = Path(__file__).parent
@@ -59,7 +66,11 @@ _terminal_manager = None
 class ThreadingHTTPServer(_ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
+
+
 _terminal_manager_lock = threading.Lock()
+
+
 def cursor_store():
     global _cursor_store
     auth_manager()
@@ -68,8 +79,6 @@ def cursor_store():
             _cursor_store = CursorStore(SETTINGS.cursor_path)
             _fleet_model.cursor_store = _cursor_store
         return _cursor_store
-
-
 
 
 def rpc_manager():
@@ -145,7 +154,6 @@ def launchable_projects():
     return list_launchable_projects(DEV_ROOT)
 
 
-
 def auth_manager():
     global _auth_manager
     if _auth_manager is None:
@@ -153,6 +161,8 @@ def auth_manager():
             if _auth_manager is None:
                 _auth_manager = AuthManager(SETTINGS.state_root)
     return _auth_manager
+
+
 def request_host(headers):
     return parse_request_host(headers, SETTINGS.allowed_hosts)
 
@@ -171,17 +181,12 @@ def action_dispatcher():
     )
 
 
-
-
-
-
-
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT / "static"), **kwargs)
+
     def read_json(self, max_bytes=64 * 1024):
         return read_json_request(self, max_bytes)
-
 
     def log_message(self, format, *args):
         print(f"{self.client_address[0]} {format % args}")
@@ -219,7 +224,6 @@ class Handler(SimpleHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
-
     def reply_blob(self, digest):
         blob = read_blob(digest)
         if blob is None:
@@ -235,9 +239,7 @@ class Handler(SimpleHTTPRequestHandler):
     def authenticate_request(self, *, csrf=False):
         credential = cookie_credential(self.headers)
         if csrf:
-            return auth_manager().validate_csrf(
-                credential, self.headers.get("X-OMP-Deck-CSRF")
-            )
+            return auth_manager().validate_csrf(credential, self.headers.get("X-OMP-Deck-CSRF"))
         return auth_manager().authenticate(credential)
 
     def do_GET(self):
@@ -313,6 +315,7 @@ class Handler(SimpleHTTPRequestHandler):
             self.reply(200, {"projects": launchable_projects(), "rootLabel": f"{DEV_ROOT.name}/"})
             return
         super().do_GET()
+
     def do_POST(self):
         request_path = urlparse(self.path).path
         if not trusted_browser_request(self.headers):
@@ -350,11 +353,15 @@ class Handler(SimpleHTTPRequestHandler):
         except AuthError:
             self.reply(503, {"error": "authentication state unavailable"})
             return
-        self.reply(200, {
-            "authenticated": True,
-            "deviceId": paired.device.device_id,
-            "csrfToken": paired.device.csrf_token,
-        }, headers=(("Set-Cookie", paired.set_cookie),))
+        self.reply(
+            200,
+            {
+                "authenticated": True,
+                "deviceId": paired.device.device_id,
+                "csrfToken": paired.device.csrf_token,
+            },
+            headers=(("Set-Cookie", paired.set_cookie),),
+        )
 
     def _authorize_mutation(self):
         try:
@@ -368,9 +375,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _read_post_body(self, request_path):
         limit = (
-            2 * 1024 * 1024
-            if re.fullmatch(r"/api/sessions/[^/]+/(messages|follow-ups)", request_path)
-            else 64 * 1024
+            2 * 1024 * 1024 if re.fullmatch(r"/api/sessions/[^/]+/(messages|follow-ups)", request_path) else 64 * 1024
         )
         try:
             return self.read_json(limit)
@@ -384,9 +389,7 @@ class Handler(SimpleHTTPRequestHandler):
         if request_path == "/api/auth/logout":
             cookie = auth_manager().logout(credential)
         elif request_path == "/api/auth/revoke-all":
-            cookie = auth_manager().revoke_all(
-                credential, self.headers.get("X-OMP-Deck-CSRF")
-            )
+            cookie = auth_manager().revoke_all(credential, self.headers.get("X-OMP-Deck-CSRF"))
         else:
             return False
         self.reply(200, {"ok": True}, headers=(("Set-Cookie", cookie),))
@@ -420,6 +423,7 @@ class Handler(SimpleHTTPRequestHandler):
                 self.reply(502, {"error": "Collaboration connection unavailable"})
                 return
             raise
+
 
 if __name__ == "__main__":
     from .cli import serve

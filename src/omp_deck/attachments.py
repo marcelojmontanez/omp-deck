@@ -1,9 +1,8 @@
-import os
 import hashlib
+import os
 import re
 import stat
 from pathlib import Path
-
 
 BLOB_ROOT = None
 _DIGEST = re.compile(r"[a-f0-9]{64}")
@@ -25,11 +24,7 @@ def read_blob(digest):
         return None
     try:
         root_info = os.fstat(directory_fd)
-        if (
-            not stat.S_ISDIR(root_info.st_mode)
-            or root_info.st_uid != os.geteuid()
-            or root_info.st_mode & 0o022
-        ):
+        if not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid != os.geteuid() or root_info.st_mode & 0o022:
             return None
         for suffix in _CANDIDATE_SUFFIXES:
             name = f"{digest}{suffix}"

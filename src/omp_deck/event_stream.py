@@ -5,9 +5,10 @@ import re
 import secrets
 import threading
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Mapping
+from datetime import UTC, datetime
+from typing import Any
 
 _STREAM_CURSOR = re.compile(r"([a-f0-9]{32}):([0-9]{1,20})")
 
@@ -83,9 +84,7 @@ class EventJournal:
                 self._validate_cursor_locked(event_id)
             except ReplayUnavailableError:
                 return latest, None
-            return event_id, tuple(
-                event for event, _ in self._events if event.id > event_id
-            )
+            return event_id, tuple(event for event, _ in self._events if event.id > event_id)
 
     def publish(
         self,
@@ -102,15 +101,11 @@ class EventJournal:
             raise ValueError("event_type is required")
         if not isinstance(payload, Mapping):
             raise TypeError("event payload must be an object")
-        payload_json = json.dumps(
-            dict(payload), separators=(",", ":"), ensure_ascii=False, allow_nan=False
-        )
+        payload_json = json.dumps(dict(payload), separators=(",", ":"), ensure_ascii=False, allow_nan=False)
         parsed_payload = json.loads(payload_json)
         if not isinstance(parsed_payload, dict):
             raise TypeError("event payload must be an object")
-        payload_json = json.dumps(
-            parsed_payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False
-        )
+        payload_json = json.dumps(parsed_payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
         with self._condition:
             event = FleetEvent(
                 id=self._next_id,
@@ -121,12 +116,10 @@ class EventJournal:
                 sequence=sequence,
                 type=event_type,
                 _payload_json=payload_json,
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
             )
             encoded_size = len(
-                json.dumps(
-                    event.public(), separators=(",", ":"), ensure_ascii=False, allow_nan=False
-                ).encode("utf-8")
+                json.dumps(event.public(), separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
             )
             self._next_id += 1
             self._events.append((event, encoded_size))

@@ -1,4 +1,5 @@
 """Private validation and discovery for terminal-owned extension sockets."""
+
 from __future__ import annotations
 
 import hashlib
@@ -16,6 +17,7 @@ _OpenFile = Callable[[Path, int], int]
 def terminal_id(omp_session_id: str) -> str:
     digest = hashlib.sha256(omp_session_id.encode("utf-8")).hexdigest()[:24]
     return f"terminal:{digest}"
+
 
 def removed_extension_connection(record: dict[str, Any]) -> str | None:
     if record.get("adapterKind") != "extension":
@@ -46,10 +48,7 @@ def discover_extension_candidates(
         prior = candidates.get(session_id)
         if prior is None or modified_ns > prior[2]:
             candidates[session_id] = (socket_path, metadata, modified_ns)
-    return {
-        session_id: (socket_path, metadata)
-        for session_id, (socket_path, metadata, _) in candidates.items()
-    }
+    return {session_id: (socket_path, metadata) for session_id, (socket_path, metadata, _) in candidates.items()}
 
 
 def _safe_discovery_root(root: Path, uid: int) -> bool:

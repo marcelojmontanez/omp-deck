@@ -2,99 +2,38 @@
 
 from __future__ import annotations
 
-from collections import deque
-from dataclasses import dataclass
 import hashlib
 import json
 import os
 import socket
 import threading
 import time
+from collections import deque
+from collections.abc import Callable, Mapping
 from types import MappingProxyType
-from typing import Any, Callable, Mapping
+from typing import Any
+
+from ._extension_protocol import (
+    ExtensionAdapterError,
+    ExtensionDisconnected,
+    ExtensionProtocolError,
+    ExtensionRegistration,
+    ExtensionRequestTimeout,
+    ExtensionSnapshot,
+    _exact_keys,
+    _immutable,
+    _object,
+    _Pending,
+)
 
 PROTOCOL = "omp-deck-fallback-v1"
 _MISSING = object()
-
-
-class ExtensionAdapterError(RuntimeError):
-    """Base adapter error."""
-
-
-class ExtensionProtocolError(ExtensionAdapterError):
-    """The extension sent an invalid protocol frame."""
-
-
-class ExtensionDisconnected(ExtensionAdapterError):
-    """The extension connection closed before an operation completed."""
-
-
-class ExtensionRequestTimeout(ExtensionAdapterError):
-    """A request received no response before its deadline."""
-
-
-@dataclass(frozen=True)
-class ExtensionRegistration:
-    protocol_version: int
-    omp_version: str
-    session_id: str
-    project: str
-    title: str | None
-    connection_id: str
-    capabilities: Mapping[str, bool]
-
-
-@dataclass(frozen=True)
-class ExtensionSnapshot:
-    idle: bool
-    pending_messages: bool
-    model: Mapping[str, str] | None
-    async_jobs: Any
-    sequence: int
-    transport_status: str
-    reason: str | None
-
-
-@dataclass
-class _Pending:
-    ready: threading.Event
-    response: Mapping[str, Any] | None = None
-    disconnected: bool = False
 
 
 def _default_connector(path: str) -> socket.socket:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.connect(path)
     return sock
-
-
-def _immutable(value: Any, *, depth: int = 0, nodes: list[int] | None = None) -> Any:
-    if nodes is None:
-        nodes = [0]
-    nodes[0] += 1
-    if depth > 24 or nodes[0] > 20_000:
-        raise ExtensionProtocolError("payload bounds exceeded")
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return value
-    if isinstance(value, (list, tuple)):
-        return tuple(_immutable(item, depth=depth + 1, nodes=nodes) for item in value)
-    if isinstance(value, Mapping):
-        if not all(isinstance(key, str) for key in value):
-            raise ExtensionProtocolError("invalid payload")
-        return MappingProxyType({key: _immutable(item, depth=depth + 1, nodes=nodes) for key, item in value.items()})
-    raise ExtensionProtocolError("invalid payload")
-
-
-def _object(frame: Any, label: str) -> dict[str, Any]:
-    if not isinstance(frame, Mapping):
-        raise ExtensionProtocolError(f"invalid {label}")
-    return dict(frame)
-
-
-def _exact_keys(value: Mapping[str, Any], required: set[str], optional: set[str], label: str) -> None:
-    keys = set(value)
-    if not required <= keys or keys - required - optional:
-        raise ExtensionProtocolError(f"invalid {label}")
 
 
 class ExtensionAdapter:
@@ -117,7 +56,11 @@ class ExtensionAdapter:
             raise TypeError("on_event must be callable")
         if not callable(connector) or not callable(clock):
             raise TypeError("connector and clock must be callable")
-        for name, value in (("frame_limit", frame_limit), ("event_limit", event_limit), ("response_limit", response_limit)):
+        for name, value in (
+            ("frame_limit", frame_limit),
+            ("event_limit", event_limit),
+            ("response_limit", response_limit),
+        ):
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
         for name, value in (("registration_timeout", registration_timeout), ("heartbeat_timeout", heartbeat_timeout)):
@@ -304,9 +247,26 @@ class ExtensionAdapter:
             self._buffer.extend(chunk)
 
     def _parse_registration(self, frame: dict[str, Any]) -> ExtensionRegistration:
-        required = {"protocol", "version", "type", "ompVersion", "compatible", "connectionId", "session", "sessionId", "title", "project", "capabilities"}
+        required = {
+            "protocol",
+            "version",
+            "type",
+            "ompVersion",
+            "compatible",
+            "connectionId",
+            "session",
+            "sessionId",
+            "title",
+            "project",
+            "capabilities",
+        }
         _exact_keys(frame, required, set(), "registration")
-        if frame["protocol"] != PROTOCOL or frame["version"] != 1 or frame["type"] != "registration" or frame["compatible"] is not True:
+        if (
+            frame["protocol"] != PROTOCOL
+            or frame["version"] != 1
+            or frame["type"] != "registration"
+            or frame["compatible"] is not True
+        ):
             raise ExtensionProtocolError("incompatible registration")
         strings = (frame["ompVersion"], frame["connectionId"], frame["sessionId"], frame["project"])
         if any(not isinstance(value, str) or not value or len(value) > 4096 for value in strings):
@@ -315,10 +275,23 @@ class ExtensionAdapter:
             raise ExtensionProtocolError("invalid registration")
         session = _object(frame["session"], "session")
         _exact_keys(session, {"id", "file", "title"}, set(), "session")
-        if session["id"] != frame["sessionId"] or session["title"] != frame["title"] or (session["file"] is not None and not isinstance(session["file"], str)):
+        if (
+            session["id"] != frame["sessionId"]
+            or session["title"] != frame["title"]
+            or (session["file"] is not None and not isinstance(session["file"], str))
+        ):
             raise ExtensionProtocolError("invalid session identity")
         caps = _object(frame["capabilities"], "capabilities")
-        expected_caps = {"sendMessage", "followUp", "interrupt", "shutdown", "todos", "subagents", "answerUiRequest", "answer_ui_request"}
+        expected_caps = {
+            "sendMessage",
+            "followUp",
+            "interrupt",
+            "shutdown",
+            "todos",
+            "subagents",
+            "answerUiRequest",
+            "answer_ui_request",
+        }
         _exact_keys(caps, expected_caps, set(), "capabilities")
         if any(type(value) is not bool for value in caps.values()):
             raise ExtensionProtocolError("invalid capabilities")
@@ -326,17 +299,32 @@ class ExtensionAdapter:
         socket_id = hashlib.sha256(frame["sessionId"].encode("utf-8")).hexdigest()[:24]
         if not basename.startswith(socket_id + ".") or not basename.endswith("." + frame["connectionId"] + ".sock"):
             raise ExtensionProtocolError("registration socket identity mismatch")
-        return ExtensionRegistration(1, frame["ompVersion"], frame["sessionId"], frame["project"], frame["title"], frame["connectionId"], MappingProxyType(dict(caps)))
+        return ExtensionRegistration(
+            1,
+            frame["ompVersion"],
+            frame["sessionId"],
+            frame["project"],
+            frame["title"],
+            frame["connectionId"],
+            MappingProxyType(dict(caps)),
+        )
 
     def _parse_event(self, frame: dict[str, Any], *, require_snapshot: bool = False) -> Mapping[str, Any]:
         _exact_keys(frame, {"protocol", "type", "sequence", "kind", "data"}, set(), "event")
-        if frame["protocol"] != PROTOCOL or frame["type"] != "event" or type(frame["sequence"]) is not int or frame["sequence"] <= 0:
+        if (
+            frame["protocol"] != PROTOCOL
+            or frame["type"] != "event"
+            or type(frame["sequence"]) is not int
+            or frame["sequence"] <= 0
+        ):
             raise ExtensionProtocolError("invalid event envelope")
         if not isinstance(frame["kind"], str) or not frame["kind"] or len(frame["kind"]) > 128:
             raise ExtensionProtocolError("invalid event kind")
         if require_snapshot and frame["kind"] != "snapshot":
             raise ExtensionProtocolError("authoritative snapshot required")
-        return MappingProxyType({"sequence": frame["sequence"], "kind": frame["kind"], "data": _immutable(frame["data"])})
+        return MappingProxyType(
+            {"sequence": frame["sequence"], "kind": frame["kind"], "data": _immutable(frame["data"])}
+        )
 
     def _snapshot_from_data(self, data: Any, sequence: int) -> ExtensionSnapshot:
         data = _object(data, "snapshot")
@@ -351,7 +339,9 @@ class ExtensionAdapter:
             if any(not isinstance(value, str) or not value or len(value) > 1024 for value in model.values()):
                 raise ExtensionProtocolError("invalid model")
             frozen_model = MappingProxyType(dict(model))
-        return ExtensionSnapshot(data["idle"], data["pendingMessages"], frozen_model, _immutable(data["async"]), sequence, "connected", None)
+        return ExtensionSnapshot(
+            data["idle"], data["pendingMessages"], frozen_model, _immutable(data["async"]), sequence, "connected", None
+        )
 
     def _apply_event(self, event: Mapping[str, Any]) -> None:
         sequence = event["sequence"]
@@ -380,7 +370,7 @@ class ExtensionAdapter:
                     break
                 try:
                     frame = self._read_frame()
-                except (socket.timeout, TimeoutError):
+                except TimeoutError:
                     continue
                 if frame.get("type") == "response":
                     self._handle_response(frame)
@@ -400,9 +390,20 @@ class ExtensionAdapter:
     def _handle_response(self, frame: dict[str, Any]) -> None:
         _exact_keys(frame, {"protocol", "type", "id", "ok"}, {"result", "error"}, "response")
         request_id = frame["id"]
-        if frame["protocol"] != PROTOCOL or frame["type"] != "response" or not isinstance(request_id, str) or not request_id or type(frame["ok"]) is not bool:
+        if (
+            frame["protocol"] != PROTOCOL
+            or frame["type"] != "response"
+            or not isinstance(request_id, str)
+            or not request_id
+            or type(frame["ok"]) is not bool
+        ):
             raise ExtensionProtocolError("invalid response envelope")
-        if frame["ok"] and "error" in frame or not frame["ok"] and ("result" in frame or not isinstance(frame.get("error"), str)):
+        if (
+            frame["ok"]
+            and "error" in frame
+            or not frame["ok"]
+            and ("result" in frame or not isinstance(frame.get("error"), str))
+        ):
             raise ExtensionProtocolError("invalid response")
         response = MappingProxyType({key: _immutable(value) for key, value in frame.items()})
         with self._state_lock:
@@ -432,7 +433,9 @@ class ExtensionAdapter:
             self._pending.clear()
             if self._snapshot is not None:
                 old = self._snapshot
-                self._snapshot = ExtensionSnapshot(old.idle, old.pending_messages, old.model, old.async_jobs, old.sequence, "degraded", reason)
+                self._snapshot = ExtensionSnapshot(
+                    old.idle, old.pending_messages, old.model, old.async_jobs, old.sequence, "degraded", reason
+                )
         for item in pending:
             item.disconnected = True
             item.ready.set()

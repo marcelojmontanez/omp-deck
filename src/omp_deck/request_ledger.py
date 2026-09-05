@@ -7,9 +7,11 @@ import os
 import re
 import stat
 import threading
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any
+
 from ._atomic_file import replace_bytes
 
 _SCHEMA_VERSION = 1
@@ -36,9 +38,7 @@ class RequestLedger:
         self.max_records = max_records
         self._thread_lock = threading.RLock()
 
-    def lookup(
-        self, scope: str, request_id: str, fingerprint: str
-    ) -> dict[str, Any] | None:
+    def lookup(self, scope: str, request_id: str, fingerprint: str) -> dict[str, Any] | None:
         self._validate_identity(scope, request_id, fingerprint)
         with self._locked():
             data = self._read()
@@ -46,9 +46,7 @@ class RequestLedger:
             if record is None:
                 return None
             if record["fingerprint"] != fingerprint:
-                raise RequestConflictError(
-                    "requestId was already used for another operation"
-                )
+                raise RequestConflictError("requestId was already used for another operation")
             if record["state"] == "pending":
                 return {
                     "requestId": request_id,
@@ -121,11 +119,7 @@ class RequestLedger:
     @staticmethod
     def _find(data: Mapping[str, Any], scope: str, request_id: str) -> dict[str, Any] | None:
         return next(
-            (
-                record
-                for record in data["records"]
-                if record["scope"] == scope and record["requestId"] == request_id
-            ),
+            (record for record in data["records"] if record["scope"] == scope and record["requestId"] == request_id),
             None,
         )
 
@@ -159,17 +153,11 @@ class RequestLedger:
             or _TOKEN.fullmatch(error_code) is None
         ):
             raise RequestLedgerError("invalid request outcome")
-        if (
-            "result" in outcome
-            and outcome["result"] is not None
-            and outcome["result"] != "stale"
-        ):
+        if "result" in outcome and outcome["result"] is not None and outcome["result"] != "stale":
             raise RequestLedgerError("invalid durable request result")
         session_id = outcome.get("sessionId")
         if session_id is not None and (
-            not isinstance(session_id, str)
-            or len(session_id) > 128
-            or _TOKEN.fullmatch(session_id) is None
+            not isinstance(session_id, str) or len(session_id) > 128 or _TOKEN.fullmatch(session_id) is None
         ):
             raise RequestLedgerError("invalid request session")
         if "created" in outcome and not isinstance(outcome["created"], bool):
@@ -208,11 +196,7 @@ class RequestLedger:
         except FileNotFoundError:
             self.path.parent.mkdir(parents=True, mode=0o700)
             info = self.path.parent.lstat()
-        if (
-            stat.S_ISLNK(info.st_mode)
-            or not stat.S_ISDIR(info.st_mode)
-            or info.st_uid != os.geteuid()
-        ):
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
             raise OSError("request ledger root is unsafe")
         os.chmod(self.path.parent, 0o700)
 
@@ -262,9 +246,7 @@ class RequestLedger:
             raise RequestLedgerError("invalid request ledger")
         seen: set[tuple[str, str]] = set()
         for record in records:
-            if not isinstance(record, dict) or set(record) != {
-                "scope", "requestId", "fingerprint", "state", "outcome"
-            }:
+            if not isinstance(record, dict) or set(record) != {"scope", "requestId", "fingerprint", "state", "outcome"}:
                 raise RequestLedgerError("invalid request ledger")
             self._validate_identity(record["scope"], record["requestId"], record["fingerprint"])
             key = (record["scope"], record["requestId"])
@@ -290,9 +272,7 @@ class RequestLedger:
             raise RequestLedgerError("request ledger is too large")
         directory_fd = os.open(
             self.path.parent,
-            os.O_RDONLY
-            | getattr(os, "O_DIRECTORY", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
         )
         try:
             replace_bytes(directory_fd, self.path.name, payload)

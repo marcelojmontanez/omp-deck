@@ -5,9 +5,8 @@ import json
 import socket
 import threading
 import time
-from types import MappingProxyType
-
 import unittest
+from types import MappingProxyType
 
 from omp_deck.extension_adapter import (
     PROTOCOL,
@@ -17,7 +16,6 @@ from omp_deck.extension_adapter import (
     ExtensionProtocolError,
     ExtensionRequestTimeout,
 )
-
 
 SESSION = "session-1"
 CONNECTION = "connection-1"
@@ -114,7 +112,6 @@ class ExtensionAdapterTests(unittest.TestCase):
         adapter.close()
         thread.join(1)
 
-
     def test_registration_version_and_authoritative_snapshot(self):
         peer = self.make_peer()
         adapter = self.make_adapter(peer)
@@ -133,7 +130,6 @@ class ExtensionAdapterTests(unittest.TestCase):
             adapter.close()
             peer.close()
 
-
     def test_start_rejects_wrong_registration(self):
         cases = [
             (registration(version=2), "incompatible"),
@@ -146,13 +142,11 @@ class ExtensionAdapterTests(unittest.TestCase):
                 with self.assertRaisesRegex(ExtensionProtocolError, match):
                     self.make_adapter(peer).start()
 
-
     def test_start_requires_snapshot_as_second_frame(self):
         peer = self.make_peer((registration(), event(kind="heartbeat", data={"time": 1})))
         with self.assertRaisesRegex(ExtensionProtocolError, "snapshot"):
             self.make_adapter(peer).start()
         peer.close()
-
 
     def test_command_bytes_and_response_correlation(self):
         peer = self.make_peer()
@@ -174,7 +168,12 @@ class ExtensionAdapterTests(unittest.TestCase):
             self.addCleanup(self.stop_and_join, adapter, thread)
         requests = [peer.read() for _ in threads]
         self.assertEqual({item["action"] for item in requests}, {"sendMessage", "followUp", "interrupt", "shutdown"})
-        self.assertTrue(all(item["protocol"] == PROTOCOL and item["type"] == "request" and isinstance(item["id"], str) for item in requests))
+        self.assertTrue(
+            all(
+                item["protocol"] == PROTOCOL and item["type"] == "request" and isinstance(item["id"], str)
+                for item in requests
+            )
+        )
         by_action = {item["action"]: item for item in requests}
         self.assertEqual(by_action["sendMessage"]["message"], "hello")
         self.assertEqual(by_action["followUp"]["message"], "later")
@@ -182,10 +181,11 @@ class ExtensionAdapterTests(unittest.TestCase):
             peer.send(response(request, result=request["action"]))
         for thread in threads:
             thread.join(1)
-        self.assertEqual(results, {"message": "sendMessage", "follow": "followUp", "interrupt": "interrupt", "shutdown": "shutdown"})
+        self.assertEqual(
+            results, {"message": "sendMessage", "follow": "followUp", "interrupt": "interrupt", "shutdown": "shutdown"}
+        )
         adapter.close()
         peer.close()
-
 
     def test_refresh_uses_snapshot_response(self):
         peer = self.make_peer()
@@ -197,12 +197,15 @@ class ExtensionAdapterTests(unittest.TestCase):
         self.addCleanup(self.stop_and_join, adapter, thread)
         request = peer.read()
         self.assertEqual(request["action"], "snapshot")
-        peer.send(response(request, result={"idle": False, "pendingMessages": True, "model": None, "async": [], "eventSequence": 1}))
+        peer.send(
+            response(
+                request, result={"idle": False, "pendingMessages": True, "model": None, "async": [], "eventSequence": 1}
+            )
+        )
         thread.join(1)
         self.assertTrue(holder[0].pending_messages)
         adapter.close()
         peer.close()
-
 
     def test_malformed_event_degrades_connection(self):
         cases = [
@@ -223,7 +226,6 @@ class ExtensionAdapterTests(unittest.TestCase):
                 adapter.close()
                 peer.close()
 
-
     def test_frame_bound_checked_and_sequence_gap_is_explicit(self):
         peer = self.make_peer()
         adapter = self.make_adapter(peer, frame_limit=1024)
@@ -241,7 +243,6 @@ class ExtensionAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ExtensionProtocolError, "exceeds"):
             self.make_adapter(oversized, frame_limit=1024).start()
         oversized.close()
-
 
     def test_timeout_disconnect_and_stale_duplicate_response(self):
         peer = self.make_peer()
@@ -273,7 +274,6 @@ class ExtensionAdapterTests(unittest.TestCase):
         self.assertIsInstance(errors[0], ExtensionDisconnected)
         adapter.close()
 
-
     def test_failed_response_does_not_expose_remote_error(self):
         peer = self.make_peer()
         adapter = self.make_adapter(peer)
@@ -289,7 +289,6 @@ class ExtensionAdapterTests(unittest.TestCase):
         self.assertNotIn("private plugin details", str(errors[0]))
         adapter.close()
         peer.close()
-
 
     def test_heartbeat_sends_pong_and_stale_heartbeat_disconnects(self):
         peer = self.make_peer()
@@ -307,7 +306,6 @@ class ExtensionAdapterTests(unittest.TestCase):
         self.assertEqual(adapter.snapshot().reason, "stale heartbeat")
         adapter.close()
         peer.close()
-
 
     def test_callback_errors_are_contained_and_values_deeply_immutable(self):
         peer = self.make_peer()
@@ -335,7 +333,6 @@ class ExtensionAdapterTests(unittest.TestCase):
         adapter.close()
         peer.close()
 
-
     def test_event_queue_is_bounded_and_close_joins_supervised_reader(self):
         peer = self.make_peer()
         adapter = self.make_adapter(peer, event_limit=2)
@@ -351,7 +348,6 @@ class ExtensionAdapterTests(unittest.TestCase):
         self.assertFalse(adapter._reader.is_alive())
         self.assertEqual([item["sequence"] for item in adapter.drain_events()], [2, 3])
         peer.close()
-
 
     def test_strict_public_inputs(self):
         with self.assertRaises(ValueError):

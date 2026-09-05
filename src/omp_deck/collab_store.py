@@ -8,14 +8,15 @@ import json
 import os
 import re
 import stat
-import unicodedata
 import threading
+import unicodedata
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping
-from ._atomic_file import replace_bytes
+from typing import Any
 
+from ._atomic_file import replace_bytes
 from .collab_protocol import parse_collab_link
 
 SCHEMA_VERSION = 1
@@ -50,7 +51,7 @@ class CollabStoreCorruptionError(CollabStoreError):
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _field(parsed: Any, *names: str) -> Any:
@@ -115,8 +116,14 @@ class CollabStore:
             if record is None:
                 if len(data["records"]) >= self.max_records:
                     raise CollabStoreCapacityError(f"credential store is limited to {self.max_records} records")
-                record = {"sessionId": session_id, "link": link, "relay": relay, "room": room,
-                          "createdAt": now, "updatedAt": now}
+                record = {
+                    "sessionId": session_id,
+                    "link": link,
+                    "relay": relay,
+                    "room": room,
+                    "createdAt": now,
+                    "updatedAt": now,
+                }
                 data["records"].append(record)
             else:
                 record.update(link=link, relay=relay, room=room, updatedAt=now)
@@ -203,9 +210,7 @@ class CollabStore:
         )
         try:
             try:
-                fd = os.open(
-                    self.path.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory_fd
-                )
+                fd = os.open(self.path.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory_fd)
             except FileNotFoundError:
                 return self._empty()
             try:
@@ -283,12 +288,7 @@ class CollabStore:
             raise CollabStoreValidationError("session id contains unsupported characters")
 
     def _validate_link(self, link: Any) -> tuple[str, str]:
-        if (
-            not isinstance(link, str)
-            or not link
-            or len(link) > MAX_LINK_LENGTH
-            or self._has_unsafe_unicode(link)
-        ):
+        if not isinstance(link, str) or not link or len(link) > MAX_LINK_LENGTH or self._has_unsafe_unicode(link):
             raise CollabStoreValidationError("Collab link must be a non-empty bounded string")
         try:
             parsed = parse_collab_link(link)
@@ -297,18 +297,16 @@ class CollabStore:
         read_only = _field(parsed, "read_only", "readOnly")
         writable = _field(parsed, "writable", "can_write", "canWrite", "is_writable", "isWritable")
         mode = _field(parsed, "mode", "access", "permission", "role")
-        write_key = _field(
-            parsed, "write_token", "writeToken", "write_key", "writeKey", "write_secret", "writeSecret"
-        )
-        if read_only is True or writable is False or (
-            isinstance(mode, str) and mode.lower() in {"view", "read", "readonly", "read-only"}
+        write_key = _field(parsed, "write_token", "writeToken", "write_key", "writeKey", "write_secret", "writeSecret")
+        if (
+            read_only is True
+            or writable is False
+            or (isinstance(mode, str) and mode.lower() in {"view", "read", "readonly", "read-only"})
         ):
             raise CollabStoreValidationError("Collab link must grant write access")
         if writable is None and write_key is None and mode is None and read_only is None:
             raise CollabStoreValidationError("Collab parser did not identify write access")
-        relay = _field(
-            parsed, "ws_url", "wsUrl", "relay", "relay_url", "relayUrl", "server", "server_url", "serverUrl"
-        )
+        relay = _field(parsed, "ws_url", "wsUrl", "relay", "relay_url", "relayUrl", "server", "server_url", "serverUrl")
         room = _field(parsed, "room", "room_id", "roomId")
         self._validate_descriptor(relay, "relay")
         self._validate_descriptor(room, "room")
@@ -330,12 +328,7 @@ class CollabStore:
 
     @staticmethod
     def _validate_timestamp(value: Any, name: str) -> None:
-        if (
-            not isinstance(value, str)
-            or not value
-            or len(value) > 64
-            or CollabStore._has_unsafe_unicode(value)
-        ):
+        if not isinstance(value, str) or not value or len(value) > 64 or CollabStore._has_unsafe_unicode(value):
             raise CollabStoreValidationError(f"invalid {name}")
         try:
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -348,8 +341,8 @@ class CollabStore:
         value = self._clock()
         if isinstance(value, datetime):
             if value.tzinfo is None:
-                value = value.replace(tzinfo=timezone.utc)
-            return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+                value = value.replace(tzinfo=UTC)
+            return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
         self._validate_timestamp(value, "clock timestamp")
         return value
 
@@ -389,16 +382,12 @@ class CollabStore:
                 separators=(",", ":"),
             ).encode("utf-8")
         except (TypeError, ValueError, UnicodeError, RecursionError):
-            raise CollabStoreValidationError(
-                "credential store could not be serialized"
-            ) from None
+            raise CollabStoreValidationError("credential store could not be serialized") from None
         if len(payload) > MAX_FILE_BYTES:
             raise CollabStoreValidationError("credential store file is too large")
         directory_fd = os.open(
             self.state_root,
-            os.O_RDONLY
-            | getattr(os, "O_DIRECTORY", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
         )
         try:
             replace_bytes(directory_fd, self.path.name, payload)

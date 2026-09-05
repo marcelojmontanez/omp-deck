@@ -14,7 +14,6 @@ from omp_rpc import (
     RpcTimeoutError,
 )
 
-
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_rpc_server.py"
 
 
@@ -110,23 +109,34 @@ class RpcCompatibilityTests(unittest.TestCase):
 
             self.assertEqual((first_ui.method, first_ui.title), ("input", "Question"))
             self.assertEqual((second_ui.method, second_ui.message), ("confirm", "Proceed?"))
-            self.assertEqual((state.session_id, state.session_name, state.message_count), ("fixture-session", "Fixture", 2))
+            self.assertEqual(
+                (state.session_id, state.session_name, state.message_count), ("fixture-session", "Fixture", 2)
+            )
             self.assertEqual(messages, ({"role": "user", "content": "hello"},))
             requests = self.transcript(transcript)
             by_type = {request["type"]: request for request in requests if request["type"] != "extension_ui_response"}
             self.assertEqual(
                 by_type["prompt"],
-                {"id": by_type["prompt"]["id"], "type": "prompt", "message": "start", "images": [image], "streamingBehavior": "followUp"},
+                {
+                    "id": by_type["prompt"]["id"],
+                    "type": "prompt",
+                    "message": "start",
+                    "images": [image],
+                    "streamingBehavior": "followUp",
+                },
             )
             self.assertEqual(
                 by_type["follow_up"],
                 {"id": by_type["follow_up"]["id"], "type": "follow_up", "message": "continue", "images": [image]},
             )
             ui_responses = [request for request in requests if request["type"] == "extension_ui_response"]
-            self.assertEqual(ui_responses, [
-                {"type": "extension_ui_response", "id": "ui-input", "value": "typed answer"},
-                {"type": "extension_ui_response", "id": "ui-confirm", "cancelled": True, "timedOut": True},
-            ])
+            self.assertEqual(
+                ui_responses,
+                [
+                    {"type": "extension_ui_response", "id": "ui-input", "value": "typed answer"},
+                    {"type": "extension_ui_response", "id": "ui-confirm", "cancelled": True, "timedOut": True},
+                ],
+            )
             self.assertEqual(by_type["get_messages_page"]["limit"], 256)
 
     def test_accepts_valid_v2_chunks_within_reassembly_bound(self):

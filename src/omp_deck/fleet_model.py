@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import copy
 import threading
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 from ._fleet_extension import project_extension_event
 from ._fleet_projection import (
@@ -10,15 +11,14 @@ from ._fleet_projection import (
     collab_projection,
     extension_projection,
     now,
+    pending_ui_projection,
     plain_json,
     rpc_projection,
-    pending_ui_projection,
     strict_clone,
 )
 from .event_stream import EventJournal
 from .read_cursors import CursorStore
 from .rpc_adapter import AdapterEvent, AdapterSnapshot
-
 
 _PUBLIC_KEYS = (
     "id",
@@ -69,7 +69,9 @@ class FleetModel:
                 "title": str(record["title"]),
                 "project": {"name": str(project["name"]), "path": str(project["path"])},
                 "state": existing.get("state", "disconnected") if existing else "disconnected",
-                "transport": copy.deepcopy(existing["transport"]) if existing else {
+                "transport": copy.deepcopy(existing["transport"])
+                if existing
+                else {
                     "kind": adapter_kind,
                     "status": "disconnected",
                     "label": "Managed RPC" if adapter_kind == "rpc" else adapter_kind.title(),
@@ -294,10 +296,7 @@ class FleetModel:
                 return False
             if instance_id is None and generation < session["_generation"]:
                 return False
-            if (
-                instance_id != session["transport"]["instanceId"]
-                or generation != session["_generation"]
-            ):
+            if instance_id != session["transport"]["instanceId"] or generation != session["_generation"]:
                 session["_adapterSequence"] = 0
                 session["_resyncRequired"] = False
                 session["_resyncWatermark"] = 0
@@ -332,9 +331,7 @@ class FleetModel:
         if self.cursor_store is None:
             return
         message_id = self._latest_assistant_id(session)
-        session["unread"] = bool(
-            message_id and self.cursor_store.last_read(str(session["id"])) != message_id
-        )
+        session["unread"] = bool(message_id and self.cursor_store.last_read(str(session["id"])) != message_id)
 
     @staticmethod
     def _latest_assistant_id(session: Mapping[str, Any]) -> str | None:
@@ -367,10 +364,7 @@ class FleetModel:
 
     @staticmethod
     def _owns(session: Mapping[str, Any], instance_id: str, generation: int) -> bool:
-        return (
-            session["_generation"] == generation
-            and session["transport"]["instanceId"] == instance_id
-        )
+        return session["_generation"] == generation and session["transport"]["instanceId"] == instance_id
 
     @staticmethod
     def _may_claim(session: Mapping[str, Any], instance_id: str, generation: int) -> bool:

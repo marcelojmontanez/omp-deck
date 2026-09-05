@@ -12,7 +12,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "marcelojmontanez" }]
 dependencies = [
-  "omp-rpc @ git+https://github.com/can1357/oh-my-pi.git@f241301c83726afe75a847e919b89977a54dafbe#subdirectory=python/omp-rpc",
+  "omp-rpc @ git+https://github.com/can1357/oh-my-pi.git@5964a0f7649275bcde818f20073193fd032451f2#subdirectory=python/omp-rpc",
   "cryptography==50.0.1",
   "websockets==15.0.1",
 ]
@@ -26,6 +26,9 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Topic :: Software Development",
 ]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.13"]
 
 [project.urls]
 Homepage = "https://github.com/marcelojmontanez/omp-deck"
@@ -45,3 +48,33 @@ exclude = ["omp_deck.plugin.node_modules*"]
 
 [tool.setuptools.package-data]
 omp_deck = ["static/*", "plugin/*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests", "tools"]
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "W",
+  "F",
+  "I",
+  "UP",
+  "B",
+  "C4",
+  "PIE",
+]
+ignore = [
+  "E501",
+  "B008",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["omp_deck"]
+
+[tool.ruff.format]
+quote-style = "double"

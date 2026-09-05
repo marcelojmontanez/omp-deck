@@ -13,9 +13,7 @@ class RequestLedgerTests(unittest.TestCase):
             first = RequestLedger(path)
             self.assertIsNone(first.reserve("rpc-command:session", "request-1", "a" * 64))
 
-            pending = RequestLedger(path).reserve(
-                "rpc-command:session", "request-1", "a" * 64
-            )
+            pending = RequestLedger(path).reserve("rpc-command:session", "request-1", "a" * 64)
             self.assertEqual(
                 pending,
                 {
@@ -30,19 +28,13 @@ class RequestLedgerTests(unittest.TestCase):
                 "status": "accepted",
                 "result": None,
             }
-            first.complete(
-                "rpc-command:session", "request-1", "a" * 64, accepted
-            )
+            first.complete("rpc-command:session", "request-1", "a" * 64, accepted)
             self.assertEqual(
-                RequestLedger(path).reserve(
-                    "rpc-command:session", "request-1", "a" * 64
-                ),
+                RequestLedger(path).reserve("rpc-command:session", "request-1", "a" * 64),
                 accepted,
             )
             with self.assertRaises(RequestConflictError):
-                RequestLedger(path).reserve(
-                    "rpc-command:session", "request-1", "b" * 64
-                )
+                RequestLedger(path).reserve("rpc-command:session", "request-1", "b" * 64)
 
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(first.lock_path.stat().st_mode & 0o777, 0o600)

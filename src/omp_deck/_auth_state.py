@@ -14,11 +14,7 @@ def validate(state: Any) -> None:
         "devices",
     }:
         raise ValueError("invalid auth state shape")
-    if (
-        state["version"] != 1
-        or not isinstance(state["epoch"], str)
-        or len(state["epoch"]) != 64
-    ):
+    if state["version"] != 1 or not isinstance(state["epoch"], str) or len(state["epoch"]) != 64:
         raise ValueError("unsupported auth state")
     devices = state["devices"]
     if not isinstance(devices, dict) or len(devices) > MAX_PERSISTED_DEVICES:

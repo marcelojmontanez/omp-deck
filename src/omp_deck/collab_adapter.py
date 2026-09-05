@@ -1,20 +1,18 @@
 """Synchronous, supervised guest for the COLLAB_PROTO 3 websocket protocol."""
+
 from __future__ import annotations
 
-import json
 import copy
+import json
 import random as _random
 import threading
 import time
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
-from types import MappingProxyType
-from typing import Any, Protocol
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from typing import Any
 
-from cryptography.exceptions import InvalidTag
-
+from . import _collab_transport as _transport
+from ._collab_transport import CollabSnapshot, _freeze, _Reply, _Socket
 from .collab_protocol import (
     COLLAB_PROTO,
     MAX_FRAME_BYTES,
@@ -26,51 +24,16 @@ from .collab_protocol import (
     seal_frame,
     unpack_envelope,
 )
-from .rpc_adapter import AdapterDisconnectedError, AdapterError, AdapterEvent, AdapterIncompatibleError, AdapterTimeoutError
+from .rpc_adapter import (
+    AdapterDisconnectedError,
+    AdapterError,
+    AdapterEvent,
+    AdapterIncompatibleError,
+    AdapterTimeoutError,
+)
 
 WELCOME_TIMEOUT = 30.0
 TRANSCRIPT_TIMEOUT = 10.0
-_FATAL_CLOSE_CODES = frozenset({1002, 1003, 1007, 1008, 1009, 1010, 4001, 4004, 4009, 4029})
-_CONNECT_OPTIONS = {
-    "open_timeout": 10.0,
-    "close_timeout": 10.0,
-    "ping_interval": 20.0,
-    "ping_timeout": 20.0,
-    "max_queue": 16,
-}
-
-
-class _Socket(Protocol):
-    def send(self, data: bytes) -> Any: ...
-    def recv(self, timeout: float | None = None) -> str | bytes: ...
-    def close(self) -> Any: ...
-
-
-def _freeze(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return MappingProxyType({str(k): _freeze(v) for k, v in value.items()})
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze(v) for v in value)
-    return value
-
-
-@dataclass(frozen=True, slots=True)
-class CollabSnapshot:
-    header: Mapping[str, Any]
-    state: Mapping[str, Any]
-    entries: tuple[Mapping[str, Any], ...]
-    agents: tuple[Mapping[str, Any], ...]
-    pending_ui_requests: tuple[Mapping[str, Any], ...]
-    sequence: int
-    transport_status: str
-    reason: str | None
-    read_only: bool
-
-
-@dataclass(slots=True)
-class _Reply:
-    event: threading.Event
-    value: tuple[str, int] | BaseException | None = None
 
 
 class CollabAdapter:
@@ -101,6 +64,7 @@ class CollabAdapter:
         self._callback = on_event
         if connector is None:
             from websockets.sync.client import connect
+
             connector = connect
         self._connector = connector
         self._clock, self._random = clock, random
@@ -121,6 +85,7 @@ class CollabAdapter:
         self._agents: list[dict[str, Any]] = []
         self._ui: dict[int, dict[str, Any]] = {}
         self._ui_order: deque[int] = deque()
+        self._settled_ui: deque[int] = deque(maxlen=ui_limit)
         self._host_read_only = self._link.read_only
         self._welcome = False
         self._expected_entries = 0
@@ -151,7 +116,9 @@ class CollabAdapter:
         with self._lock:
             if self._thread is not None:
                 raise AdapterError("adapter is already started", kind="lifecycle")
-            self._stopping.clear(); self._ready.clear(); self._fatal = None
+            self._stopping.clear()
+            self._ready.clear()
+            self._fatal = None
             self._thread = threading.Thread(target=self._run, name="omp-collab-reader", daemon=True)
             self._thread.start()
         if not self._ready.wait(WELCOME_TIMEOUT):
@@ -173,12 +140,10 @@ class CollabAdapter:
         if thread is not None and thread is not threading.current_thread():
             thread.join(WELCOME_TIMEOUT)
             if thread.is_alive():
-                error = AdapterTimeoutError(
-                    "collaboration reader did not stop", kind="timeout"
-                )
+                error = AdapterTimeoutError("collaboration reader did not stop", kind="timeout")
                 with self._lock:
                     self._status, self._reason = "degraded", str(error)
-                    self._fail_replies(error)
+                    _transport._fail_replies(self._replies, error)
                 self._emit(
                     "transport",
                     {"status": "degraded", "reason": str(error)},
@@ -187,30 +152,37 @@ class CollabAdapter:
         with self._lock:
             self._thread = None
             self._ws = None
-            self._fail_replies(
-                AdapterDisconnectedError("adapter closed", kind="closed")
-            )
+            _transport._fail_replies(self._replies, AdapterDisconnectedError("adapter closed", kind="closed"))
             changed = self._status != "disconnected"
             self._status, self._reason = "disconnected", "closed"
         if changed:
-            self._emit(
-                "transport", {"status": "disconnected", "reason": "closed"}
-            )
+            self._emit("transport", {"status": "disconnected", "reason": "closed"})
 
     shutdown = close
 
     def snapshot(self) -> CollabSnapshot:
         with self._lock:
-            return CollabSnapshot(_freeze(copy.deepcopy(self._header)), _freeze(copy.deepcopy(self._state)),
-                tuple(_freeze(copy.deepcopy(x)) for x in self._entries), tuple(_freeze(copy.deepcopy(x)) for x in self._agents),
-                tuple(_freeze(copy.deepcopy(self._ui[i])) for i in self._ui_order if i in self._ui), self._sequence,
-                self._status, self._reason, self.read_only)
+            return CollabSnapshot(
+                _freeze(copy.deepcopy(self._header)),
+                _freeze(copy.deepcopy(self._state)),
+                tuple(_freeze(copy.deepcopy(x)) for x in self._entries),
+                tuple(_freeze(copy.deepcopy(x)) for x in self._agents),
+                tuple(_freeze(copy.deepcopy(self._ui[i])) for i in self._ui_order if i in self._ui),
+                self._sequence,
+                self._status,
+                self._reason,
+                self.read_only,
+            )
 
     def drain_events(self) -> tuple[AdapterEvent, ...]:
         with self._lock:
-            out = tuple(self._events); self._events.clear(); return out
+            out = tuple(self._events)
+            self._events.clear()
+            return out
 
-    def send_message(self, message: str, *, images: Sequence[Mapping[str, Any]] | None = None, streaming_behavior: str | None = None) -> None:
+    def send_message(
+        self, message: str, *, images: Sequence[Mapping[str, Any]] | None = None, streaming_behavior: str | None = None
+    ) -> None:
         if streaming_behavior is not None:
             raise ValueError("streaming_behavior is not supported by collaboration")
         frame: dict[str, Any] = {"t": "prompt", "text": message}
@@ -220,61 +192,79 @@ class CollabAdapter:
 
     prompt = send_message
 
-    def interrupt(self) -> None: self._send_mutating({"t": "abort"})
+    def interrupt(self) -> None:
+        self._send_mutating({"t": "abort"})
+
     abort = interrupt
 
-    def agent_chat(self, agent_id: str, text: str) -> None: self._send_mutating({"t":"agent-cmd", "cmd":"chat", "agentId":agent_id, "text":text})
-    def agent_kill(self, agent_id: str) -> None: self._send_mutating({"t":"agent-cmd", "cmd":"kill", "agentId":agent_id})
-    def agent_revive(self, agent_id: str) -> None: self._send_mutating({"t":"agent-cmd", "cmd":"revive", "agentId":agent_id})
+    def agent_chat(self, agent_id: str, text: str) -> None:
+        self._send_mutating({"t": "agent-cmd", "cmd": "chat", "agentId": agent_id, "text": text})
+
+    def agent_kill(self, agent_id: str) -> None:
+        self._send_mutating({"t": "agent-cmd", "cmd": "kill", "agentId": agent_id})
+
+    def agent_revive(self, agent_id: str) -> None:
+        self._send_mutating({"t": "agent-cmd", "cmd": "revive", "agentId": agent_id})
 
     def respond_ui(self, req_id: int, value: str | None = None) -> bool:
-        frame: dict[str, Any] = {"t":"ui-response", "reqId":req_id}
-        if value is not None: frame["value"] = value
+        frame: dict[str, Any] = {"t": "ui-response", "reqId": req_id}
+        if value is not None:
+            frame["value"] = value
         data = self._encode(frame)
         self._require_writable()
         # Serialize the membership check and send: the request is removed only
         # after a successful write, while concurrent responders remain first-wins.
         with self._lock:
-            if req_id not in self._ui: return False
+            if req_id not in self._ui:
+                return False
             self._send_encoded(data)
             del self._ui[req_id]
+            self._settled_ui.append(req_id)
             return True
 
-    def fetch_transcript(self, agent_id: str, from_byte: int = 0, *, timeout: float = TRANSCRIPT_TIMEOUT) -> tuple[str, int]:
+    def fetch_transcript(
+        self, agent_id: str, from_byte: int = 0, *, timeout: float = TRANSCRIPT_TIMEOUT
+    ) -> tuple[str, int]:
         self._require_connected()
         with self._lock:
             req_id = self._next_req
-            data = self._encode({"t":"fetch-transcript", "reqId":req_id, "agentId":agent_id, "fromByte":from_byte})
+            data = self._encode({"t": "fetch-transcript", "reqId": req_id, "agentId": agent_id, "fromByte": from_byte})
             reply = _Reply(threading.Event())
             self._next_req += 1
             self._replies[req_id] = reply
         try:
             self._send_encoded(data)
-            if not reply.event.wait(timeout): raise AdapterTimeoutError("transcript request timed out", kind="timeout")
-            if isinstance(reply.value, BaseException): raise reply.value
+            if not reply.event.wait(timeout):
+                raise AdapterTimeoutError("transcript request timed out", kind="timeout")
+            if isinstance(reply.value, BaseException):
+                raise reply.value
             assert isinstance(reply.value, tuple)
             return reply.value
         finally:
-            with self._lock: self._replies.pop(req_id, None)
-
-    def _url(self) -> str:
-        p = urlsplit(self._link.ws_url); query = dict(parse_qsl(p.query)); query["role"] = "guest"
-        return urlunsplit((p.scheme, p.netloc, p.path, urlencode(query), ""))
+            with self._lock:
+                self._replies.pop(req_id, None)
 
     def _run(self) -> None:
         delay = 1.0
         while not self._stopping.is_set():
             try:
-                ws = self._connector(self._url(), max_size=self._max_frame_bytes, **_CONNECT_OPTIONS)
+                ws = self._connector(
+                    _transport._guest_url(self._link.ws_url),
+                    max_size=self._max_frame_bytes,
+                    **_transport._CONNECT_OPTIONS,
+                )
                 with self._lock:
-                    self._ws = ws; self._reset_replica()
-                hello: dict[str, Any] = {"t":"hello", "proto":COLLAB_PROTO, "name":self._name}
-                if self._link.write_token is not None: hello["writeToken"] = b64url_encode(self._link.write_token)
+                    self._ws = ws
+                    self._reset_replica()
+                hello: dict[str, Any] = {"t": "hello", "proto": COLLAB_PROTO, "name": self._name}
+                if self._link.write_token is not None:
+                    hello["writeToken"] = b64url_encode(self._link.write_token)
                 self._send(hello)
                 deadline = self._clock() + WELCOME_TIMEOUT
                 while not self._stopping.is_set():
                     remaining = deadline - self._clock() if not self._snapshot_complete else None
-                    if remaining is not None and remaining <= 0: raise TimeoutError("snapshot timeout")
+                    if remaining is not None and remaining <= 0:
+                        raise TimeoutError("snapshot timeout")
                     raw = ws.recv(timeout=remaining)
                     if self._receive(raw) and not self._snapshot_complete:
                         deadline = self._clock() + WELCOME_TIMEOUT
@@ -282,22 +272,39 @@ class CollabAdapter:
                         delay = 1.0
                 return
             except BaseException as exc:
-                if self._stopping.is_set(): return
-                fatal = self._classify_fatal(exc)
+                if self._stopping.is_set():
+                    return
+                fatal = _transport._classify_fatal(exc)
                 with self._lock:
-                    self._ws = None; self._status = "disconnected"; self._reason = self._safe_reason(exc)
-                    self._fail_replies(AdapterDisconnectedError("collaboration transport disconnected", kind="disconnected"))
-                self._emit("transport", {"status":"disconnected", "reason":self._reason})
+                    self._ws = None
+                    self._status = "disconnected"
+                    self._reason = _transport._safe_reason(exc)
+                    _transport._fail_replies(
+                        self._replies,
+                        AdapterDisconnectedError("collaboration transport disconnected", kind="disconnected"),
+                    )
+                self._emit("transport", {"status": "disconnected", "reason": self._reason})
                 if fatal:
-                    with self._lock: self._fatal = fatal
-                    self._ready.set(); return
+                    with self._lock:
+                        self._fatal = fatal
+                    self._ready.set()
+                    return
                 self._stopping.wait(delay * (0.75 + 0.5 * self._random()))
                 delay = min(30.0, delay * 2)
 
     def _reset_replica(self) -> None:
-        self._snapshot_complete = False; self._welcome = False; self._expected_entries = 0; self._snapshot_bytes = 0
+        self._snapshot_complete = False
+        self._welcome = False
+        self._expected_entries = 0
+        self._snapshot_bytes = 0
         self._status, self._reason = "disconnected", None
-        self._header = {}; self._state = {}; self._entries.clear(); self._agents = []; self._ui.clear(); self._ui_order.clear()
+        self._header = {}
+        self._state = {}
+        self._entries.clear()
+        self._agents = []
+        self._ui.clear()
+        self._ui_order.clear()
+        self._settled_ui.clear()
 
     def _receive(self, raw: str | bytes) -> bool:
         if isinstance(raw, str):
@@ -311,9 +318,19 @@ class CollabAdapter:
                 raise AdapterIncompatibleError("relay sent an unexpected control frame", kind="protocol")
             kind = control.get("type")
             peer_id = control.get("peerId")
-            if kind in ("peer-joined", "peer-left") and isinstance(peer_id, int) and not isinstance(peer_id, bool) and 0 <= peer_id <= 0xFFFFFFFF and set(control) == {"type", "peerId"}:
+            if (
+                kind in ("peer-joined", "peer-left")
+                and isinstance(peer_id, int)
+                and not isinstance(peer_id, bool)
+                and 0 <= peer_id <= 0xFFFFFFFF
+                and set(control) == {"type", "peerId"}
+            ):
                 return False
-            if kind == "room-closed" and set(control) <= {"type", "reason"} and (control.get("reason") is None or isinstance(control.get("reason"), str)):
+            if (
+                kind == "room-closed"
+                and set(control) <= {"type", "reason"}
+                and (control.get("reason") is None or isinstance(control.get("reason"), str))
+            ):
                 raise AdapterDisconnectedError("collaboration room was closed", kind="relay")
             raise AdapterIncompatibleError("relay sent an unexpected control frame", kind="protocol")
         if not isinstance(raw, bytes):
@@ -365,7 +382,10 @@ class CollabAdapter:
         if not isinstance(entries, list) or not isinstance(final, bool):
             raise AdapterIncompatibleError("malformed snapshot chunk", kind="protocol")
         self._snapshot_bytes += len(json.dumps(entries, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
-        if self._snapshot_bytes > self._max_snapshot_bytes or len(self._entries) + len(entries) > self._expected_entries:
+        if (
+            self._snapshot_bytes > self._max_snapshot_bytes
+            or len(self._entries) + len(entries) > self._expected_entries
+        ):
             raise AdapterIncompatibleError("snapshot bounds exceeded", kind="bounds")
         self._entries.extend(dict(entry) for entry in entries)
         if not final:
@@ -406,7 +426,7 @@ class CollabAdapter:
     def _ingest_ui_request(self, frame: Mapping[str, Any]) -> Mapping[str, Any] | None:
         request = dict(frame["request"])
         req_id = request.get("reqId")
-        if not isinstance(req_id, int) or req_id in self._ui:
+        if not isinstance(req_id, int) or req_id in self._ui or req_id in self._settled_ui:
             return None
         while len(self._ui_order) >= self._ui_limit:
             old = self._ui_order.popleft()
@@ -420,6 +440,7 @@ class CollabAdapter:
         if req_id not in self._ui:
             return None
         self._ui.pop(req_id, None)
+        self._settled_ui.append(req_id)
         return {"reqId": req_id}
 
     def _ingest_transcript(self, frame: Mapping[str, Any]) -> Mapping[str, Any] | None:
@@ -437,11 +458,13 @@ class CollabAdapter:
 
     def _require_connected(self) -> None:
         with self._lock:
-            if self._status != "connected" or self._ws is None: raise AdapterDisconnectedError("collaboration transport is not connected", kind="disconnected")
+            if self._status != "connected" or self._ws is None:
+                raise AdapterDisconnectedError("collaboration transport is not connected", kind="disconnected")
 
     def _require_writable(self) -> None:
         self._require_connected()
-        if self.read_only: raise AdapterError("collaboration link is read-only", kind="read_only")
+        if self.read_only:
+            raise AdapterError("collaboration link is read-only", kind="read_only")
 
     def _send_mutating(self, frame: dict[str, Any]) -> None:
         data = self._encode(frame)
@@ -455,32 +478,21 @@ class CollabAdapter:
         self._send_encoded(self._encode(frame))
 
     def _send_encoded(self, data: bytes) -> None:
-        with self._lock: ws = self._ws
-        if ws is None: raise AdapterDisconnectedError("collaboration transport is not connected", kind="disconnected")
-        with self._send_lock: ws.send(data)
+        with self._lock:
+            ws = self._ws
+        if ws is None:
+            raise AdapterDisconnectedError("collaboration transport is not connected", kind="disconnected")
+        with self._send_lock:
+            ws.send(data)
 
     def _emit(self, event_type: str, payload: Mapping[str, Any]) -> None:
         with self._lock:
-            self._sequence += 1; event = AdapterEvent(self._sequence, event_type, copy.deepcopy(dict(payload)), self._clock())
-            self._events.append(event); callback = self._callback
+            self._sequence += 1
+            event = AdapterEvent(self._sequence, event_type, copy.deepcopy(dict(payload)), self._clock())
+            self._events.append(event)
+            callback = self._callback
         if callback:
-            try: callback(event)
-            except Exception: pass
-
-    def _fail_replies(self, exc: BaseException) -> None:
-        for reply in self._replies.values():
-            if not reply.event.is_set(): reply.value = exc; reply.event.set()
-
-    @staticmethod
-    def _safe_reason(exc: BaseException) -> str:
-        if isinstance(exc, (InvalidTag, ValueError)): return "invalid encrypted collaboration frame"
-        return "collaboration transport disconnected"
-
-    @staticmethod
-    def _classify_fatal(exc: BaseException) -> AdapterError | None:
-        if isinstance(exc, AdapterIncompatibleError): return exc
-        if isinstance(exc, AdapterDisconnectedError) and exc.kind == "relay": return exc
-        if isinstance(exc, (InvalidTag, ValueError)): return AdapterIncompatibleError("invalid encrypted collaboration frame", kind="crypto")
-        code = getattr(exc, "code", None) or getattr(getattr(exc, "rcvd", None), "code", None)
-        if code in _FATAL_CLOSE_CODES: return AdapterDisconnectedError("relay rejected collaboration connection", kind="relay")
-        return None
+            try:
+                callback(event)
+            except Exception:
+                pass

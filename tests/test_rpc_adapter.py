@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from types import SimpleNamespace
-
 import unittest
+from dataclasses import dataclass
+
 from omp_rpc import ReadyEvent, RpcProcessExitError, RpcTimeoutError
 
 from omp_deck.rpc_adapter import (
@@ -36,12 +35,12 @@ class FakeState:
     session_id: str
     is_streaming: bool
 
+
 @dataclass(frozen=True)
 class FakeTodo:
     id: str
     name: str
     tasks: tuple
-
 
 
 class FakeClient:
@@ -68,43 +67,81 @@ class FakeClient:
 
         return unsubscribe
 
-    def on_ready(self, listener): return self._on("ready", listener)
-    def on_event(self, listener): return self._on("event", listener)
-    def on_ui_request(self, listener): return self._on("ui", listener)
-    def on_protocol_error(self, listener): return self._on("protocol", listener)
-    def on_extension_error(self, listener): return self._on("extension", listener)
+    def on_ready(self, listener):
+        return self._on("ready", listener)
+
+    def on_event(self, listener):
+        return self._on("event", listener)
+
+    def on_ui_request(self, listener):
+        return self._on("ui", listener)
+
+    def on_protocol_error(self, listener):
+        return self._on("protocol", listener)
+
+    def on_extension_error(self, listener):
+        return self._on("extension", listener)
 
     def start(self):
         for listener in tuple(self.listeners["ready"]):
             listener(self.ready)
         return self
 
-    def stop(self): self.stopped = True
+    def stop(self):
+        self.stopped = True
+
     def get_state(self):
         self.state_reads += 1
         if self.on_state_read is not None:
             self.on_state_read(self.state_reads)
         return self.state
-    def get_messages(self): return self.messages
-    def get_todos(self): return self.todos
-    def get_subagents(self): return self.subagents
+
+    def get_messages(self):
+        return self.messages
+
+    def get_todos(self):
+        return self.todos
+
+    def get_subagents(self):
+        return self.subagents
 
     def _call(self, name, *args, **kwargs):
         if self.failure:
             raise self.failure
         self.calls.append((name, args, kwargs))
 
-    def prompt(self, *args, **kwargs): return self._call("prompt", *args, **kwargs)
-    def follow_up(self, *args, **kwargs): return self._call("follow_up", *args, **kwargs)
-    def abort(self): return self._call("abort")
-    def set_model(self, *args): return self._call("set_model", *args)
-    def set_thinking_level(self, *args): return self._call("set_thinking_level", *args)
-    def branch(self, *args): return self._call("branch", *args)
-    def switch_session(self, *args): return self._call("switch_session", *args)
-    def compact(self, *args): return self._call("compact", *args)
-    def send_ui_value(self, *args): return self._call("send_ui_value", *args)
-    def send_ui_confirmation(self, *args): return self._call("send_ui_confirmation", *args)
-    def cancel_ui_request(self, *args, **kwargs): return self._call("cancel_ui_request", *args, **kwargs)
+    def prompt(self, *args, **kwargs):
+        return self._call("prompt", *args, **kwargs)
+
+    def follow_up(self, *args, **kwargs):
+        return self._call("follow_up", *args, **kwargs)
+
+    def abort(self):
+        return self._call("abort")
+
+    def set_model(self, *args):
+        return self._call("set_model", *args)
+
+    def set_thinking_level(self, *args):
+        return self._call("set_thinking_level", *args)
+
+    def branch(self, *args):
+        return self._call("branch", *args)
+
+    def switch_session(self, *args):
+        return self._call("switch_session", *args)
+
+    def compact(self, *args):
+        return self._call("compact", *args)
+
+    def send_ui_value(self, *args):
+        return self._call("send_ui_value", *args)
+
+    def send_ui_confirmation(self, *args):
+        return self._call("send_ui_confirmation", *args)
+
+    def cancel_ui_request(self, *args, **kwargs):
+        return self._call("cancel_ui_request", *args, **kwargs)
 
     def emit(self, kind, value):
         for listener in tuple(self.listeners[kind]):
@@ -170,10 +207,19 @@ class TestRpcAdapter(unittest.TestCase):
         adapter.branch("entry")
         adapter.switch("session.jsonl")
         adapter.resume("other.jsonl")
-        self.assertEqual([call[0] for call in client.calls], [
-            "prompt", "follow_up", "abort", "set_model", "set_thinking_level",
-            "branch", "switch_session", "switch_session",
-        ])
+        self.assertEqual(
+            [call[0] for call in client.calls],
+            [
+                "prompt",
+                "follow_up",
+                "abort",
+                "set_model",
+                "set_thinking_level",
+                "branch",
+                "switch_session",
+                "switch_session",
+            ],
+        )
         self.assertEqual(client.calls[0][2]["streaming_behavior"], "steer")
 
     def test_bounded_event_ingestion_is_ordered_and_callbacks_are_outside_storage(self):
@@ -191,12 +237,20 @@ class TestRpcAdapter(unittest.TestCase):
     def test_ui_projection_preserves_ids_options_descriptions_custom_and_first_response(self):
         now = [100.0]
         adapter, client = started(clock=lambda: now[0])
-        client.emit("ui", FakeUiRequest(
-            id="ask-7", method="select", title="Pick", message="Choose",
-            options=("a", "b"),
-            option_details=({"label": "Alpha", "description": "Recommended"}, {"label": "Beta"}),
-            placeholder="custom", prefill="typed already", timeout=5000,
-        ))
+        client.emit(
+            "ui",
+            FakeUiRequest(
+                id="ask-7",
+                method="select",
+                title="Pick",
+                message="Choose",
+                options=("a", "b"),
+                option_details=({"label": "Alpha", "description": "Recommended"}, {"label": "Beta"}),
+                placeholder="custom",
+                prefill="typed already",
+                timeout=5000,
+            ),
+        )
         pending = adapter.pending_ui_request()
         self.assertIsNotNone(pending)
         self.assertEqual(pending.id, "ask-7")
@@ -233,7 +287,6 @@ class TestRpcAdapter(unittest.TestCase):
         client.failure = None
         self.assertEqual(adapter.cancel_ui("retry-cancel"), "cancelled")
 
-
     def test_confirm_shape_cancel_notification_and_timeout_are_exact(self):
         now = [10.0]
         adapter, client = started(clock=lambda: now[0])
@@ -253,7 +306,6 @@ class TestRpcAdapter(unittest.TestCase):
         client.emit("ui", FakeUiRequest(id="notice", method="notify", message="hello"))
         self.assertIsNone(adapter.pending_ui_request())
         self.assertEqual(adapter.drain_events()[-1].payload["id"], "notice")
-
 
     def test_protocol_error_is_emitted_without_disconnecting_transport(self):
         adapter, client = started()

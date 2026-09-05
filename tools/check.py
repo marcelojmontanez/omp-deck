@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+
 from metrics import MAINTAINED_SOURCES
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -89,10 +90,10 @@ def main():
     if failures:
         print("\n".join(failures), file=sys.stderr)
         return 1
-    python_sources = [
-        path for path in MAINTAINED_SOURCES if Path(path).suffix == ".py"
-    ]
+    python_sources = [path for path in MAINTAINED_SOURCES if Path(path).suffix == ".py"]
     checks = [
+        [sys.executable, "-m", "ruff", "check", "src", "tests", "tools"],
+        [sys.executable, "-m", "ruff", "format", "--check", "src", "tests", "tools"],
         [sys.executable, "-m", "py_compile", *python_sources],
         [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", "."],
         [sys.executable, "tools/metrics.py"],

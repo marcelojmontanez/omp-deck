@@ -4,11 +4,10 @@ import os
 import stat
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from ._atomic_file import replace_bytes
-
 
 _MAX_BYTES = 1024 * 1024
 
@@ -54,7 +53,7 @@ class CursorStore:
             data = self._read(directory_fd)
             data["sessions"][session_id] = {
                 "messageId": message_id,
-                "updatedAt": datetime.now(timezone.utc).isoformat(),
+                "updatedAt": datetime.now(UTC).isoformat(),
             }
             self._write(directory_fd, data)
             self._data = data
@@ -78,9 +77,7 @@ class CursorStore:
             self._ensure_root()
             directory_fd = os.open(
                 self.path.parent,
-                os.O_RDONLY
-                | getattr(os, "O_DIRECTORY", 0)
-                | getattr(os, "O_NOFOLLOW", 0),
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
             )
             try:
                 lock_fd = os.open(
@@ -106,11 +103,7 @@ class CursorStore:
         except FileNotFoundError:
             self.path.parent.mkdir(parents=True, mode=0o700)
             info = self.path.parent.lstat()
-        if (
-            stat.S_ISLNK(info.st_mode)
-            or not stat.S_ISDIR(info.st_mode)
-            or info.st_uid != os.geteuid()
-        ):
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
             raise OSError("cursor root is unsafe")
         self.path.parent.chmod(0o700)
 
@@ -158,7 +151,7 @@ class CursorStore:
                 raise ValueError("invalid cursor store")
 
     def _quarantine(self, directory_fd):
-        suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        suffix = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
         quarantine_name = f"{self.path.name}.corrupt-{suffix}"
         os.replace(
             self.path.name,

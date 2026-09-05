@@ -1,16 +1,12 @@
 from __future__ import annotations
 
 import dataclasses
-import json
 import unittest
 
 from cryptography.exceptions import InvalidTag
 
 from omp_deck.collab_protocol import (
     COLLAB_PROTO,
-    GUEST_FRAME_TYPES,
-    HOST_FRAME_TYPES,
-    ParsedCollabLink,
     b64url_decode,
     b64url_encode,
     decode_frame,
@@ -49,16 +45,24 @@ class LinkTests(unittest.TestCase):
         self.assert_link(f"{self.room}%23{self.view}", f"wss://my.omp.sh/r/{self.room}", writable=False)
 
     def test_full_custom_and_localhost_forms(self) -> None:
-        self.assert_link(f"wss://relay.example/r/{self.room}.{self.full}", f"wss://relay.example/r/{self.room}", writable=True)
-        self.assert_link(f"relay.example:7443/r/{self.room}.{self.view}", f"wss://relay.example:7443/r/{self.room}", writable=False)
-        self.assert_link(f"ws://localhost:8080/r/{self.room}.{self.view}", f"ws://localhost:8080/r/{self.room}", writable=False)
+        self.assert_link(
+            f"wss://relay.example/r/{self.room}.{self.full}", f"wss://relay.example/r/{self.room}", writable=True
+        )
+        self.assert_link(
+            f"relay.example:7443/r/{self.room}.{self.view}", f"wss://relay.example:7443/r/{self.room}", writable=False
+        )
+        self.assert_link(
+            f"ws://localhost:8080/r/{self.room}.{self.view}", f"ws://localhost:8080/r/{self.room}", writable=False
+        )
         self.assert_link(f"http://127.0.0.1/r/{self.room}#{self.view}", f"ws://127.0.0.1/r/{self.room}", writable=False)
         self.assert_link(f"ws://[::1]:9000/r/{self.room}.{self.view}", f"ws://[::1]:9000/r/{self.room}", writable=False)
 
     def test_browser_deep_link_under_safe_arbitrary_path(self) -> None:
         inner = f"relay.example/r/{self.room}.{self.full}"
         for path in ("/", "/collab", "/apps/view/session-1"):
-            self.assert_link(f"https://viewer.example{path}#{inner}", f"wss://relay.example/r/{self.room}", writable=True)
+            self.assert_link(
+                f"https://viewer.example{path}#{inner}", f"wss://relay.example/r/{self.room}", writable=True
+            )
 
     def test_rejections(self) -> None:
         invalid = (
@@ -143,19 +147,34 @@ class EncodingTests(unittest.TestCase):
             {"t": "fetch-transcript", "reqId": 2, "agentId": "a", "fromByte": 0},
         )
         state = {"isStreaming": False, "queuedMessageCount": 0, "cwd": "/tmp", "participants": []}
-        agent = {"id": "a", "displayName": "Main", "kind": "main", "status": "idle",
-                 "hasSessionFile": True, "createdAt": 1, "lastActivity": 2}
+        agent = {
+            "id": "a",
+            "displayName": "Main",
+            "kind": "main",
+            "status": "idle",
+            "hasSessionFile": True,
+            "createdAt": 1,
+            "lastActivity": 2,
+        }
         host = (
-            {"t": "welcome", "proto": COLLAB_PROTO,
-             "header": {"type": "session", "id": "s", "timestamp": "now", "cwd": "/tmp"},
-             "state": state, "agents": [agent], "entryCount": 0},
+            {
+                "t": "welcome",
+                "proto": COLLAB_PROTO,
+                "header": {"type": "session", "id": "s", "timestamp": "now", "cwd": "/tmp"},
+                "state": state,
+                "agents": [agent],
+                "entryCount": 0,
+            },
             {"t": "snapshot-chunk", "entries": [{"type": "future", "payload": {"x": 1}}], "final": True},
             {"t": "entry", "entry": {"type": "future", "payload": []}},
             {"t": "event", "event": {"type": "future", "payload": None}},
             {"t": "state", "state": state},
             {"t": "bus", "channel": "task:subagent:lifecycle", "data": {"id": "a"}},
             {"t": "agents", "agents": [agent]},
-            {"t": "ui-request", "request": {"kind": "select", "title": "Choose", "options": ["A", {"label": "B"}], "reqId": 3}},
+            {
+                "t": "ui-request",
+                "request": {"kind": "select", "title": "Choose", "options": ["A", {"label": "B"}], "reqId": 3},
+            },
             {"t": "ui-request-end", "reqId": 3},
             {"t": "transcript", "reqId": 2, "text": "", "newSize": 0},
             {"t": "bye", "reason": "done"},
@@ -163,13 +182,17 @@ class EncodingTests(unittest.TestCase):
         )
         for frame in guest:
             self.assertIs(validate_guest_frame(frame), frame)
-            with self.assertRaises(ValueError): validate_host_frame(frame)
+            with self.assertRaises(ValueError):
+                validate_host_frame(frame)
         for frame in host:
             self.assertIs(validate_host_frame(frame), frame)
-            with self.assertRaises(ValueError): validate_guest_frame(frame)
+            with self.assertRaises(ValueError):
+                validate_guest_frame(frame)
 
         malformed = (
-            {}, {"t": "abort", "extra": True}, {"t": "hello", "proto": True, "name": "x"},
+            {},
+            {"t": "abort", "extra": True},
+            {"t": "hello", "proto": True, "name": "x"},
             {"t": "prompt", "text": "x", "images": [{"type": "image", "data": "x"}]},
             {"t": "state", "state": {**state, "queuedMessageCount": -1}},
             {"t": "agents", "agents": [{**agent, "createdAt": True}]},
@@ -177,7 +200,8 @@ class EncodingTests(unittest.TestCase):
             {"t": "event", "event": {"type": "notice", "level": "debug", "message": "x"}},
         )
         for frame in malformed:
-            with self.assertRaises(ValueError): validate_frame(frame)
+            with self.assertRaises(ValueError):
+                validate_frame(frame)
 
     def test_decode_rejects_duplicate_keys(self) -> None:
         payload = b'{"t":"hello","t":"abort"}'

@@ -222,7 +222,7 @@ The complete repository check is:
 python3 tools/check.py
 ```
 
-It runs text/encoding checks, Python compilation, unit tests, metrics, and JavaScript syntax checks. Run focused behavioral verification first, then this check once at the end.
+It runs Ruff linting and formatting checks, text/encoding checks, Python compilation, unit tests, metrics, and JavaScript syntax checks. Run focused behavioral verification first, then this check once at the end.
 
 ## Production isolation
 
@@ -236,7 +236,7 @@ Production cutover is one final operation with a prepared rollback. If health or
 
 ## Git and change discipline
 
-- Never commit unless the user asks.
+- Commit completed, verified feature and bug-fix work when it forms a coherent change; explicit user permission is not required. Do not commit exploratory or incomplete work.
 - Never publish, push, open an issue, or open a pull request unless explicitly requested.
 - Preserve user changes and untracked files.
 - Keep commits focused and use the repository's Conventional Commit hook.

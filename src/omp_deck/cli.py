@@ -1,13 +1,13 @@
 import argparse
 import json
 import shutil
-import subprocess
 import signal
 import socket
+import subprocess
 import sys
 from pathlib import Path
-from .auth import AuthManager, validate_auth_state
 
+from .auth import AuthManager, validate_auth_state
 from .lifecycle import (
     PLUGIN_VERSION,
     backup_plugin,
@@ -24,10 +24,8 @@ from .lifecycle import (
     restart_service,
     restore_plugin,
     restore_service_state,
-    run,
     service_status,
 )
-from .installation_paths import installation_paths
 from .settings import config_path, load_settings
 
 
@@ -39,10 +37,7 @@ def _tailscale_status():
     )
     if result.returncode:
         detail = (result.stderr or result.stdout).strip()
-        raise RuntimeError(
-            "tailscale serve status --json failed"
-            + (f": {detail}" if detail else "")
-        )
+        raise RuntimeError("tailscale serve status --json failed" + (f": {detail}" if detail else ""))
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as error:
@@ -60,12 +55,10 @@ def _tailscale_proxies_to(payload, port):
     return any(
         isinstance(site, dict)
         and isinstance(site.get("Handlers"), dict)
-        and any(
-            isinstance(handler, dict) and handler.get("Proxy") == expected
-            for handler in site["Handlers"].values()
-        )
+        and any(isinstance(handler, dict) and handler.get("Proxy") == expected for handler in site["Handlers"].values())
         for site in web.values()
     )
+
 
 def _tailscale_only_proxies_to(payload, port):
     expected = f"http://127.0.0.1:{port}"
@@ -78,9 +71,9 @@ def _tailscale_only_proxies_to(payload, port):
             return False
         handlers.extend(site["Handlers"].values())
     return bool(handlers) and all(
-        isinstance(handler, dict) and handler.get("Proxy") == expected
-        for handler in handlers
+        isinstance(handler, dict) and handler.get("Proxy") == expected for handler in handlers
     )
+
 
 def _reset_tailscale():
     result = subprocess.run(
@@ -90,9 +83,7 @@ def _reset_tailscale():
     )
     if result.returncode:
         detail = (result.stderr or result.stdout).strip()
-        raise RuntimeError(
-            "tailscale serve reset failed" + (f": {detail}" if detail else "")
-        )
+        raise RuntimeError("tailscale serve reset failed" + (f": {detail}" if detail else ""))
 
 
 def disable_tailscale(settings):
@@ -115,10 +106,7 @@ def enable_tailscale(settings):
     )
     if result.returncode:
         detail = (result.stderr or result.stdout).strip()
-        raise RuntimeError(
-            f"tailscale serve --bg --yes {settings.port} failed"
-            + (f": {detail}" if detail else "")
-        )
+        raise RuntimeError(f"tailscale serve --bg --yes {settings.port} failed" + (f": {detail}" if detail else ""))
     try:
         if not _tailscale_proxies_to(_tailscale_status(), settings.port):
             raise RuntimeError("Tailscale Serve did not expose the OMP Deck listener")
@@ -126,9 +114,7 @@ def enable_tailscale(settings):
         try:
             _reset_tailscale()
         except Exception as cleanup_error:
-            raise RuntimeError(
-                f"{error}; Tailscale rollback failed: {cleanup_error}"
-            ) from error
+            raise RuntimeError(f"{error}; Tailscale rollback failed: {cleanup_error}") from error
         raise
     return True
 
@@ -187,9 +173,7 @@ def setup(*, tailscale=False):
             except Exception as cleanup_error:
                 rollback_errors.append(f"service: {cleanup_error}")
         if rollback_errors:
-            raise RuntimeError(
-                f"{error}; setup rollback failed: {'; '.join(rollback_errors)}"
-            ) from error
+            raise RuntimeError(f"{error}; setup rollback failed: {'; '.join(rollback_errors)}") from error
         raise
     discard_plugin_backup(plugin_backup)
     print_pairing(secret)
@@ -278,6 +262,7 @@ def _auth_healthy(settings):
         return False
     return True
 
+
 def validate_config():
     path = config_path()
     settings = load_settings(path)
@@ -323,9 +308,7 @@ def main(argv=None):
     commands.add_parser("doctor", help="check configuration and integrations")
     commands.add_parser("serve", help="run OMP Deck in the foreground")
     commands.add_parser("purge", help="remove service, plugin, configuration, and state")
-    migrate_parser = commands.add_parser(
-        "migrate", help="plan or apply legacy session and cursor migration"
-    )
+    migrate_parser = commands.add_parser("migrate", help="plan or apply legacy session and cursor migration")
     migrate_parser.add_argument(
         "--apply",
         action="store_true",
@@ -334,9 +317,7 @@ def main(argv=None):
 
     service = commands.add_parser("service", help="manage the systemd user service")
     service_actions = service.add_subparsers(dest="service_action", required=True)
-    service_actions.add_parser(
-        "install", help="generate, enable, and start the service"
-    )
+    service_actions.add_parser("install", help="generate, enable, and start the service")
     for action in ("status", "restart", "remove"):
         service_actions.add_parser(action)
 

@@ -11,12 +11,12 @@ import json
 import os
 import stat
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 
-class RecoveryStatus(str, Enum):
+class RecoveryStatus(StrEnum):
     OK = "ok"
     MISSING = "missing"
     ROTATED = "rotated"
@@ -25,7 +25,7 @@ class RecoveryStatus(str, Enum):
     UNSAFE_PATH = "unsafe_path"
 
 
-class RecoveryIssue(str, Enum):
+class RecoveryIssue(StrEnum):
     MALFORMED_JSON = "malformed_json"
     NON_OBJECT_JSON = "non_object_json"
     LINE_TOO_LONG = "line_too_long"
@@ -71,9 +71,7 @@ class JsonlRecoveryReader:
         if not root.is_dir():
             raise ValueError("session_root must be a directory")
         relative = Path(relative_path)
-        if relative.is_absolute() or not relative.parts or any(
-            part in ("", ".", "..") for part in relative.parts
-        ):
+        if relative.is_absolute() or not relative.parts or any(part in ("", ".", "..") for part in relative.parts):
             raise ValueError("relative_path must stay beneath session_root")
 
         self._root = root
@@ -134,9 +132,7 @@ class JsonlRecoveryReader:
                 raise _NotRegularFile
             # Revalidate the directory entry after open.  This detects a replace
             # race rather than silently reading an unlinked or different file.
-            path_stat = os.stat(
-                self._parts[-1], dir_fd=directory_fd, follow_symlinks=False
-            )
+            path_stat = os.stat(self._parts[-1], dir_fd=directory_fd, follow_symlinks=False)
             if (path_stat.st_dev, path_stat.st_ino) != (
                 file_stat.st_dev,
                 file_stat.st_ino,
@@ -160,9 +156,7 @@ class JsonlRecoveryReader:
         except FileNotFoundError:
             return self._result(RecoveryStatus.MISSING)
         except _NotRegularFile:
-            return self._result(
-                RecoveryStatus.UNSAFE_PATH, issues=[RecoveryIssue.NOT_REGULAR_FILE]
-            )
+            return self._result(RecoveryStatus.UNSAFE_PATH, issues=[RecoveryIssue.NOT_REGULAR_FILE])
         except (_UnsafePath, OSError) as error:
             issue = RecoveryIssue.PATH_CHANGED if isinstance(error, _UnsafePath) else RecoveryIssue.IO_ERROR
             return self._result(RecoveryStatus.UNSAFE_PATH, issues=[issue])
@@ -180,9 +174,7 @@ class JsonlRecoveryReader:
 
         if before.st_size > self._max_file_bytes:
             os.close(fd)
-            return self._result(
-                RecoveryStatus.DEGRADED, issues=[RecoveryIssue.FILE_TOO_LARGE]
-            )
+            return self._result(RecoveryStatus.DEGRADED, issues=[RecoveryIssue.FILE_TOO_LARGE])
 
         amount = min(self._max_read_bytes, before.st_size - self._offset)
         if amount <= 0:

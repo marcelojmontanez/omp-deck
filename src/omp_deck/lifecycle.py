@@ -1,18 +1,16 @@
 import json
 import os
-import subprocess
 import shutil
-from dataclasses import dataclass
+import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
-import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from .installation_paths import (
-    MANIFEST_NAME,
-    OWNERSHIP_MARKER,
     InstallationPaths,
     has_ownership_marker,
     installation_paths,
@@ -25,6 +23,7 @@ from .installation_paths import (
 PLUGIN_VERSION = "1.0.0"
 PLUGIN_NAME = "omp-deck"
 PLUGIN_ROOT = Path(__file__).resolve().parent / "plugin"
+
 
 @dataclass(frozen=True)
 class RootSnapshot:
@@ -65,24 +64,26 @@ def capture_service_state(*, settings=None, config_path=None, runner=None):
     unit, unit_mode = _file_snapshot(paths.unit_path)
     manifest, manifest_mode = _file_snapshot(paths.manifest_path)
     config, config_mode = _file_snapshot(paths.config_path)
-    enabled = runner(
-        ["systemctl", "--user", "is-enabled", "omp-deck.service"],
-        check=False,
-        capture_output=True,
-    ).returncode == 0
-    active = runner(
-        ["systemctl", "--user", "is-active", "omp-deck.service"],
-        check=False,
-        capture_output=True,
-    ).returncode == 0
+    enabled = (
+        runner(
+            ["systemctl", "--user", "is-enabled", "omp-deck.service"],
+            check=False,
+            capture_output=True,
+        ).returncode
+        == 0
+    )
+    active = (
+        runner(
+            ["systemctl", "--user", "is-active", "omp-deck.service"],
+            check=False,
+            capture_output=True,
+        ).returncode
+        == 0
+    )
     roots = []
-    for root in dict.fromkeys(
-        (paths.install_root, paths.config_root, paths.state_root)
-    ):
+    for root in dict.fromkeys((paths.install_root, paths.config_root, paths.state_root)):
         existed = root.exists() and not root.is_symlink()
-        entries = (
-            tuple(sorted(path.name for path in root.iterdir())) if existed else ()
-        )
+        entries = tuple(sorted(path.name for path in root.iterdir())) if existed else ()
         roots.append(
             RootSnapshot(
                 root,
@@ -183,11 +184,7 @@ def _plugin_record(settings, *, runner=None):
         return None
     try:
         records = json.loads(result.stdout).get("npm", [])
-        return next(
-            item
-            for item in records
-            if isinstance(item, dict) and item.get("name") == PLUGIN_NAME
-        )
+        return next(item for item in records if isinstance(item, dict) and item.get("name") == PLUGIN_NAME)
     except (AttributeError, StopIteration, TypeError, json.JSONDecodeError):
         return None
 
@@ -329,11 +326,7 @@ def install_plugin(settings, *, runner=run):
         checks = None
     plugin_check = (
         next(
-            (
-                item
-                for item in checks
-                if isinstance(item, dict) and item.get("name") == f"plugin:{PLUGIN_NAME}"
-            ),
+            (item for item in checks if isinstance(item, dict) and item.get("name") == f"plugin:{PLUGIN_NAME}"),
             None,
         )
         if isinstance(checks, list)
@@ -401,9 +394,7 @@ def check_health(settings, *, timeout=5.0):
     if timeout <= 0:
         raise ValueError("health timeout must be positive")
     url = f"http://{settings.host}:{settings.port}/healthz"
-    request = urllib.request.Request(
-        url, headers={"Host": f"{settings.host}:{settings.port}"}
-    )
+    request = urllib.request.Request(url, headers={"Host": f"{settings.host}:{settings.port}"})
     deadline = time.monotonic() + timeout
     last_error = None
     while True:
@@ -411,9 +402,7 @@ def check_health(settings, *, timeout=5.0):
         if remaining <= 0:
             break
         try:
-            with urllib.request.urlopen(
-                request, timeout=min(1.0, remaining)
-            ) as response:
+            with urllib.request.urlopen(request, timeout=min(1.0, remaining)) as response:
                 payload = json.loads(response.read())
             required = {"ok", "configuration", "authentication"}
             if (
@@ -423,9 +412,7 @@ def check_health(settings, *, timeout=5.0):
                 and all(payload[key] is True for key in required)
             ):
                 return payload
-            last_error = RuntimeError(
-                "OMP Deck health check reported an unhealthy service"
-            )
+            last_error = RuntimeError("OMP Deck health check reported an unhealthy service")
         except (
             OSError,
             urllib.error.URLError,

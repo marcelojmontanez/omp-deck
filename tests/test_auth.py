@@ -6,11 +6,11 @@ import unittest
 from pathlib import Path
 
 from omp_deck.auth import (
-    AuthManager,
-    AuthError,
-    AuthenticationFailed,
-    AuthStateCorrupt,
     COOKIE_NAME,
+    AuthenticationFailed,
+    AuthError,
+    AuthManager,
+    AuthStateCorrupt,
     PairingFailed,
     PairingRateLimited,
     validate_auth_state,
@@ -205,10 +205,7 @@ class AuthManagerTests(unittest.TestCase):
         state_path = Path(self.temp.name) / "auth.json"
         state = json.loads(state_path.read_text())
         record = next(iter(state["devices"].values()))
-        state["devices"] = {
-            f"{index:032x}": dict(record)
-            for index in range(1025)
-        }
+        state["devices"] = {f"{index:032x}": dict(record) for index in range(1025)}
         state_path.write_text(json.dumps(state))
 
         with self.assertRaises(AuthStateCorrupt):
@@ -259,7 +256,6 @@ class AuthManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "lock is unsafe"):
             validate_auth_state(self.temp.name)
 
-
     def test_cross_process_pairing_preserves_existing_devices(self):
         stale = AuthManager(self.temp.name, now=self.wall, monotonic=self.monotonic)
         secret = self.auth.begin_pairing()
@@ -286,6 +282,7 @@ class AuthManagerTests(unittest.TestCase):
 
             self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o755)
             self.assertFalse((target / "auth.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

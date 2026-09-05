@@ -6,10 +6,9 @@ from pathlib import Path
 from typing import Any
 
 from ._terminal_discovery import terminal_id
-from .read_cursors import CursorStore
 from .installation_paths import OWNERSHIP_MARKER, has_ownership_marker, installation_paths
+from .read_cursors import CursorStore
 from .registry_store import RegistryStore
-
 
 _LEGACY_METADATA = re.compile(r"[0-9a-f-]{36}\.\d+\.[^.]+\.sock\.json")
 _MAX_METADATA_BYTES = 64 * 1024
@@ -130,12 +129,7 @@ def _read_owned_json(path: Path, limit: int, *, allow_legacy_readable: bool = Fa
     try:
         info = os.fstat(descriptor)
         unsafe_permissions = info.st_mode & (0o002 if allow_legacy_readable else 0o077)
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or info.st_uid != os.geteuid()
-            or unsafe_permissions
-            or info.st_size > limit
-        ):
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or unsafe_permissions or info.st_size > limit:
             return None
         raw = os.read(descriptor, limit + 1)
         if len(raw) > limit:
@@ -145,6 +139,7 @@ def _read_owned_json(path: Path, limit: int, *, allow_legacy_readable: bool = Fa
         return None
     finally:
         os.close(descriptor)
+
 
 def _owned_file_safe(path: Path, *, allow_legacy_readable: bool = False) -> bool:
     try:
@@ -167,11 +162,7 @@ def _validate_adoptable_state_root(settings) -> None:
         raise RuntimeError("legacy state root is not an approved Deck path")
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     root_info = root.stat(follow_symlinks=False)
-    if (
-        not stat.S_ISDIR(root_info.st_mode)
-        or root_info.st_uid != os.geteuid()
-        or root_info.st_mode & 0o077
-    ):
+    if not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid != os.geteuid() or root_info.st_mode & 0o077:
         raise RuntimeError("legacy state root has unsafe ownership or permissions")
     allowed_directories = {"sockets", "uploads"}
     allowed_files = {
@@ -205,11 +196,7 @@ def _validate_adoptable_state_root(settings) -> None:
                     if entry.is_dir(follow_symlinks=False) and entry.name in allowed_directories:
                         pending.append(path)
                     elif entry.is_file(follow_symlinks=False) and (
-                        entry.name in allowed_files
-                        or (
-                            _RECOVERY_FILE.fullmatch(entry.name)
-                            and _owned_file_safe(path)
-                        )
+                        entry.name in allowed_files or (_RECOVERY_FILE.fullmatch(entry.name) and _owned_file_safe(path))
                     ):
                         continue
                     else:

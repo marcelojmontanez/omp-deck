@@ -6,8 +6,8 @@ from http.cookies import SimpleCookie
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from .auth import COOKIE_NAME
 from .attachments import detect_image_mime
+from .auth import COOKIE_NAME
 
 
 def read_json_request(handler, max_bytes=64 * 1024):
@@ -36,18 +36,13 @@ def decoded_segment(value, name):
     if not value or len(value) > 128 or "/" in value or "\\" in value:
         raise ValueError(f"invalid {name}")
     return value
+
+
 def decoded_project(value):
     value = unquote(value)
-    if (
-        not value
-        or len(value) > 240
-        or "\\" in value
-        or any(ord(character) < 32 for character in value)
-    ):
+    if not value or len(value) > 240 or "\\" in value or any(ord(character) < 32 for character in value):
         raise ValueError("invalid project")
     return value
-
-
 
 
 def bounded_text(value, name, max_length):
@@ -106,7 +101,7 @@ def _decode_image(attachment):
     prefix = f"data:{mime_type};base64,"
     if not encoded.startswith(prefix):
         raise ValueError("invalid image attachment")
-    payload = encoded[len(prefix):]
+    payload = encoded[len(prefix) :]
     try:
         raw = base64.b64decode(payload, validate=True)
     except (ValueError, binascii.Error):
@@ -210,7 +205,7 @@ def request_host(headers, allowed_hosts):
     value = headers.get("Host", "")
     try:
         parsed = urlparse(f"//{value}")
-        parsed.port
+        _ = parsed.port
     except ValueError:
         return None
     if not _valid_host_value(value, parsed, allowed_hosts):
@@ -219,15 +214,20 @@ def request_host(headers, allowed_hosts):
 
 
 def _valid_host_value(value, parsed, allowed_hosts):
-    return bool(value) and value.strip() == value and "," not in value and (
-        not any(ord(character) < 33 or ord(character) == 127 for character in value)
-        and parsed.username is None
-        and parsed.password is None
-        and not parsed.path
-        and not parsed.params
-        and not parsed.query
-        and not parsed.fragment
-        and parsed.hostname in allowed_hosts
+    return (
+        bool(value)
+        and value.strip() == value
+        and "," not in value
+        and (
+            not any(ord(character) < 33 or ord(character) == 127 for character in value)
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.path
+            and not parsed.params
+            and not parsed.query
+            and not parsed.fragment
+            and parsed.hostname in allowed_hosts
+        )
     )
 
 

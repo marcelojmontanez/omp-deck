@@ -1,11 +1,11 @@
 import json
+import multiprocessing
 import os
 import stat
-import multiprocessing
 import tempfile
 import threading
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
@@ -16,7 +16,6 @@ from omp_deck.collab_store import (
     CollabStoreCorruptionError,
     CollabStoreValidationError,
 )
-
 
 ROOM = "room_identifier_123"
 KEY = b"k" * 32
@@ -39,7 +38,7 @@ class CollabStoreTests(unittest.TestCase):
         self.root = Path(self.temp.name) / "state"
         self.store = CollabStore(
             self.root,
-            clock=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
+            clock=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
         )
 
     def tearDown(self):
@@ -110,8 +109,7 @@ class CollabStoreTests(unittest.TestCase):
         start = context.Event()
         failures = context.Queue()
         processes = [
-            context.Process(target=_save_in_process, args=(self.root, index, start, failures))
-            for index in range(12)
+            context.Process(target=_save_in_process, args=(self.root, index, start, failures)) for index in range(12)
         ]
         for process in processes:
             process.start()
@@ -125,6 +123,7 @@ class CollabStoreTests(unittest.TestCase):
             {item["sessionId"] for item in self.store.list()},
             {f"process-{index}" for index in range(12)},
         )
+
     def test_chmod_error_is_not_quarantined(self):
         self.store.put("session", WRITE_LINK)
         with mock.patch("omp_deck.collab_store.os.chmod", side_effect=PermissionError("denied")):
@@ -162,14 +161,16 @@ class CollabStoreTests(unittest.TestCase):
         self.root.mkdir(mode=0o700, exist_ok=True)
         document = {
             "version": 1,
-            "records": [{
-                "sessionId": "session",
-                "link": WRITE_LINK,
-                "relay": "wss://relay.example/\ud800",
-                "room": ROOM,
-                "createdAt": "2026-01-02T03:04:05Z",
-                "updatedAt": "2026-01-02T03:04:05Z",
-            }],
+            "records": [
+                {
+                    "sessionId": "session",
+                    "link": WRITE_LINK,
+                    "relay": "wss://relay.example/\ud800",
+                    "room": ROOM,
+                    "createdAt": "2026-01-02T03:04:05Z",
+                    "updatedAt": "2026-01-02T03:04:05Z",
+                }
+            ],
         }
         self.store.path.write_text(json.dumps(document), encoding="utf-8")
         with self.assertRaises(CollabStoreCorruptionError):

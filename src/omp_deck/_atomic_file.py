@@ -1,7 +1,6 @@
 import os
 import secrets
 
-
 _TEMPORARY_ATTEMPTS = 16
 
 
@@ -15,10 +14,7 @@ def replace_bytes(directory_fd: int, target_name: str, payload: bytes) -> None:
             try:
                 descriptor = os.open(
                     candidate,
-                    os.O_WRONLY
-                    | os.O_CREAT
-                    | os.O_EXCL
-                    | getattr(os, "O_NOFOLLOW", 0),
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
                     0o600,
                     dir_fd=directory_fd,
                 )

@@ -37,17 +37,25 @@ class MigrationTests(unittest.TestCase):
 
     def write_legacy_state(self):
         metadata = self.sockets / f"{self.session_id}.123.connection.sock.json"
-        metadata.write_text(json.dumps({
-            "sessionId": self.session_id,
-            "cwd": str(self.project),
-            "title": "Existing terminal session",
-        }))
+        metadata.write_text(
+            json.dumps(
+                {
+                    "sessionId": self.session_id,
+                    "cwd": str(self.project),
+                    "title": "Existing terminal session",
+                }
+            )
+        )
         metadata.chmod(0o600)
         cursors = self.state / "read-cursors.json"
-        cursors.write_text(json.dumps({
-            "version": 1,
-            "sessions": {self.session_id: {"eventId": "legacy-event-7"}},
-        }))
+        cursors.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "sessions": {self.session_id: {"eventId": "legacy-event-7"}},
+                }
+            )
+        )
         cursors.chmod(0o664)
 
     def test_plan_is_read_only_and_apply_is_idempotent(self):
@@ -78,6 +86,7 @@ class MigrationTests(unittest.TestCase):
         )
         self.assertEqual(repeated["sessionsImported"], 0)
         self.assertEqual(len(RegistryStore(self.state / "registry.json").load()), 1)
+
     def test_apply_accepts_authentication_lock_created_by_auth_manager(self):
         auth = self.state / "auth.json"
         auth.write_text('{"version":1}', encoding="utf-8")
@@ -100,7 +109,6 @@ class MigrationTests(unittest.TestCase):
 
         self.assertEqual(migration_plan(self.settings)["legacySessions"], 0)
         self.assertEqual(apply_migration(self.settings)["sessionsImported"], 0)
-
 
     def test_apply_accepts_private_deck_recovery_artifacts(self):
         names = (
@@ -135,7 +143,6 @@ class MigrationTests(unittest.TestCase):
 
         self.assertFalse((self.state / ".omp-deck-owned").exists())
 
-
     def test_apply_refuses_to_claim_unknown_legacy_state(self):
         (self.state / "unrelated-private-data").write_text("do not delete")
 
@@ -153,6 +160,7 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(self.state.stat().st_mode & 0o777, 0o777)
         self.assertFalse((self.state / ".omp-deck-owned").exists())
         self.assertFalse((self.state / "registry.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

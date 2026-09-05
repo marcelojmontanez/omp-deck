@@ -45,13 +45,14 @@ class _Correlation:
 
 
 class FakeRpcClient:
-    instances: list["FakeRpcClient"] = []
+    instances: list[FakeRpcClient] = []
     fail_start = False
     fail_stop = False
 
     fail_get_state_once: BaseException | None = None
     prompt_entered: dict[str, Event] = {}
     prompt_release: dict[str, Event] = {}
+
     def __init__(self, **kwargs):
         self.kwargs = kwargs
         self.listeners = {kind: [] for kind in ("ready", "event", "ui", "protocol", "extension")}
@@ -66,11 +67,20 @@ class FakeRpcClient:
         self.listeners[kind].append(listener)
         return lambda: self.listeners[kind].remove(listener)
 
-    def on_ready(self, listener): return self._on("ready", listener)
-    def on_event(self, listener): return self._on("event", listener)
-    def on_ui_request(self, listener): return self._on("ui", listener)
-    def on_protocol_error(self, listener): return self._on("protocol", listener)
-    def on_extension_error(self, listener): return self._on("extension", listener)
+    def on_ready(self, listener):
+        return self._on("ready", listener)
+
+    def on_event(self, listener):
+        return self._on("event", listener)
+
+    def on_ui_request(self, listener):
+        return self._on("ui", listener)
+
+    def on_protocol_error(self, listener):
+        return self._on("protocol", listener)
+
+    def on_extension_error(self, listener):
+        return self._on("extension", listener)
 
     def start(self):
         if type(self).fail_start:
@@ -84,6 +94,7 @@ class FakeRpcClient:
         self.stopped = True
         if type(self).fail_stop:
             raise RuntimeError("stop failed")
+
     def get_state(self):
         if self.get_state_entered is not None:
             self.get_state_entered.set()
@@ -94,9 +105,15 @@ class FakeRpcClient:
             type(self).fail_get_state_once = None
             raise failure
         return self.state
-    def get_messages(self): return ({"id": "message-1", "role": "assistant", "content": "ready"},)
-    def get_todos(self): return ()
-    def get_subagents(self): return ()
+
+    def get_messages(self):
+        return ({"id": "message-1", "role": "assistant", "content": "ready"},)
+
+    def get_todos(self):
+        return ()
+
+    def get_subagents(self):
+        return ()
 
     def _call(self, name, *args, **kwargs):
         self.calls.append((name, args, kwargs))
@@ -109,30 +126,46 @@ class FakeRpcClient:
         release = type(self).prompt_release.get(message)
         if release is not None:
             release.wait(timeout=2)
-    def follow_up(self, *args, **kwargs): return self._call("follow_up", *args, **kwargs)
-    def abort(self): return self._call("abort")
+
+    def follow_up(self, *args, **kwargs):
+        return self._call("follow_up", *args, **kwargs)
+
+    def abort(self):
+        return self._call("abort")
+
     def set_model(self, *args):
         self._call("set_model", *args)
         return _Correlation(self.state.session_id, _Outcome.COMPLETE)
-    def set_thinking_level(self, *args): return self._call("set_thinking_level", *args)
+
+    def set_thinking_level(self, *args):
+        return self._call("set_thinking_level", *args)
+
     def branch(self, *args):
         self._call("branch", *args)
         self.state = dataclasses.replace(
             self.state, session_id="omp-branched", session_file="/sessions/omp-branched.jsonl"
         )
         return _Correlation("omp-branched", _Outcome.COMPLETE)
+
     def switch_session(self, *args):
         self._call("switch_session", *args)
         self.state = dataclasses.replace(
             self.state, session_id="omp-switched", session_file="/sessions/omp-switched.jsonl"
         )
         return _Correlation("omp-switched", _Outcome.COMPLETE)
+
     def compact(self, *args):
         self._call("compact", *args)
         return _Outcome.COMPLETE
-    def send_ui_value(self, *args): return self._call("send_ui_value", *args)
-    def send_ui_confirmation(self, *args): return self._call("send_ui_confirmation", *args)
-    def cancel_ui_request(self, *args, **kwargs): return self._call("cancel_ui_request", *args, **kwargs)
+
+    def send_ui_value(self, *args):
+        return self._call("send_ui_value", *args)
+
+    def send_ui_confirmation(self, *args):
+        return self._call("send_ui_confirmation", *args)
+
+    def cancel_ui_request(self, *args, **kwargs):
+        return self._call("cancel_ui_request", *args, **kwargs)
 
     def emit_event(self, value):
         for listener in tuple(self.listeners["event"]):
@@ -207,21 +240,16 @@ class TestRpcSessionManager(unittest.TestCase):
         self.assertEqual(record["recoveryMetadata"], {"sessionFile": "/sessions/omp-official-1.jsonl"})
         self.assertTrue(record["desiredRpcRunning"])
         self.assertEqual(session["transport"]["status"], "connected")
+
     def test_completed_launch_request_is_not_replayed_after_manager_restart(self):
-        first = self.manager.launch_request(
-            "durable-launch", "project", title="RPC test"
-        )
+        first = self.manager.launch_request("durable-launch", "project", title="RPC test")
         self.manager.close()
         self.manager = RpcSessionManager(self.settings, FleetModel(), self.registry)
 
-        duplicate = self.manager.launch_request(
-            "durable-launch", "project", title="RPC test"
-        )
+        duplicate = self.manager.launch_request("durable-launch", "project", title="RPC test")
 
         self.assertEqual(duplicate["status"], "accepted")
-        self.assertEqual(
-            duplicate["session"]["id"], first["session"]["id"]
-        )
+        self.assertEqual(duplicate["session"]["id"], first["session"]["id"])
         self.assertEqual(len(FakeRpcClient.instances), 1)
 
     def test_failed_created_launch_preserves_directory_and_durable_outcome(self):
@@ -278,10 +306,19 @@ class TestRpcSessionManager(unittest.TestCase):
         )
         results = {action: self.manager.command(session_id, action, payload) for action, payload in commands}
 
-        self.assertEqual([call[0] for call in client.calls], [
-            "prompt", "follow_up", "abort", "set_model", "set_thinking_level",
-            "branch", "switch_session", "compact",
-        ])
+        self.assertEqual(
+            [call[0] for call in client.calls],
+            [
+                "prompt",
+                "follow_up",
+                "abort",
+                "set_model",
+                "set_thinking_level",
+                "branch",
+                "switch_session",
+                "compact",
+            ],
+        )
         self.assertEqual(client.calls[0][2]["streaming_behavior"], "steer")
         self.assertEqual(results["setModel"]["result"], {"session_id": "omp-official-1", "outcome": "complete"})
         self.assertEqual(results["branch"]["result"]["session_id"], "omp-branched")
@@ -323,9 +360,7 @@ class TestRpcSessionManager(unittest.TestCase):
         runtime = self.manager._runtime(session_id)
         client = FakeRpcClient.instances[-1]
 
-        with patch.object(
-            self.registry, "update", side_effect=OSError("disk full")
-        ):
+        with patch.object(self.registry, "update", side_effect=OSError("disk full")):
             with self.assertRaisesRegex(OSError, "disk full"):
                 self.manager.shutdown(session_id)
 
@@ -385,7 +420,6 @@ class TestRpcSessionManager(unittest.TestCase):
             worker.join(timeout=1)
         self.manager.close()
 
-
     def test_startup_recovery_resumes_official_id_in_original_project(self):
         original = self.launch()
         self.manager.close()
@@ -405,9 +439,7 @@ class TestRpcSessionManager(unittest.TestCase):
         self.manager.command(session_id, "branch", {"entryId": "entry-7"})
         record = self.registry.load()[0]
         self.assertEqual(record["ompSessionId"], "omp-branched")
-        self.assertEqual(
-            record["recoveryMetadata"], {"sessionFile": "/sessions/omp-branched.jsonl"}
-        )
+        self.assertEqual(record["recoveryMetadata"], {"sessionFile": "/sessions/omp-branched.jsonl"})
 
         self.manager.close()
         recovering = RpcSessionManager(self.settings, FleetModel(), self.registry)
@@ -420,14 +452,10 @@ class TestRpcSessionManager(unittest.TestCase):
 
     def test_switch_identity_is_persisted_and_recovered(self):
         session_id = self.launch()["id"]
-        self.manager.command(
-            session_id, "switchSession", {"sessionPath": "/sessions/other.jsonl"}
-        )
+        self.manager.command(session_id, "switchSession", {"sessionPath": "/sessions/other.jsonl"})
         record = self.registry.load()[0]
         self.assertEqual(record["ompSessionId"], "omp-switched")
-        self.assertEqual(
-            record["recoveryMetadata"], {"sessionFile": "/sessions/omp-switched.jsonl"}
-        )
+        self.assertEqual(record["recoveryMetadata"], {"sessionFile": "/sessions/omp-switched.jsonl"})
 
         self.manager.close()
         recovering = RpcSessionManager(self.settings, FleetModel(), self.registry)
@@ -478,9 +506,7 @@ class TestRpcSessionManager(unittest.TestCase):
         self.assertTrue(original.stopped)
         self.assertEqual(len(FakeRpcClient.instances), 2)
         replacement = FakeRpcClient.instances[-1]
-        self.assertEqual(
-            replacement.kwargs["extra_args"], ("--resume", "omp-official-1")
-        )
+        self.assertEqual(replacement.kwargs["extra_args"], ("--resume", "omp-official-1"))
         self.assertEqual(self.model.get(session_id)["id"], session_id)
         self.assertEqual(
             self.model.get(session_id)["transport"]["status"],
@@ -510,6 +536,7 @@ class TestRpcSessionManager(unittest.TestCase):
         self.assertEqual(self.model.get(second_id)["thinking"], "low")
         self.assertEqual(self.model.get(first_id)["thinking"], "medium")
         first_client.get_state_release.set()
+
     def test_failed_reconnect_is_retried_on_next_connected_refresh(self):
         session_id = self.launch()["id"]
         FakeRpcClient.fail_get_state_once = RpcProcessExitError("RPC process exited")
@@ -521,10 +548,7 @@ class TestRpcSessionManager(unittest.TestCase):
         FakeRpcClient.fail_start = False
         self.manager.request_refresh_connected()
         deadline = time.monotonic() + 2
-        while (
-            self.model.get(session_id)["transport"]["status"] != "connected"
-            and time.monotonic() < deadline
-        ):
+        while self.model.get(session_id)["transport"]["status"] != "connected" and time.monotonic() < deadline:
             time.sleep(0.01)
 
         self.assertEqual(self.model.get(session_id)["transport"]["status"], "connected")
@@ -563,9 +587,7 @@ class TestRpcSessionManager(unittest.TestCase):
             entered.set()
             release.wait()
 
-        scheduler = RpcRefreshScheduler(
-            refresh, lambda *_: None, lambda *_: None
-        )
+        scheduler = RpcRefreshScheduler(refresh, lambda *_: None, lambda *_: None)
         scheduler.request(["session"])
         self.assertTrue(entered.wait(timeout=1))
 
@@ -582,18 +604,13 @@ class TestRpcSessionManager(unittest.TestCase):
         payload = {"message": "hello"}
 
         first = self.manager.dispatch(session_id, "request-1", "sendMessage", payload)
-        duplicate = self.manager.dispatch(
-            session_id, "request-1", "sendMessage", dict(payload)
-        )
+        duplicate = self.manager.dispatch(session_id, "request-1", "sendMessage", dict(payload))
 
         self.assertEqual(duplicate, first)
-        self.assertEqual(
-            [call[0] for call in FakeRpcClient.instances[-1].calls], ["prompt"]
-        )
+        self.assertEqual([call[0] for call in FakeRpcClient.instances[-1].calls], ["prompt"])
         with self.assertRaisesRegex(ValueError, "already used for another command"):
-            self.manager.dispatch(
-                session_id, "request-1", "sendMessage", {"message": "different"}
-            )
+            self.manager.dispatch(session_id, "request-1", "sendMessage", {"message": "different"})
+
     def test_accepted_command_is_not_failed_when_followup_snapshot_is_busy(self):
         session_id = self.launch()["id"]
         adapter = self.manager._runtime(session_id).adapter
@@ -603,9 +620,7 @@ class TestRpcSessionManager(unittest.TestCase):
             "snapshot",
             side_effect=AdapterError("state kept changing", kind="snapshot_busy"),
         ):
-            result = self.manager.dispatch(
-                session_id, "accepted-before-snapshot", "sendMessage", {"message": "hello"}
-            )
+            result = self.manager.dispatch(session_id, "accepted-before-snapshot", "sendMessage", {"message": "hello"})
 
         self.assertEqual(result["status"], "accepted")
         self.assertEqual(
@@ -615,23 +630,15 @@ class TestRpcSessionManager(unittest.TestCase):
 
     def test_completed_request_is_not_replayed_after_manager_restart(self):
         session_id = self.launch()["id"]
-        first = self.manager.dispatch(
-            session_id, "durable-request", "sendMessage", {"message": "once"}
-        )
+        first = self.manager.dispatch(session_id, "durable-request", "sendMessage", {"message": "once"})
         self.manager.close()
         self.manager = RpcSessionManager(self.settings, FleetModel(), self.registry)
 
-        duplicate = self.manager.dispatch(
-            session_id, "durable-request", "sendMessage", {"message": "once"}
-        )
+        duplicate = self.manager.dispatch(session_id, "durable-request", "sendMessage", {"message": "once"})
 
         self.assertEqual(duplicate, first)
         self.assertEqual(
-            sum(
-                call[0] == "prompt"
-                for client in FakeRpcClient.instances
-                for call in client.calls
-            ),
+            sum(call[0] == "prompt" for client in FakeRpcClient.instances for call in client.calls),
             1,
         )
         with self.assertRaises(SessionCommandConflictError):
@@ -704,16 +711,10 @@ class TestRpcSessionManager(unittest.TestCase):
         results = []
 
         def dispatch(session_id, request_id, message):
-            results.append(
-                self.manager.dispatch(
-                    session_id, request_id, "sendMessage", {"message": message}
-                )
-            )
+            results.append(self.manager.dispatch(session_id, request_id, "sendMessage", {"message": message}))
 
         first = Thread(target=dispatch, args=(first_id, "request-1", "first"))
-        same = Thread(
-            target=dispatch, args=(first_id, "request-2", "second-same")
-        )
+        same = Thread(target=dispatch, args=(first_id, "request-2", "second-same"))
         other = Thread(target=dispatch, args=(second_id, "request-3", "other"))
         first.start()
         self.assertTrue(first_entered.wait(timeout=1))
@@ -756,7 +757,6 @@ class TestRpcSessionManager(unittest.TestCase):
         FakeRpcClient.fail_stop = False
         self.manager.close()
         self.assertIsNone(self.manager._runtime_or_none("deck-stable-id"))
-
 
 
 if __name__ == "__main__":

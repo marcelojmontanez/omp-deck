@@ -11,17 +11,27 @@ import json
 import os
 import re
 import struct
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any
 from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
 from ._collab_validation import (
-    GUEST_FRAME_TYPES,
-    HOST_FRAME_TYPES,
+    GUEST_FRAME_TYPES as GUEST_FRAME_TYPES,
+)
+from ._collab_validation import (
+    HOST_FRAME_TYPES as HOST_FRAME_TYPES,
+)
+from ._collab_validation import (
     validate_frame,
-    validate_guest_frame,
-    validate_host_frame,
+)
+from ._collab_validation import (
+    validate_guest_frame as validate_guest_frame,
+)
+from ._collab_validation import (
+    validate_host_frame as validate_host_frame,
 )
 
 COLLAB_PROTO = 3
@@ -42,7 +52,6 @@ _B64_RE = re.compile(r"[A-Za-z0-9_-]+\Z")
 _BARE_RE = re.compile(r"([A-Za-z0-9_-]{10,64})[.#]([A-Za-z0-9_-]+)\Z")
 _PATH_RE = re.compile(r"/r/([A-Za-z0-9_-]{10,64})(?:\.([A-Za-z0-9_-]+))?\Z")
 _LOCAL_HOSTS = frozenset(("localhost", "127.0.0.1", "::1"))
-
 
 
 def b64url_encode(data: bytes) -> str:
@@ -79,7 +88,6 @@ class ParsedCollabLink:
         if self.write_token is not None and len(self.write_token) != WRITE_TOKEN_BYTES:
             raise ValueError("write token must be 16 bytes")
         object.__setattr__(self, "read_only", self.write_token is None)
-
 
     def __repr__(self) -> str:
         return (
@@ -140,8 +148,10 @@ def parse_collab_link(link: str) -> ParsedCollabLink:
         # Viewer routes are deployment-defined.  They may be nested, but must
         # remain an ordinary absolute path; the complete relay link is carried
         # only in the fragment.
-        if not parts.path.startswith("/") or "\\" in parts.path or any(
-            segment in (".", "..") for segment in parts.path.split("/")
+        if (
+            not parts.path.startswith("/")
+            or "\\" in parts.path
+            or any(segment in (".", "..") for segment in parts.path.split("/"))
         ):
             raise ValueError("unsafe collab browser link path")
         return parse_collab_link(parts.fragment)
@@ -191,8 +201,6 @@ def unpack_envelope(data: bytes, *, max_frame_bytes: int = MAX_FRAME_BYTES) -> t
     return struct.unpack(">I", data[:4])[0], data[4:]
 
 
-
-
 def encode_frame(frame: Mapping[str, Any], *, max_frame_bytes: int = MAX_REPLICATED_PAYLOAD_BYTES) -> bytes:
     validated = validate_frame(frame)
     try:
@@ -204,11 +212,14 @@ def encode_frame(frame: Mapping[str, Any], *, max_frame_bytes: int = MAX_REPLICA
     return data
 
 
-def decode_frame(data: bytes, *, max_frame_bytes: int = MAX_REPLICATED_PAYLOAD_BYTES, direction: str | None = None) -> dict[str, Any]:
+def decode_frame(
+    data: bytes, *, max_frame_bytes: int = MAX_REPLICATED_PAYLOAD_BYTES, direction: str | None = None
+) -> dict[str, Any]:
     if not isinstance(data, bytes):
         raise TypeError("frame payload must be bytes")
     if len(data) > max_frame_bytes:
         raise ValueError("collab frame exceeds maximum size")
+
     def strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for name, value in pairs:
@@ -239,7 +250,9 @@ def seal_frame(key: bytes, frame: Mapping[str, Any], *, max_frame_bytes: int = M
     return iv + AESGCM(key).encrypt(iv, plaintext, None)
 
 
-def open_frame(key: bytes, sealed: bytes, *, max_frame_bytes: int = MAX_REPLICATED_PAYLOAD_BYTES, direction: str | None = None) -> dict[str, Any]:
+def open_frame(
+    key: bytes, sealed: bytes, *, max_frame_bytes: int = MAX_REPLICATED_PAYLOAD_BYTES, direction: str | None = None
+) -> dict[str, Any]:
     if not isinstance(key, bytes) or len(key) != ROOM_KEY_BYTES:
         raise ValueError("room key must be 32 bytes")
     if not isinstance(sealed, bytes):

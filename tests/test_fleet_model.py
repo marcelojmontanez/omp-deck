@@ -1,8 +1,8 @@
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
 
 from omp_deck.event_stream import EventJournal, ReplayUnavailableError
 from omp_deck.fleet_model import CAPABILITIES, FleetModel
@@ -64,9 +64,7 @@ class FleetModelTests(unittest.TestCase):
         model = FleetModel()
         model.load_record(self.make_record())
         self.assertTrue(
-            model.apply_rpc_snapshot(
-                "deck-1", instance_id="instance-a", generation=3, snapshot=self.make_snapshot()
-            )
+            model.apply_rpc_snapshot("deck-1", instance_id="instance-a", generation=3, snapshot=self.make_snapshot())
         )
         return model
 
@@ -78,17 +76,33 @@ class FleetModelTests(unittest.TestCase):
         self.assertEqual(
             set(session),
             {
-                "id", "ompSessionId", "title", "project", "state", "transport",
-                "capabilities", "messages", "todos", "subagents", "pendingUiRequest",
-                "unread", "updatedAt", "workingOn", "model", "thinking",
+                "id",
+                "ompSessionId",
+                "title",
+                "project",
+                "state",
+                "transport",
+                "capabilities",
+                "messages",
+                "todos",
+                "subagents",
+                "pendingUiRequest",
+                "unread",
+                "updatedAt",
+                "workingOn",
+                "model",
+                "thinking",
             },
         )
         self.assertEqual(session["project"], {"name": "deck", "path": "/work/deck"})
         self.assertEqual(
             session["transport"],
             {
-                "kind": "rpc", "status": "connected", "label": "Managed RPC",
-                "instanceId": "instance-a", "reason": None,
+                "kind": "rpc",
+                "status": "connected",
+                "label": "Managed RPC",
+                "instanceId": "instance-a",
+                "reason": None,
             },
         )
         self.assertEqual(session["ompSessionId"], "omp-live")
@@ -112,32 +126,39 @@ class FleetModelTests(unittest.TestCase):
 
     def test_record_reload_preserves_live_session_identity_and_adapter_progress(self):
         model = self.connected_model()
-        self.assertTrue(model.apply_adapter_event(
-            "deck-1", instance_id="instance-a", generation=3, event=self.event(1)
-        ))
+        self.assertTrue(
+            model.apply_adapter_event("deck-1", instance_id="instance-a", generation=3, event=self.event(1))
+        )
 
-        model.load_record(self.make_record(
-            title="Renamed", generation=4, ompSessionId="omp-from-record",
-            updatedAt="2026-09-03T13:00:00+00:00",
-        ))
+        model.load_record(
+            self.make_record(
+                title="Renamed",
+                generation=4,
+                ompSessionId="omp-from-record",
+                updatedAt="2026-09-03T13:00:00+00:00",
+            )
+        )
 
         session = model.get("deck-1")
         self.assertEqual(session["id"], "deck-1")
         self.assertEqual(session["transport"]["instanceId"], "instance-a")
         self.assertEqual(session["ompSessionId"], "omp-live")
         self.assertEqual(session["title"], "Renamed")
-        self.assertTrue(model.apply_adapter_event(
-            "deck-1", instance_id="instance-a", generation=4, event=self.event(2)
-        ))
+        self.assertTrue(
+            model.apply_adapter_event("deck-1", instance_id="instance-a", generation=4, event=self.event(2))
+        )
 
     def test_global_event_ids_are_monotonic_across_model_changes(self):
         model = self.connected_model()
-        self.assertTrue(model.apply_adapter_event(
-            "deck-1", instance_id="instance-a", generation=3, event=self.event(1)
-        ))
+        self.assertTrue(
+            model.apply_adapter_event("deck-1", instance_id="instance-a", generation=3, event=self.event(1))
+        )
         model.set_transport(
-            "deck-1", instance_id="instance-a", generation=3,
-            status="disconnected", reason="closed",
+            "deck-1",
+            instance_id="instance-a",
+            generation=3,
+            status="disconnected",
+            reason="closed",
         )
 
         events = model.journal.replay_after(0)
@@ -151,27 +172,30 @@ class FleetModelTests(unittest.TestCase):
     def test_rejects_duplicate_stale_instance_and_stale_generation_events(self):
         model = self.connected_model()
         accepted = self.event(1)
-        self.assertTrue(model.apply_adapter_event(
-            "deck-1", instance_id="instance-a", generation=3, event=accepted
-        ))
+        self.assertTrue(model.apply_adapter_event("deck-1", instance_id="instance-a", generation=3, event=accepted))
         event_id = model.journal.latest_id
 
-        self.assertFalse(model.apply_adapter_event(
-            "deck-1", instance_id="instance-a", generation=3, event=accepted
-        ))
-        self.assertFalse(model.apply_adapter_event(
-            "deck-1", instance_id="instance-old", generation=3, event=self.event(2)
-        ))
-        self.assertFalse(model.apply_adapter_event(
-            "deck-1", instance_id="instance-a", generation=2, event=self.event(2)
-        ))
-        self.assertFalse(model.apply_rpc_snapshot(
-            "deck-1", instance_id="instance-old", generation=3, snapshot=self.make_snapshot(sequence=2)
-        ))
-        self.assertFalse(model.set_transport(
-            "deck-1", instance_id="instance-old", generation=3,
-            status="disconnected", reason="stale",
-        ))
+        self.assertFalse(model.apply_adapter_event("deck-1", instance_id="instance-a", generation=3, event=accepted))
+        self.assertFalse(
+            model.apply_adapter_event("deck-1", instance_id="instance-old", generation=3, event=self.event(2))
+        )
+        self.assertFalse(
+            model.apply_adapter_event("deck-1", instance_id="instance-a", generation=2, event=self.event(2))
+        )
+        self.assertFalse(
+            model.apply_rpc_snapshot(
+                "deck-1", instance_id="instance-old", generation=3, snapshot=self.make_snapshot(sequence=2)
+            )
+        )
+        self.assertFalse(
+            model.set_transport(
+                "deck-1",
+                instance_id="instance-old",
+                generation=3,
+                status="disconnected",
+                reason="stale",
+            )
+        )
         self.assertEqual(model.journal.latest_id, event_id)
         self.assertEqual(model.get("deck-1")["transport"]["instanceId"], "instance-a")
 
@@ -180,41 +204,55 @@ class FleetModelTests(unittest.TestCase):
         before = model.get("deck-1")
         event_id = model.journal.latest_id
 
-        self.assertFalse(model.apply_rpc_snapshot(
-            "deck-1", instance_id="instance-b", generation=3,
-            snapshot=self.make_snapshot(sequence=10, session_id="wrong-session"),
-        ))
-        self.assertFalse(model.set_transport(
-            "deck-1", instance_id="instance-b", generation=3,
-            status="disconnected", reason="wrong owner",
-        ))
+        self.assertFalse(
+            model.apply_rpc_snapshot(
+                "deck-1",
+                instance_id="instance-b",
+                generation=3,
+                snapshot=self.make_snapshot(sequence=10, session_id="wrong-session"),
+            )
+        )
+        self.assertFalse(
+            model.set_transport(
+                "deck-1",
+                instance_id="instance-b",
+                generation=3,
+                status="disconnected",
+                reason="wrong owner",
+            )
+        )
 
         self.assertEqual(model.get("deck-1"), before)
         self.assertEqual(model.journal.latest_id, event_id)
 
     def test_new_generation_resets_adapter_sequence_for_same_instance(self):
         model = self.connected_model()
-        self.assertTrue(model.apply_adapter_event(
-            "deck-1", instance_id="instance-a", generation=3, event=self.event(1)
-        ))
+        self.assertTrue(
+            model.apply_adapter_event("deck-1", instance_id="instance-a", generation=3, event=self.event(1))
+        )
 
-        self.assertTrue(model.set_transport(
-            "deck-1", instance_id="instance-a", generation=4,
-            status="connected", reason=None,
-        ))
-        self.assertTrue(model.apply_adapter_event(
-            "deck-1", instance_id="instance-a", generation=4, event=self.event(1)
-        ))
+        self.assertTrue(
+            model.set_transport(
+                "deck-1",
+                instance_id="instance-a",
+                generation=4,
+                status="connected",
+                reason=None,
+            )
+        )
+        self.assertTrue(
+            model.apply_adapter_event("deck-1", instance_id="instance-a", generation=4, event=self.event(1))
+        )
 
     def test_sequence_gap_latches_until_authoritative_snapshot(self):
         model = self.connected_model()
 
-        self.assertFalse(model.apply_adapter_event(
-            "deck-1", instance_id="instance-a", generation=3, event=self.event(2)
-        ))
-        self.assertFalse(model.apply_adapter_event(
-            "deck-1", instance_id="instance-a", generation=3, event=self.event(1)
-        ))
+        self.assertFalse(
+            model.apply_adapter_event("deck-1", instance_id="instance-a", generation=3, event=self.event(2))
+        )
+        self.assertFalse(
+            model.apply_adapter_event("deck-1", instance_id="instance-a", generation=3, event=self.event(1))
+        )
 
         session = model.get("deck-1")
         self.assertEqual(session["transport"]["status"], "connected")
@@ -223,34 +261,46 @@ class FleetModelTests(unittest.TestCase):
         resync = model.journal.replay_after(0)[-1]
         self.assertEqual(resync.type, "session_resync_required")
         self.assertEqual(resync.payload, {"expectedSequence": 1, "receivedSequence": 2})
-        self.assertTrue(model.apply_rpc_snapshot(
-            "deck-1", instance_id="instance-a", generation=3,
-            snapshot=self.make_snapshot(sequence=2),
-        ))
-        self.assertTrue(model.apply_adapter_event(
-            "deck-1", instance_id="instance-a", generation=3, event=self.event(3)
-        ))
+        self.assertTrue(
+            model.apply_rpc_snapshot(
+                "deck-1",
+                instance_id="instance-a",
+                generation=3,
+                snapshot=self.make_snapshot(sequence=2),
+            )
+        )
+        self.assertTrue(
+            model.apply_adapter_event("deck-1", instance_id="instance-a", generation=3, event=self.event(3))
+        )
 
     def test_sequence_gap_requires_snapshot_at_or_beyond_received_watermark(self):
         model = self.connected_model()
-        self.assertFalse(model.apply_adapter_event(
-            "deck-1", instance_id="instance-a", generation=3, event=self.event(3)
-        ))
+        self.assertFalse(
+            model.apply_adapter_event("deck-1", instance_id="instance-a", generation=3, event=self.event(3))
+        )
 
-        self.assertFalse(model.apply_rpc_snapshot(
-            "deck-1", instance_id="instance-a", generation=3,
-            snapshot=self.make_snapshot(sequence=2),
-        ))
-        self.assertFalse(model.apply_adapter_event(
-            "deck-1", instance_id="instance-a", generation=3, event=self.event(3)
-        ))
-        self.assertTrue(model.apply_rpc_snapshot(
-            "deck-1", instance_id="instance-a", generation=3,
-            snapshot=self.make_snapshot(sequence=3),
-        ))
-        self.assertTrue(model.apply_adapter_event(
-            "deck-1", instance_id="instance-a", generation=3, event=self.event(4)
-        ))
+        self.assertFalse(
+            model.apply_rpc_snapshot(
+                "deck-1",
+                instance_id="instance-a",
+                generation=3,
+                snapshot=self.make_snapshot(sequence=2),
+            )
+        )
+        self.assertFalse(
+            model.apply_adapter_event("deck-1", instance_id="instance-a", generation=3, event=self.event(3))
+        )
+        self.assertTrue(
+            model.apply_rpc_snapshot(
+                "deck-1",
+                instance_id="instance-a",
+                generation=3,
+                snapshot=self.make_snapshot(sequence=3),
+            )
+        )
+        self.assertTrue(
+            model.apply_adapter_event("deck-1", instance_id="instance-a", generation=3, event=self.event(4))
+        )
 
     def test_adapter_snapshot_collections_are_copied_into_fleet_state(self):
         model = FleetModel()
@@ -259,12 +309,20 @@ class FleetModelTests(unittest.TestCase):
         todos = [{"content": "ship", "status": "pending", "meta": {"owner": "a"}}]
         subagents = [{"id": "agent-1", "status": "running", "meta": {"attempt": 1}}]
         snapshot = replace(
-            self.make_snapshot(), messages=messages, todos=todos, subagents=subagents,
+            self.make_snapshot(),
+            messages=messages,
+            todos=todos,
+            subagents=subagents,
         )
 
-        self.assertTrue(model.apply_rpc_snapshot(
-            "deck-1", instance_id="instance-a", generation=3, snapshot=snapshot,
-        ))
+        self.assertTrue(
+            model.apply_rpc_snapshot(
+                "deck-1",
+                instance_id="instance-a",
+                generation=3,
+                snapshot=snapshot,
+            )
+        )
         messages[0]["content"][0]["text"] = "mutated"
         messages.append({"role": "assistant", "content": "late"})
         todos.append({"content": "late", "status": "pending"})
@@ -297,12 +355,14 @@ class FleetModelTests(unittest.TestCase):
             "expires_at": None,
         }
 
-        self.assertTrue(model.apply_adapter_event(
-            "deck-1",
-            instance_id="instance-a",
-            generation=3,
-            event=self.event(1, "ui_request", payload),
-        ))
+        self.assertTrue(
+            model.apply_adapter_event(
+                "deck-1",
+                instance_id="instance-a",
+                generation=3,
+                event=self.event(1, "ui_request", payload),
+            )
+        )
 
         pending = model.get("deck-1")["pendingUiRequest"]
         self.assertEqual(pending["id"], "ask-7")
@@ -314,7 +374,6 @@ class FleetModelTests(unittest.TestCase):
         self.assertTrue(pending["allowCancel"])
         self.assertNotIn("allow_cancel", pending)
         self.assertNotIn("allow_custom", pending["questions"][0])
-
 
 
 class EventJournalTests(unittest.TestCase):

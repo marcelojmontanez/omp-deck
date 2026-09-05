@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from omp_deck.registry_store import (
@@ -14,8 +14,7 @@ from omp_deck.registry_store import (
     RegistryValidationError,
 )
 
-
-NOW = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 3, 12, 0, tzinfo=UTC)
 
 
 class RegistryStoreTests(unittest.TestCase):
@@ -50,9 +49,7 @@ class RegistryStoreTests(unittest.TestCase):
         restarted = RegistryStore(self.tmp_path / "registry.json")
         self.assertEqual(restarted.load(), [created])
 
-        updated = restarted.update(
-            created["id"], title="Resumed", omp_session_id="omp-8", desired_rpc_running=False
-        )
+        updated = restarted.update(created["id"], title="Resumed", omp_session_id="omp-8", desired_rpc_running=False)
         self.assertEqual(updated["id"], created["id"])
         self.assertGreater(updated["generation"], created["generation"])
         self.assertEqual(RegistryStore(self.tmp_path / "registry.json").load(), [updated])
@@ -69,6 +66,7 @@ class RegistryStoreTests(unittest.TestCase):
 
         self.assertEqual(store.path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(store._lock_path.stat().st_mode & 0o777, 0o600)
+
     def test_symlinked_lock_is_rejected_without_changing_target(self):
         victim = self.tmp_path / "victim"
         victim.write_text("unrelated", encoding="utf-8")
@@ -147,9 +145,7 @@ class RegistryStoreTests(unittest.TestCase):
 
     def test_concurrent_store_instances_do_not_lose_updates(self):
         initial = self.make_store()
-        records = [
-            self.create_session(initial, session_id=f"stable-{index}") for index in range(20)
-        ]
+        records = [self.create_session(initial, session_id=f"stable-{index}") for index in range(20)]
 
         def update(index):
             independent_store = RegistryStore(self.tmp_path / "registry.json", clock=lambda: NOW)

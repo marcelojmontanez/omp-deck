@@ -47,6 +47,7 @@ class RpcRefreshScheduler:
                 thread.join(max(0.0, deadline - time.monotonic()))
         if any(thread is not current and thread.is_alive() for thread in threads):
             raise RuntimeError("RPC refresh workers did not stop")
+
     def _schedule(self, session_id: str) -> None:
         with self._lock:
             if self._closed:

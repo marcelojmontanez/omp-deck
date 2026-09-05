@@ -1,10 +1,9 @@
 import json
 import os
-import stat
 import shutil
+import stat
 from dataclasses import dataclass
 from pathlib import Path
-
 
 MANIFEST_NAME = ".install-manifest.json"
 OWNERSHIP_MARKER = ".omp-deck-owned"
@@ -28,43 +27,37 @@ def absolute_path(value):
     return Path(os.path.abspath(Path(value).expanduser()))
 
 
-
 def installation_paths(*, config_file=None, state_root=None):
     home = absolute_path(Path.home())
     data_home = absolute_path(os.environ.get("XDG_DATA_HOME", home / ".local/share"))
     config_home = absolute_path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
     state_home = absolute_path(os.environ.get("XDG_STATE_HOME", home / ".local/state"))
-    config_path = (
-        absolute_path(config_file)
-        if config_file is not None
-        else config_home / "omp-deck/config.json"
-    )
+    config_path = absolute_path(config_file) if config_file is not None else config_home / "omp-deck/config.json"
     return InstallationPaths(
         install_root=data_home / "omp-deck",
         unit_path=config_home / "systemd/user/omp-deck.service",
         config_root=config_path.parent,
         config_path=config_path,
-        state_root=(
-            absolute_path(state_root)
-            if state_root is not None
-            else state_home / "omp-deck"
-        ),
+        state_root=(absolute_path(state_root) if state_root is not None else state_home / "omp-deck"),
     )
 
 
 def manifest_content(paths):
-    return json.dumps(
-        {
-            "version": MANIFEST_VERSION,
-            "install_root": str(paths.install_root),
-            "unit_path": str(paths.unit_path),
-            "config_root": str(paths.config_root),
-            "config_path": str(paths.config_path),
-            "state_root": str(paths.state_root),
-        },
-        indent=2,
-        sort_keys=True,
-    ) + "\n"
+    return (
+        json.dumps(
+            {
+                "version": MANIFEST_VERSION,
+                "install_root": str(paths.install_root),
+                "unit_path": str(paths.unit_path),
+                "config_root": str(paths.config_root),
+                "config_path": str(paths.config_path),
+                "state_root": str(paths.state_root),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
 
 
 def validate_manifest(paths):

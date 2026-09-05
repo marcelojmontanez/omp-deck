@@ -8,10 +8,7 @@ from .rpc_adapter import SessionAdapter
 
 def plain(value: Any) -> Any:
     if dataclasses.is_dataclass(value):
-        return {
-            field.name: plain(getattr(value, field.name))
-            for field in dataclasses.fields(value)
-        }
+        return {field.name: plain(getattr(value, field.name)) for field in dataclasses.fields(value)}
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, Mapping):

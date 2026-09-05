@@ -51,18 +51,12 @@ class CollabImportCoordinator:
         parse_collab_link(link)
         request_fingerprint = fingerprint({"link": link, "title": title})
         scope = "collab-import"
-        import_lock = self._locks[
-            int(request_fingerprint[:2], 16) % len(self._locks)
-        ]
+        import_lock = self._locks[int(request_fingerprint[:2], 16) % len(self._locks)]
         with import_lock:
             try:
-                persisted = self.requests.lookup(
-                    scope, request_id, request_fingerprint
-                )
+                persisted = self.requests.lookup(scope, request_id, request_fingerprint)
             except RequestConflictError:
-                raise TerminalCommandConflict(
-                    "requestId was already used for another Collab import"
-                ) from None
+                raise TerminalCommandConflict("requestId was already used for another Collab import") from None
             if persisted is not None:
                 return self._result(persisted)
             self.requests.reserve(scope, request_id, request_fingerprint)
@@ -76,18 +70,14 @@ class CollabImportCoordinator:
                     "status": "failed",
                     "errorCode": "collab_unavailable",
                 }
-                self.requests.complete(
-                    scope, request_id, request_fingerprint, result
-                )
+                self.requests.complete(scope, request_id, request_fingerprint, result)
                 return result
             durable = {
                 "requestId": request_id,
                 "status": "accepted",
                 "sessionId": session["id"],
             }
-            self.requests.complete(
-                scope, request_id, request_fingerprint, durable
-            )
+            self.requests.complete(scope, request_id, request_fingerprint, durable)
             return {**durable, "session": session}
 
     def add(
@@ -111,19 +101,11 @@ class CollabImportCoordinator:
             snapshot = self.runtime(record["id"]).adapter.snapshot()
             header = snapshot.header
             state = snapshot.state
-            project_path = (
-                state["cwd"]
-                if isinstance(state.get("cwd"), str)
-                else str(self.project_root)
-            )
+            project_path = state["cwd"] if isinstance(state.get("cwd"), str) else str(self.project_root)
             project_name = Path(project_path).name or "Terminal"
             updated = self.registry.update(
                 record["id"],
-                omp_session_id=(
-                    header.get("id")
-                    if isinstance(header.get("id"), str)
-                    else None
-                ),
+                omp_session_id=(header.get("id") if isinstance(header.get("id"), str) else None),
                 project_name=project_name,
                 project_path=project_path,
                 title=(

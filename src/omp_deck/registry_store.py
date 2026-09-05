@@ -5,16 +5,18 @@ from __future__ import annotations
 import copy
 import fcntl
 import json
+import math
 import os
 import re
 import stat
-import math
 import threading
 import uuid
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any
+
 from ._atomic_file import replace_bytes
 
 SCHEMA_VERSION = 1
@@ -71,7 +73,7 @@ class RegistryCorruptionError(RegistryError):
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _normalized_key(key: str) -> str:
@@ -112,10 +114,8 @@ def _validate_safe_metadata(value: Any, *, depth: int = 0) -> None:
             if not isinstance(key, str) or not key or len(key) > 128:
                 raise RegistryValidationError("recoveryMetadata keys must be bounded strings")
             normalized = _normalized_key(key)
-            if (
-                any(marker in normalized for marker in _FORBIDDEN_METADATA_MARKERS)
-                or normalized.endswith("link")
-                or normalized.endswith("url")
+            if any(marker in normalized for marker in _FORBIDDEN_METADATA_MARKERS) or normalized.endswith(
+                ("link", "url")
             ):
                 raise RegistryValidationError(f"recoveryMetadata field {key!r} is secret or unsafe")
             _validate_safe_metadata(item, depth=depth + 1)
@@ -278,11 +278,7 @@ class RegistryStore:
         except FileNotFoundError:
             self.path.parent.mkdir(parents=True, mode=0o700)
             info = self.path.parent.lstat()
-        if (
-            stat.S_ISLNK(info.st_mode)
-            or not stat.S_ISDIR(info.st_mode)
-            or info.st_uid != os.geteuid()
-        ):
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
             raise RegistryError("registry root is unsafe")
         os.chmod(self.path.parent, 0o700)
 
@@ -327,9 +323,7 @@ class RegistryStore:
             RegistryValidationError,
         ) as error:
             quarantine = self._quarantine()
-            raise RegistryCorruptionError(
-                f"invalid registry quarantined at {quarantine}", quarantine
-            ) from error
+            raise RegistryCorruptionError(f"invalid registry quarantined at {quarantine}", quarantine) from error
 
     def _validate_store(self, data: Any) -> None:
         if not isinstance(data, dict) or set(data) != {"version", "generation", "sessions"}:
@@ -372,7 +366,11 @@ class RegistryStore:
         if not isinstance(record["recoveryMetadata"], dict):
             raise RegistryValidationError("recoveryMetadata must be an object")
         _validate_safe_metadata(record["recoveryMetadata"])
-        if not isinstance(record["generation"], int) or isinstance(record["generation"], bool) or record["generation"] < 1:
+        if (
+            not isinstance(record["generation"], int)
+            or isinstance(record["generation"], bool)
+            or record["generation"] < 1
+        ):
             raise RegistryValidationError("invalid record generation")
         for field in ("createdAt", "updatedAt"):
             timestamp = _validate_text(record[field], field)
@@ -387,8 +385,8 @@ class RegistryStore:
         value = self._clock()
         if isinstance(value, datetime):
             if value.tzinfo is None:
-                value = value.replace(tzinfo=timezone.utc)
-            return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+                value = value.replace(tzinfo=UTC)
+            return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
         if isinstance(value, str):
             try:
                 parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))

@@ -3,19 +3,19 @@ from __future__ import annotations
 import dataclasses
 import threading
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from omp_rpc import RpcClient
 
-from ._shutdown import close_rpc_manager
 from . import _rpc_commands
+from ._shutdown import close_rpc_manager
 from .fleet_model import FleetModel
 from .projects import resolve_project_path
 from .registry_store import RegistryStore
 from .request_ledger import RequestConflictError, RequestLedger
 from .rpc_adapter import (
-    AdapterError,
     AdapterEvent,
     AdapterSnapshot,
     SessionAdapter,
@@ -27,12 +27,10 @@ from .settings import Settings
 
 class SessionNotConnectedError(LookupError):
     pass
+
+
 class SessionCommandConflictError(ValueError):
     pass
-
-
-
-
 
 
 @dataclasses.dataclass(slots=True)
@@ -133,9 +131,7 @@ class RpcSessionManager:
                 start=self.launch,
             )
         except RequestConflictError:
-            raise SessionCommandConflictError(
-                "requestId was already used for another launch"
-            ) from None
+            raise SessionCommandConflictError("requestId was already used for another launch") from None
 
     def refresh(self, session_id: str) -> dict[str, Any]:
         runtime = self._runtime(session_id)
@@ -191,27 +187,17 @@ class RpcSessionManager:
                     request_id,
                     action,
                     payload,
-                    prepare=lambda: self._prepare_command(
-                        session_id, action, payload
-                    ),
+                    prepare=lambda: self._prepare_command(session_id, action, payload),
                     execute=self._command,
                 )
             except RequestConflictError:
-                raise SessionCommandConflictError(
-                    "requestId was already used for another command"
-                ) from None
+                raise SessionCommandConflictError("requestId was already used for another command") from None
 
-    def command(
-        self, session_id: str, action: str, payload: Mapping[str, Any]
-    ) -> dict[str, Any]:
+    def command(self, session_id: str, action: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         with self._operation_lock(session_id):
-            return self._command(
-                self._connected_runtime(session_id), action, payload
-            )
+            return self._command(self._connected_runtime(session_id), action, payload)
 
-    def _command(
-        self, runtime: _Runtime, action: str, payload: Mapping[str, Any]
-    ) -> dict[str, Any]:
+    def _command(self, runtime: _Runtime, action: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         session_id = runtime.session_id
         adapter = runtime.adapter
         if adapter is None:
@@ -339,17 +325,18 @@ class RpcSessionManager:
         except Exception as error:
             cleanup_error = None
             if adapter is not None:
-                try: adapter.close()
-                except Exception as close_error: cleanup_error = close_error
+                try:
+                    adapter.close()
+                except Exception as close_error:
+                    cleanup_error = close_error
             if cleanup_error is not None:
                 raise RuntimeError(f"{error}; RPC cleanup failed: {cleanup_error}") from error
             with self._lock:
-                if self._runtimes.get(runtime.session_id) is runtime: self._runtimes.pop(runtime.session_id)
+                if self._runtimes.get(runtime.session_id) is runtime:
+                    self._runtimes.pop(runtime.session_id)
             raise
 
-    def _persist_rpc_identity(
-        self, record: Mapping[str, Any], snapshot: AdapterSnapshot
-    ) -> dict[str, Any]:
+    def _persist_rpc_identity(self, record: Mapping[str, Any], snapshot: AdapterSnapshot) -> dict[str, Any]:
         state = snapshot.state
         recovery: dict[str, Any] = {}
         session_file = state.get("session_file")
@@ -358,10 +345,7 @@ class RpcSessionManager:
         omp_session_id = state.get("session_id")
         if not isinstance(omp_session_id, str) or not omp_session_id:
             omp_session_id = record.get("ompSessionId")
-        if (
-            record.get("ompSessionId") == omp_session_id
-            and record.get("recoveryMetadata") == recovery
-        ):
+        if record.get("ompSessionId") == omp_session_id and record.get("recoveryMetadata") == recovery:
             return dict(record)
         return self.registry.update(
             record["id"],
@@ -371,9 +355,7 @@ class RpcSessionManager:
 
     def _validated_project(self, record: Mapping[str, Any]) -> str:
         project = record["project"]
-        resolved = resolve_project_path(
-            self.settings.project_root, project["name"], must_exist=True
-        )
+        resolved = resolve_project_path(self.settings.project_root, project["name"], must_exist=True)
         if str(resolved) != project["path"] or not resolved.is_dir():
             raise ValueError("registered project path is no longer valid")
         return str(resolved)

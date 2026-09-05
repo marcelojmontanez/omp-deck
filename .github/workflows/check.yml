@@ -31,7 +31,7 @@ jobs:
           git archive HEAD | tar -x -C "$RUNNER_TEMP/omp-deck"
       - name: Install runtime dependencies
         working-directory: ${{ runner.temp }}/omp-deck
-        run: python3 -m pip install .
+        run: python3 -m pip install '.[dev]'
       - name: Run repository check
         working-directory: ${{ runner.temp }}/omp-deck
         run: python3 tools/check.py

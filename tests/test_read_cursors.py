@@ -1,6 +1,6 @@
 import json
-import os
 import multiprocessing
+import os
 import subprocess
 import sys
 import tempfile
@@ -119,6 +119,7 @@ class CursorStoreTests(unittest.TestCase):
             self.assertEqual(target.read_text(), json.dumps({"version": 1, "sessions": {"secret": {"messageId": "x"}}}))
             self.assertTrue(path.is_symlink())
             self.assertIsNone(store.quarantined_path)
+
     def test_importing_server_does_not_touch_cursor_state_before_authentication(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

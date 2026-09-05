@@ -20,11 +20,7 @@ def maintained_sources():
     )
     if result.returncode == 0:
         names = (name for name in result.stdout.decode("utf-8").split("\0") if name)
-        return tuple(
-            name
-            for name in names
-            if Path(name).suffix.lower() in SOURCE_SUFFIXES and (ROOT / name).is_file()
-        )
+        return tuple(name for name in names if Path(name).suffix.lower() in SOURCE_SUFFIXES and (ROOT / name).is_file())
     return tuple(
         str(path.relative_to(ROOT))
         for path in sorted(ROOT.rglob("*"))
@@ -35,11 +31,7 @@ def maintained_sources():
 
 
 MAINTAINED_SOURCES = maintained_sources()
-SOURCE_FILES = tuple(
-    ROOT / path
-    for path in MAINTAINED_SOURCES
-    if not Path(path).name.startswith("test_")
-)
+SOURCE_FILES = tuple(ROOT / path for path in MAINTAINED_SOURCES if not Path(path).name.startswith("test_"))
 MAX_FILE_LINES = 500
 MAX_PYTHON_COMPLEXITY = 25
 BRANCH_NODES = (
@@ -78,8 +70,7 @@ def main():
             for name, line, complexity in complexities:
                 if complexity > MAX_PYTHON_COMPLEXITY:
                     failures.append(
-                        f"{relative}:{line} {name}: complexity {complexity} exceeds "
-                        f"{MAX_PYTHON_COMPLEXITY}"
+                        f"{relative}:{line} {name}: complexity {complexity} exceeds {MAX_PYTHON_COMPLEXITY}"
                     )
     if failures:
         print("\n".join(failures), file=sys.stderr)

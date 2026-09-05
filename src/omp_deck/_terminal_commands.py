@@ -32,9 +32,7 @@ class TerminalCommandCoordinator:
         self.requests = requests
         self._locks = tuple(threading.RLock() for _ in range(256))
         self._lock = threading.RLock()
-        self._results: OrderedDict[
-            tuple[str, str], tuple[str, dict[str, Any]]
-        ] = OrderedDict()
+        self._results: OrderedDict[tuple[str, str], tuple[str, dict[str, Any]]] = OrderedDict()
         self._result_limit = result_limit
 
     def lock(self, session_id: str) -> threading.RLock:
@@ -64,13 +62,9 @@ class TerminalCommandCoordinator:
             if previous is not None:
                 return previous
             try:
-                persisted = self.requests.lookup(
-                    scope, request_id, request_fingerprint
-                )
+                persisted = self.requests.lookup(scope, request_id, request_fingerprint)
             except RequestConflictError:
-                raise TerminalCommandConflict(
-                    "requestId was already used for another command"
-                ) from None
+                raise TerminalCommandConflict("requestId was already used for another command") from None
             if persisted is not None:
                 return persisted
             capability = {
@@ -81,21 +75,13 @@ class TerminalCommandCoordinator:
                 "respondToUi": "answerUiRequest",
                 "cancelUi": "cancelUiRequest",
             }.get(action)
-            if capability is None or not self.model.supports(
-                session_id, capability
-            ):
-                raise ValueError(
-                    "action is unavailable for this terminal transport"
-                )
+            if capability is None or not self.model.supports(session_id, capability):
+                raise ValueError("action is unavailable for this terminal transport")
             active = runtime(session_id)
             prepared = self._prepare(active, action, payload)
             self.requests.reserve(scope, request_id, request_fingerprint)
-            result = self._execute(
-                active, request_id, action, payload, prepared
-            )
-            self.requests.complete(
-                scope, request_id, request_fingerprint, result
-            )
+            result = self._execute(active, request_id, action, payload, prepared)
+            self.requests.complete(scope, request_id, request_fingerprint, result)
             self._remember(key, request_fingerprint, result)
             return dict(result)
 
@@ -109,9 +95,7 @@ class TerminalCommandCoordinator:
         if previous is None:
             return None
         if previous[0] != request_fingerprint:
-            raise TerminalCommandConflict(
-                "requestId was already used for another command"
-            )
+            raise TerminalCommandConflict("requestId was already used for another command")
         return dict(previous[1])
 
     def _remember(
@@ -154,9 +138,7 @@ class TerminalCommandCoordinator:
         adapter = active.adapter
         if action == "sendMessage":
             if active.kind == "collab":
-                adapter.send_message(
-                    payload["message"], images=payload.get("images")
-                )
+                adapter.send_message(payload["message"], images=payload.get("images"))
             else:
                 adapter.send_message(payload["message"])
         elif action == "followUp":

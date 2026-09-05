@@ -9,9 +9,7 @@ from pathlib import Path
 def config_path():
     config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     return Path(
-        os.path.abspath(
-            Path(os.environ.get("OMP_DECK_CONFIG", config_home / "omp-deck/config.json")).expanduser()
-        )
+        os.path.abspath(Path(os.environ.get("OMP_DECK_CONFIG", config_home / "omp-deck/config.json")).expanduser())
     )
 
 
@@ -38,11 +36,11 @@ def expanded(value):
 def allowed_hosts(values, host):
     configured = values.get("allowed_hosts", [])
     if not isinstance(configured, list) or any(
-        not isinstance(item, str) or not item or any(character in item for character in "/:@")
-        for item in configured
+        not isinstance(item, str) or not item or any(character in item for character in "/:@") for item in configured
     ):
         raise RuntimeError("allowed_hosts must be a list of hostnames")
     return tuple(dict.fromkeys([host, "localhost", "127.0.0.1", "::1", *configured]))
+
 
 def _read_config(path):
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
@@ -78,7 +76,6 @@ def _read_config(path):
         os.close(descriptor)
 
 
-
 def load_settings(path=None):
     path = config_path() if path is None else Path(path).expanduser()
     values = _read_config(path)
@@ -100,4 +97,3 @@ def load_settings(path=None):
         omp_bin=str(values.get("omp_bin", shutil.which("omp") or home / ".local/bin/omp")),
         allowed_hosts=allowed_hosts(values, str(values.get("host", "127.0.0.1"))),
     )
-

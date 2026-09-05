@@ -18,10 +18,10 @@ from omp_rpc import (
     RpcProtocolError,
     RpcTimeoutError,
 )
-from ._rpc_projection import PendingUiRequest, UiOption
+
+from ._rpc_projection import PendingUiRequest, project_ui_request
 from ._rpc_projection import objects as _project_objects
 from ._rpc_projection import plain as _plain
-from ._rpc_projection import project_ui_request
 
 
 class RpcClientLike(Protocol):
@@ -35,7 +35,9 @@ class RpcClientLike(Protocol):
     def get_state(self) -> Any: ...
     def get_messages(self) -> Sequence[Any]: ...
     def get_todos(self) -> Sequence[Any]: ...
-    def prompt(self, message: str, *, images: Sequence[Any] | None = None, streaming_behavior: str | None = None) -> None: ...
+    def prompt(
+        self, message: str, *, images: Sequence[Any] | None = None, streaming_behavior: str | None = None
+    ) -> None: ...
     def follow_up(self, message: str, *, images: Sequence[Any] | None = None) -> None: ...
     def abort(self) -> None: ...
     def set_model(self, provider: str, model_id: str) -> Any: ...
@@ -80,7 +82,6 @@ class AdapterEvent:
     type: str
     payload: dict[str, Any]
     timestamp: float
-
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,7 +261,9 @@ class SessionAdapter:
             self._events.clear()
             return result
 
-    def send_message(self, message: str, *, images: Sequence[Any] | None = None, streaming_behavior: str | None = None) -> None:
+    def send_message(
+        self, message: str, *, images: Sequence[Any] | None = None, streaming_behavior: str | None = None
+    ) -> None:
         self._call("prompt", message, images=images, streaming_behavior=streaming_behavior)
 
     def follow_up(self, message: str, *, images: Sequence[Any] | None = None) -> None:

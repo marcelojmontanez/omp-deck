@@ -48,9 +48,7 @@ class LifecycleTests(unittest.TestCase):
             state = home / "state/omp deck"
             runner = FakeRunner()
             with patch.dict(os.environ, self.environment(home), clear=False):
-                paths = lifecycle.install_service(
-                    self.settings(state), config, runner=runner, start=False
-                )
+                paths = lifecycle.install_service(self.settings(state), config, runner=runner, start=False)
 
             unit = paths.unit_path.read_text()
             self.assertIn(f'Environment="OMP_DECK_CONFIG={config}"', unit)
@@ -110,7 +108,6 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(sentinel.read_text(), "preserved\n")
             self.assertFalse((state / ".omp-deck-owned").exists())
 
-
     def test_fresh_setup_can_claim_state_after_auth_initialization(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
@@ -162,10 +159,12 @@ class LifecycleTests(unittest.TestCase):
                 SimpleNamespace(returncode=0, stdout=""),
                 SimpleNamespace(
                     returncode=0,
-                    stdout=json.dumps([
-                        {"name": "package_manifest", "status": "warning"},
-                        {"name": "plugin:omp-deck", "status": "ok"},
-                    ]),
+                    stdout=json.dumps(
+                        [
+                            {"name": "package_manifest", "status": "warning"},
+                            {"name": "plugin:omp-deck", "status": "ok"},
+                        ]
+                    ),
                 ),
                 SimpleNamespace(
                     returncode=0,
@@ -254,10 +253,12 @@ class LifecycleTests(unittest.TestCase):
                 paths.unit_path.write_text("old unit\n")
                 paths.manifest_path.write_text("old manifest\n")
                 paths.config_path.write_text("old config\n")
-                capture_runner = FakeRunner([
-                    SimpleNamespace(returncode=1, stdout="disabled\n"),
-                    SimpleNamespace(returncode=0, stdout="active\n"),
-                ])
+                capture_runner = FakeRunner(
+                    [
+                        SimpleNamespace(returncode=1, stdout="disabled\n"),
+                        SimpleNamespace(returncode=0, stdout="active\n"),
+                    ]
+                )
                 snapshot = lifecycle.capture_service_state(
                     settings=settings,
                     config_path=config,
@@ -287,9 +288,8 @@ class LifecycleTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(observations[0][1], "new config\n")
-            self.assertTrue(
-                all(content == "old config\n" for _, content in observations[1:])
-            )
+            self.assertTrue(all(content == "old config\n" for _, content in observations[1:]))
+
     def test_health_check_retries_startup_race_until_service_is_ready(self):
         class Response:
             status = 200
@@ -332,9 +332,7 @@ class LifecycleTests(unittest.TestCase):
                     config_path=config,
                     runner=capture_runner,
                 )
-                paths = lifecycle.install_service(
-                    settings, config, runner=FakeRunner(), start=False
-                )
+                paths = lifecycle.install_service(settings, config, runner=FakeRunner(), start=False)
                 (state / "auth.json").write_text("generated", encoding="utf-8")
                 lifecycle.restore_service_state(snapshot, runner=FakeRunner())
 
@@ -353,10 +351,12 @@ class LifecycleTests(unittest.TestCase):
             state.chmod(0o755)
             config = home / "config/omp-deck/config.json"
             settings = self.settings(state)
-            capture_runner = FakeRunner([
-                SimpleNamespace(returncode=1, stdout="disabled\n"),
-                SimpleNamespace(returncode=1, stdout="inactive\n"),
-            ])
+            capture_runner = FakeRunner(
+                [
+                    SimpleNamespace(returncode=1, stdout="disabled\n"),
+                    SimpleNamespace(returncode=1, stdout="inactive\n"),
+                ]
+            )
             with patch.dict(os.environ, self.environment(home), clear=False):
                 snapshot = lifecycle.capture_service_state(
                     settings=settings,
@@ -378,6 +378,7 @@ class LifecycleTests(unittest.TestCase):
                 [".auth.lock", "auth.json"],
             )
             self.assertEqual(state.stat().st_mode & 0o777, 0o755)
+
     def test_plugin_backup_is_restorable_through_official_manager(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -387,17 +388,23 @@ class LifecycleTests(unittest.TestCase):
             (plugin / "omp-deck.ts").write_text("export default function old() {}\n")
             settings = self.settings(root / "state" / "omp-deck")
             config = root / "config" / "omp-deck" / "config.json"
-            runner = FakeRunner([
-                SimpleNamespace(
-                    returncode=0,
-                    stdout=json.dumps({
-                        "npm": [{
-                            "name": "omp-deck",
-                            "path": str(plugin),
-                        }]
-                    }),
-                )
-            ])
+            runner = FakeRunner(
+                [
+                    SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps(
+                            {
+                                "npm": [
+                                    {
+                                        "name": "omp-deck",
+                                        "path": str(plugin),
+                                    }
+                                ]
+                            }
+                        ),
+                    )
+                ]
+            )
 
             with patch.dict(os.environ, self.environment(root), clear=False):
                 snapshot = lifecycle.capture_service_state(
@@ -427,11 +434,7 @@ class LifecycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             state_root = root / "state" / "omp-deck"
-            backup = (
-                state_root.parent
-                / ".omp-deck-setup-rollback-existing"
-                / "plugin"
-            )
+            backup = state_root.parent / ".omp-deck-setup-rollback-existing" / "plugin"
             backup.mkdir(parents=True)
             source = backup / "omp-deck.ts"
             source.write_text("preserved\n")
@@ -439,14 +442,14 @@ class LifecycleTests(unittest.TestCase):
                 omp_bin="/usr/bin/omp",
                 state_root=state_root,
             )
-            runner = FakeRunner([
-                SimpleNamespace(
-                    returncode=0,
-                    stdout=json.dumps({
-                        "npm": [{"name": "omp-deck", "path": str(backup)}]
-                    }),
-                )
-            ])
+            runner = FakeRunner(
+                [
+                    SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps({"npm": [{"name": "omp-deck", "path": str(backup)}]}),
+                    )
+                ]
+            )
 
             result = lifecycle.backup_plugin(settings, runner=runner)
 

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from ._fleet_projection import bounded_collection, normalize_messages
 
 
-def project_extension_event(session: dict[str, Any], session_id: str, kind: str,
-                            payload: Mapping[str, Any]) -> None:
+def project_extension_event(session: dict[str, Any], session_id: str, kind: str, payload: Mapping[str, Any]) -> None:
     if kind == "message":
         _apply_message(session, session_id, payload)
     elif kind == "tool":
@@ -25,18 +25,22 @@ def project_extension_event(session: dict[str, Any], session_id: str, kind: str,
         session["transport"]["status"] = "degraded"
         session["transport"]["reason"] = reason[:256]
     elif kind == "todo" and isinstance(payload.get("todos"), Sequence):
-        session["todos"] = bounded_collection([
-            item for item in payload["todos"] if isinstance(item, Mapping)
-        ])
+        session["todos"] = bounded_collection([item for item in payload["todos"] if isinstance(item, Mapping)])
 
 
 def _apply_message(session: dict[str, Any], session_id: str, payload: Mapping[str, Any]) -> None:
     phase = payload.get("phase")
     message = payload.get("message")
     if phase == "end" and isinstance(message, Mapping):
-        raw_messages = [{"id": item.get("id"), "role": item.get("role"),
-                         "content": item.get("content"), "timestamp": item.get("createdAt")}
-                        for item in session["messages"]]
+        raw_messages = [
+            {
+                "id": item.get("id"),
+                "role": item.get("role"),
+                "content": item.get("content"),
+                "timestamp": item.get("createdAt"),
+            }
+            for item in session["messages"]
+        ]
         raw_messages.append(message)
         session["messages"] = normalize_messages(raw_messages, session_id)
         if message.get("role") == "assistant":
@@ -51,9 +55,14 @@ def _apply_tool(session: dict[str, Any], payload: Mapping[str, Any]) -> None:
     tool_name = payload.get("toolName")
     if phase == "start" and isinstance(tool_name, str) and tool_name.casefold() == "ask":
         session["pendingUiRequest"] = {
-            "id": str(payload.get("toolCallId", "")), "kind": "terminal_only",
-            "title": "Input required in terminal", "message": "Answer this request in the terminal",
-            "questions": [], "questionIndex": 0, "allowCancel": False, "expiresAt": None,
+            "id": str(payload.get("toolCallId", "")),
+            "kind": "terminal_only",
+            "title": "Input required in terminal",
+            "message": "Answer this request in the terminal",
+            "questions": [],
+            "questionIndex": 0,
+            "allowCancel": False,
+            "expiresAt": None,
             "status": "terminal_only",
         }
         session["state"] = "needs_input"

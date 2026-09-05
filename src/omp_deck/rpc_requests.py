@@ -4,7 +4,6 @@ import hashlib
 import json
 import threading
 from collections.abc import Callable, Mapping
-from pathlib import Path
 from typing import Any
 
 from .fleet_model import FleetModel
@@ -29,9 +28,7 @@ def _fingerprint(value: Mapping[str, Any]) -> str:
 class RpcRequestCoordinator:
     """Reserves durable request IDs before RPC launches and commands mutate state."""
 
-    def __init__(
-        self, settings: Settings, model: FleetModel, ledger: RequestLedger
-    ) -> None:
+    def __init__(self, settings: Settings, model: FleetModel, ledger: RequestLedger) -> None:
         self.settings = settings
         self.model = model
         self.ledger = ledger
@@ -48,9 +45,7 @@ class RpcRequestCoordinator:
         create: bool,
         start: Callable[..., dict[str, Any]],
     ) -> dict[str, Any]:
-        project_path = resolve_project_path(
-            self.settings.project_root, project_name, must_exist=not create
-        )
+        project_path = resolve_project_path(self.settings.project_root, project_name, must_exist=not create)
         fingerprint = _fingerprint(
             {
                 "project": project_name,
@@ -60,9 +55,7 @@ class RpcRequestCoordinator:
             }
         )
         with self._lock:
-            launch_lock = self._launch_locks.setdefault(
-                project_name, threading.Lock()
-            )
+            launch_lock = self._launch_locks.setdefault(project_name, threading.Lock())
         with launch_lock:
             persisted = self.ledger.reserve("rpc-launch", request_id, fingerprint)
             if persisted is not None:
@@ -77,9 +70,7 @@ class RpcRequestCoordinator:
             created = False
             try:
                 if create:
-                    project_path = create_project_directory(
-                        self.settings.project_root, project_name
-                    )
+                    project_path = create_project_directory(self.settings.project_root, project_name)
                     created = True
                 session = start(project_name, project_path, title=title)
                 result = {
@@ -117,9 +108,7 @@ class RpcRequestCoordinator:
     ) -> dict[str, Any]:
         fingerprint = _fingerprint({"action": action, "payload": payload})
         with self._lock:
-            command_lock = self._command_locks.setdefault(
-                session_id, threading.Lock()
-            )
+            command_lock = self._command_locks.setdefault(session_id, threading.Lock())
         with command_lock:
             scope = f"rpc-command:{session_id}"
             persisted = self.ledger.lookup(scope, request_id, fingerprint)

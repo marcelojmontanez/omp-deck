@@ -6,8 +6,8 @@ subclasses into their HTTP response policy.
 """
 
 from __future__ import annotations
-import fcntl
 
+import fcntl
 import hashlib
 import hmac
 import json
@@ -16,11 +16,12 @@ import secrets
 import stat
 import threading
 import time
-from contextlib import contextmanager
 from collections import OrderedDict, deque
+from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+
 from . import _auth_state
 
 STATE_VERSION = 1
@@ -115,12 +116,7 @@ class AuthManager:
         now: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
     ):
-        if (
-            pairing_ttl < 1
-            or session_ttl < 1
-            or max_devices < 1
-            or max_devices > _auth_state.MAX_PERSISTED_DEVICES
-        ):
+        if pairing_ttl < 1 or session_ttl < 1 or max_devices < 1 or max_devices > _auth_state.MAX_PERSISTED_DEVICES:
             raise ValueError("authentication lifetimes and limits must be positive and bounded")
         self.state_root = Path(state_root)
         self.path = self.state_root / "auth.json"
@@ -130,9 +126,7 @@ class AuthManager:
         self._now = now
         self._lock = threading.RLock()
         self._directory_fd = None
-        self._limiter = _AttemptLimiter(
-            pairing_attempts, pairing_window, max_rate_limit_sources, monotonic
-        )
+        self._limiter = _AttemptLimiter(pairing_attempts, pairing_window, max_rate_limit_sources, monotonic)
         with self._locked_state():
             pass
 
@@ -294,11 +288,7 @@ class AuthManager:
                 raise AuthError("authentication state root is unavailable") from error
             try:
                 root_info = os.fstat(directory_fd)
-                if (
-                    not stat.S_ISDIR(root_info.st_mode)
-                    or root_info.st_uid != os.geteuid()
-                    or root_info.st_mode & 0o077
-                ):
+                if not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid != os.geteuid() or root_info.st_mode & 0o077:
                     raise AuthError("authentication state root is unsafe")
                 try:
                     lock_fd = os.open(
@@ -340,10 +330,7 @@ class AuthManager:
             raise AuthStateCorrupt(self.path) from error
         try:
             info = os.fstat(descriptor)
-            if (
-                not stat.S_ISREG(info.st_mode)
-                or info.st_uid != os.geteuid()
-            ):
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
                 raise AuthStateCorrupt(self.path)
             if info.st_size > _auth_state.MAX_STATE_BYTES:
                 raise ValueError("authentication state is too large")
@@ -362,10 +349,8 @@ class AuthManager:
             ValueError,
             TypeError,
             KeyError,
-        ):
-            quarantine = self.path.with_name(
-                f"auth.json.corrupt-{int(self._now())}-{secrets.token_hex(4)}"
-            )
+        ) as error:
+            quarantine = self.path.with_name(f"auth.json.corrupt-{int(self._now())}-{secrets.token_hex(4)}")
             try:
                 os.replace(
                     "auth.json",
@@ -376,7 +361,7 @@ class AuthManager:
                 os.fsync(directory_fd)
             except OSError:
                 quarantine = self.path
-            raise AuthStateCorrupt(quarantine)
+            raise AuthStateCorrupt(quarantine) from error
         finally:
             if descriptor >= 0:
                 os.close(descriptor)

@@ -88,7 +88,7 @@ class JsonlRecoveryReaderTests(unittest.TestCase):
         self.append(b"6")
         overlong = reader.poll()
         self.assertEqual(overlong.issues, (RecoveryIssue.LINE_TOO_LONG,))
-        self.append(b'789\n{}\n')
+        self.append(b"789\n{}\n")
         recovered_entries = []
         for _ in range(3):
             recovered_entries.extend(reader.poll().entries)

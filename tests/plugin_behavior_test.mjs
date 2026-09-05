@@ -20,7 +20,7 @@ async function connect(socketPath) {
   return socket;
 }
 
-test('oversized plugin events preserve sequence continuity', async () => {
+test('plugin events preserve sequence and synchronize active history', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'od-'));
   const previousStateHome = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = root;
@@ -33,6 +33,10 @@ test('oversized plugin events preserve sequence continuity', async () => {
     on(name, handler) { handlers.set(name, handler); },
     async sendUserMessage() {},
   };
+  let branchMessages = [
+    {role: 'user', content: 'original question', timestamp: 1},
+    {role: 'assistant', content: 'original answer', timestamp: 2},
+  ];
   const context = {
     cwd: '/work/test',
     model: {provider: 'test', id: 'model'},
@@ -40,6 +44,11 @@ test('oversized plugin events preserve sequence continuity', async () => {
       getSessionId: () => 'plugin-sequence-test',
       getSessionFile: () => null,
       getSessionName: () => 'Sequence test',
+      getBranch: () => branchMessages.map((message, index) => ({
+        type: 'message',
+        id: `entry-${index}`,
+        message,
+      })),
     },
     isIdle: () => true,
     hasPendingMessages: () => false,
@@ -89,6 +98,38 @@ test('oversized plugin events preserve sequence continuity', async () => {
     const following = JSON.parse((await frames.next()).value);
     assert.equal(following.kind, 'lifecycle');
     assert.equal(following.sequence, 3);
+
+    socket.write(`${JSON.stringify({
+      protocol: 'omp-deck-fallback-v1',
+      type: 'request',
+      id: 'history-1',
+      action: 'syncHistory',
+    })}\n`);
+    const initialHistory = JSON.parse((await frames.next()).value);
+    assert.equal(initialHistory.kind, 'history');
+    assert.equal(initialHistory.sequence, 4);
+    assert.equal(initialHistory.data.complete, true);
+    assert.deepEqual(initialHistory.data.messages.map(message => message.content), [
+      'original question',
+      'original answer',
+    ]);
+    const historyResponse = JSON.parse((await frames.next()).value);
+    assert.equal(historyResponse.type, 'response');
+    assert.equal(historyResponse.ok, true);
+
+    branchMessages = [
+      {role: 'user', content: 'selected branch question', timestamp: 3},
+      {role: 'assistant', content: 'selected branch answer', timestamp: 4},
+    ];
+    await handlers.get('session_tree')({}, context);
+    const treeHistory = JSON.parse((await frames.next()).value);
+    assert.equal(treeHistory.kind, 'history');
+    assert.equal(treeHistory.sequence, 5);
+    assert.equal(treeHistory.data.complete, true);
+    assert.deepEqual(treeHistory.data.messages.map(message => message.content), [
+      'selected branch question',
+      'selected branch answer',
+    ]);
     lines.close();
   } finally {
     socket?.destroy();

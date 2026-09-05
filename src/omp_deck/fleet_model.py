@@ -158,6 +158,7 @@ class FleetModel:
             session = self._sessions.get(session_id)
             if session is None or not self._may_claim(session, instance_id, generation):
                 return False
+            session.pop("_extensionHistorySync", None)
             session.update(extension_projection(session, registration, snapshot, instance_id, generation))
             self._changed_locked("session_snapshot", session_id, {"session": self._public_session(session)})
             return True
@@ -196,6 +197,8 @@ class FleetModel:
             session["_adapterSequence"] = sequence
             session["updatedAt"] = now()
             project_extension_event(session, session_id, kind, payload)
+            if kind in {"history", "degraded"}:
+                self._sync_unread_locked(session)
             self._snapshot_generation += 1
             self.journal.publish(
                 snapshot_generation=self._snapshot_generation,

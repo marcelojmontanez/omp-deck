@@ -180,6 +180,9 @@ class ExtensionAdapter:
             self._snapshot = snapshot
             return snapshot
 
+    def sync_history(self) -> None:
+        self._request("syncHistory")
+
     def _request(self, action: str, **fields: Any) -> Any:
         with self._state_lock:
             if self._closed or self._sock is None:

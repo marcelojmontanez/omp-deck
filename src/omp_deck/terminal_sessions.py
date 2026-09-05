@@ -448,6 +448,7 @@ class TerminalSessionManager:
                 snapshot=snapshot,
             ):
                 raise TerminalSessionNotConnected(session_id)
+            adapter.sync_history()
         except Exception as error:
             try:
                 adapter.close()

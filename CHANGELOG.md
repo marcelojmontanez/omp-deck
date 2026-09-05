@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.1 — 2026-09-05
+
+### Fixed
+
+- Prevent queued duplicate or stale Collab UI-request frames from restoring a request after it has been answered or ended.
+
+### Changed
+
+- Refresh the pinned official `omp-rpc` source to the current tested OMP revision while retaining stock OMP 18.1.10 compatibility.
+- Enforce Ruff linting and formatting in contributor and CI checks, with transport internals reorganized around explicit protocol and runtime ownership boundaries.
+
 ## 1.0.0 — 2026-09-04
 
 ### Added

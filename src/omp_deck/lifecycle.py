@@ -20,7 +20,7 @@ from .installation_paths import (
     validate_manifest,
 )
 
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.0.1"
 PLUGIN_NAME = "omp-deck"
 PLUGIN_ROOT = Path(__file__).resolve().parent / "plugin"
 

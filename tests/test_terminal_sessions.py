@@ -167,6 +167,9 @@ class FakeExtensionAdapter:
     def snapshot(self):
         return self._snapshot
 
+    def sync_history(self):
+        self.calls.append(("sync_history",))
+
     def send_message(self, message, behavior=None):
         self.calls.append(("send_message", message, behavior))
 
@@ -295,6 +298,7 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.assertEqual(public["transport"]["status"], "connected")
         self.assertEqual(public["subagents"], [{"id": "agent-1", "status": "running"}])
         self.assertTrue(public["capabilities"]["followUp"])
+        self.assertIn(("sync_history",), first.calls)
         record = manager.registry.load()[0]
         self.assertEqual(
             (record["id"], record["adapterKind"], record["ompSessionId"]), (session_id, "extension", "omp-extension")
@@ -328,6 +332,55 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.assertEqual(session["state"], "degraded")
         self.assertEqual(session["transport"]["status"], "degraded")
         self.assertEqual(session["transport"]["reason"], "event exceeds wire limit")
+
+    def test_extension_history_replaces_messages_only_after_complete_sync(self):
+        manager = self.manager()
+        session_id, _, adapter = self.connect_extension(manager)
+        adapter.callback(
+            {
+                "sequence": 2,
+                "kind": "history",
+                "data": {
+                    "syncId": "initial",
+                    "offset": 0,
+                    "messages": [{"role": "user", "content": "old branch"}],
+                    "complete": True,
+                },
+            }
+        )
+        self.assertEqual(self.model.get(session_id)["messages"][0]["content"][0]["text"], "old branch")
+
+        adapter.callback(
+            {
+                "sequence": 3,
+                "kind": "history",
+                "data": {
+                    "syncId": "tree-selection",
+                    "offset": 0,
+                    "messages": [{"role": "user", "content": "selected question"}],
+                    "complete": False,
+                },
+            }
+        )
+        self.assertEqual(self.model.get(session_id)["messages"][0]["content"][0]["text"], "old branch")
+        adapter.callback(
+            {
+                "sequence": 4,
+                "kind": "history",
+                "data": {
+                    "syncId": "tree-selection",
+                    "offset": 1,
+                    "messages": [{"role": "assistant", "content": "selected answer"}],
+                    "complete": True,
+                },
+            }
+        )
+
+        messages = self.model.get(session_id)["messages"]
+        self.assertEqual(
+            [message["content"][0]["text"] for message in messages],
+            ["selected question", "selected answer"],
+        )
 
     def test_expired_socket_or_heartbeat_drops_runtime_but_persists_disconnected_session(self):
         manager = self.manager()

@@ -1,14 +1,75 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from ._fleet_projection import bounded_collection, normalize_messages
+from ._fleet_projection import MAX_MESSAGE_BYTES, MAX_MESSAGES, bounded_collection, normalize_messages, strict_clone
+
+_HISTORY_SYNC_KEY = "_extensionHistorySync"
+
+
+def _apply_history(session: dict[str, Any], session_id: str, payload: Mapping[str, Any]) -> None:
+    sync_id = payload.get("syncId")
+    offset = payload.get("offset")
+    messages = payload.get("messages")
+    complete = payload.get("complete")
+    valid = (
+        isinstance(sync_id, str)
+        and bool(sync_id)
+        and len(sync_id) <= 256
+        and isinstance(offset, int)
+        and not isinstance(offset, bool)
+        and offset >= 0
+        and isinstance(messages, Sequence)
+        and not isinstance(messages, (str, bytes, bytearray))
+        and isinstance(complete, bool)
+    )
+    if not valid:
+        session.pop(_HISTORY_SYNC_KEY, None)
+        return
+    pending = session.get(_HISTORY_SYNC_KEY)
+    if offset == 0:
+        pending = {
+            "syncId": sync_id,
+            "nextOffset": 0,
+            "messages": [],
+            "sizes": [],
+            "bytes": 0,
+        }
+        session[_HISTORY_SYNC_KEY] = pending
+    if not isinstance(pending, dict) or pending.get("syncId") != sync_id or pending.get("nextOffset") != offset:
+        session.pop(_HISTORY_SYNC_KEY, None)
+        return
+    retained = pending["messages"]
+    sizes = pending["sizes"]
+    for message in messages:
+        if not isinstance(message, Mapping):
+            session.pop(_HISTORY_SYNC_KEY, None)
+            return
+        try:
+            cloned = strict_clone(message)
+            size = len(json.dumps(cloned, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8"))
+        except (TypeError, ValueError):
+            session.pop(_HISTORY_SYNC_KEY, None)
+            return
+        retained.append(cloned)
+        sizes.append(size)
+        pending["bytes"] += size
+        while len(retained) > MAX_MESSAGES or pending["bytes"] > MAX_MESSAGE_BYTES:
+            retained.pop(0)
+            pending["bytes"] -= sizes.pop(0)
+    pending["nextOffset"] = offset + len(messages)
+    if complete:
+        session["messages"] = normalize_messages(retained, session_id)
+        session.pop(_HISTORY_SYNC_KEY, None)
 
 
 def project_extension_event(session: dict[str, Any], session_id: str, kind: str, payload: Mapping[str, Any]) -> None:
     if kind == "message":
         _apply_message(session, session_id, payload)
+    elif kind == "history":
+        _apply_history(session, session_id, payload)
     elif kind == "tool":
         _apply_tool(session, payload)
     elif kind == "lifecycle":
@@ -21,6 +82,9 @@ def project_extension_event(session: dict[str, Any], session_id: str, kind: str,
         reason = payload.get("reason")
         if not isinstance(reason, str) or not reason:
             reason = "extension event degraded"
+        if payload.get("droppedKind") == "history":
+            session.pop(_HISTORY_SYNC_KEY, None)
+            session["messages"] = []
         session["state"] = "degraded"
         session["transport"]["status"] = "degraded"
         session["transport"]["reason"] = reason[:256]

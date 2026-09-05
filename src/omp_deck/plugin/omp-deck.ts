@@ -11,6 +11,8 @@ const HEARTBEAT_MS = 15_000;
 const MAX_MISSED_HEARTBEATS = 3;
 const MAX_QUEUED_REQUESTS = 64;
 const MAX_PENDING_WRITE_BYTES = 4 * MAX_LINE_BYTES;
+const MAX_HISTORY_MESSAGES = 500;
+const MAX_HISTORY_CHUNK_MESSAGES = 64;
 const SOCKET_DIR = path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "omp-deck", "sockets");
 
 type JsonObject = Record<string, unknown>;
@@ -44,6 +46,7 @@ export default function ompDeck(pi: ExtensionAPI) {
   let stopping = false;
   let lifecycleGeneration = 0;
   let lifecycleTail = Promise.resolve();
+  let historyGeneration = 0;
 
   const sessionIdentity = (context: ExtensionContext): { id: string; file: string | null; title: string | null } => ({
     id: context.sessionManager.getSessionId(),
@@ -110,13 +113,21 @@ export default function ompDeck(pi: ExtensionAPI) {
     return line !== undefined && writeLine(peer, line);
   }
 
-  function sendEvent(peer: Peer, kind: string, data: unknown = {}): void {
+  function eventLine(peer: Peer, kind: string, data: unknown): string | undefined {
+    return encoded({
+      protocol: PROTOCOL,
+      type: "event",
+      sequence: peer.sequence + 1,
+      kind,
+      data,
+    });
+  }
+
+  function sendEvent(peer: Peer, kind: string, data: unknown = {}): boolean {
     const sequence = peer.sequence + 1;
     let wireKind = kind;
     let wireData = data;
-    let line = encoded({
-      protocol: PROTOCOL, type: "event", sequence, kind: wireKind, data: wireData,
-    });
+    let line = eventLine(peer, wireKind, wireData);
     let degraded = false;
     if (!line) {
       degraded = true;
@@ -134,11 +145,9 @@ export default function ompDeck(pi: ExtensionAPI) {
         wireKind = "degraded";
         wireData = { droppedKind: kind, reason: "event exceeds wire limit" };
       }
-      line = encoded({
-        protocol: PROTOCOL, type: "event", sequence, kind: wireKind, data: wireData,
-      });
+      line = eventLine(peer, wireKind, wireData);
     }
-    if (!line || !writeLine(peer, line)) return;
+    if (!line || !writeLine(peer, line)) return false;
     peer.sequence = sequence;
     if (degraded && kind === "snapshot") {
       sendEvent(peer, "degraded", {
@@ -146,10 +155,52 @@ export default function ompDeck(pi: ExtensionAPI) {
         reason: "snapshot collections exceed wire limit",
       });
     }
+    return true;
   }
 
   function emit(kind: string, data: unknown = {}): void {
     for (const peer of peers) sendEvent(peer, kind, data);
+  }
+
+  function activeHistory(context: ExtensionContext): unknown[] {
+    const messages: unknown[] = [];
+    for (const entry of context.sessionManager.getBranch()) {
+      if (entry.type === "message") messages.push(entry.message);
+    }
+    return messages.slice(-MAX_HISTORY_MESSAGES);
+  }
+
+  function sendHistory(peer: Peer, context: ExtensionContext): void {
+    const syncId = `${connectionId}:${++historyGeneration}`;
+    const messages = activeHistory(context);
+    if (messages.length === 0) {
+      sendEvent(peer, "history", { syncId, offset: 0, messages: [], complete: true });
+      return;
+    }
+    let offset = 0;
+    while (offset < messages.length) {
+      let chunk: unknown[] = [];
+      while (offset + chunk.length < messages.length && chunk.length < MAX_HISTORY_CHUNK_MESSAGES) {
+        const candidate = [...chunk, messages[offset + chunk.length]];
+        const complete = offset + candidate.length === messages.length;
+        if (!eventLine(peer, "history", { syncId, offset, messages: candidate, complete })) break;
+        chunk = candidate;
+      }
+      if (chunk.length === 0) {
+        sendEvent(peer, "degraded", {
+          droppedKind: "history",
+          reason: "history message exceeds wire limit",
+        });
+        return;
+      }
+      const complete = offset + chunk.length === messages.length;
+      if (!sendEvent(peer, "history", { syncId, offset, messages: chunk, complete })) return;
+      offset += chunk.length;
+    }
+  }
+
+  function emitHistory(context: ExtensionContext): void {
+    for (const peer of peers) sendHistory(peer, context);
   }
 
   function snapshots(context: ExtensionContext): JsonObject {
@@ -207,6 +258,9 @@ export default function ompDeck(pi: ExtensionAPI) {
           }
           return;
         }
+        case "syncHistory":
+          sendHistory(peer, active);
+          break;
         case "pong":
           peer.lastPong = Date.now();
           break;
@@ -373,6 +427,8 @@ export default function ompDeck(pi: ExtensionAPI) {
   });
   pi.on("session_switch", async (_event, context) => { ctx = context; emit("lifecycle", { state: "session_switch" }); await queueRestart(context); });
   pi.on("session_branch", async (_event, context) => { ctx = context; emit("lifecycle", { state: "session_branch" }); await queueRestart(context); });
+  pi.on("session_tree", (_event, context) => { ctx = context; emitHistory(context); });
+  pi.on("session_compact", (_event, context) => { ctx = context; emitHistory(context); });
   pi.on("agent_start", (event) => emit("lifecycle", { state: "agent_start", event }));
   pi.on("agent_end", (event, context) => emit("lifecycle", { state: "agent_end", event, snapshot: snapshots(context) }));
   pi.on("message_start", (event) => emit("message", { phase: "start", message: event.message }));

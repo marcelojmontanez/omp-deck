@@ -5,6 +5,7 @@
 ### Changed
 
 - Bound project-picker discovery to a configurable directory depth, defaulting to two levels, and group nested paths with explicit loading and result feedback on mobile.
+- Replace long pairing secrets with six-digit codes that expire after one minute and invalidate after the first failed submission.
 
 ## 1.0.1 — 2026-09-05
 

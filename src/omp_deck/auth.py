@@ -107,7 +107,7 @@ class AuthManager:
         self,
         state_root: str | os.PathLike[str],
         *,
-        pairing_ttl: int = 300,
+        pairing_ttl: int = 60,
         session_ttl: int = 90 * 24 * 60 * 60,
         pairing_attempts: int = 6,
         pairing_window: float = 60,
@@ -135,7 +135,7 @@ class AuthManager:
         lifetime = self.pairing_ttl if ttl is None else ttl
         if lifetime < 1 or lifetime > self.pairing_ttl:
             raise ValueError("pairing lifetime exceeds configured limit")
-        token = secrets.token_urlsafe(32)
+        token = f"{secrets.randbelow(1_000_000):06d}"
         expires = int(self._now()) + lifetime
         with self._locked_state():
             self._state["pairing"] = {
@@ -160,6 +160,9 @@ class AuthManager:
                 and hmac.compare_digest(str(pairing.get("verifier", "")), candidate)
             )
             if not valid:
+                if isinstance(pairing, dict):
+                    self._state["pairing"] = None
+                    self._write_state()
                 raise PairingFailed("invalid or expired pairing secret")
 
             credential = "v1." + secrets.token_urlsafe(32)

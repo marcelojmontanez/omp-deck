@@ -104,6 +104,8 @@ Phone -> owner-restricted Tailscale HTTPS -> localhost OMP Deck
 
 Both layers are required. Keep the listener on `127.0.0.1`, use Tailscale Serve rather than Funnel, restrict the endpoint with tailnet ACLs or grants, and retain Deck pairing. TLS, firewall reachability, or broad tailnet membership does not replace application authentication. Direct public exposure is unsupported.
 
+Pairing uses a six-digit code that expires after one minute. The code is single-use, and the first failed submission invalidates it; run `omp-deck pair` again after a typo or failed attempt.
+
 Every API, SSE, and blob request requires a paired device cookie. Mutations also require an exact trusted Origin and session-bound CSRF token. Devices can log out individually or revoke all paired devices from the session menu.
 
 ## Retained data

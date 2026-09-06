@@ -19,6 +19,7 @@ class SettingsTests(unittest.TestCase):
                     {
                         "port": 9123,
                         "project_root": str(root / "code"),
+                        "project_discovery_depth": 4,
                         "allowed_hosts": ["deck.example.ts.net"],
                     }
                 )
@@ -29,6 +30,7 @@ class SettingsTests(unittest.TestCase):
 
             self.assertEqual(configured.port, 9123)
             self.assertEqual(configured.project_root, root / "code")
+            self.assertEqual(configured.project_discovery_depth, 4)
             self.assertIn("deck.example.ts.net", configured.allowed_hosts)
             self.assertEqual(configured.host, "127.0.0.1")
 
@@ -44,6 +46,16 @@ class SettingsTests(unittest.TestCase):
             config.chmod(0o600)
             with self.assertRaisesRegex(RuntimeError, "allowed_hosts"):
                 load_settings(config)
+
+    def test_invalid_project_discovery_depth_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.json"
+            for value in (0, 9, True, "2"):
+                with self.subTest(value=value):
+                    config.write_text(json.dumps({"project_discovery_depth": value}))
+                    config.chmod(0o600)
+                    with self.assertRaisesRegex(RuntimeError, "project_discovery_depth"):
+                        load_settings(config)
 
     def test_world_writable_configuration_is_rejected_before_values_are_used(self):
         with tempfile.TemporaryDirectory() as directory:

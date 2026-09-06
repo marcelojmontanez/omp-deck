@@ -99,7 +99,9 @@ def is_launchable_directory(relative, entries):
     return len(relative.parts) <= 2 or bool(PROJECT_MARKERS.intersection(entries))
 
 
-def list_launchable_projects(root):
+def list_launchable_projects(root, *, max_depth=2):
+    if type(max_depth) is not int or not 1 <= max_depth <= 8:
+        raise ValueError("max_depth must be an integer between 1 and 8")
     try:
         resolved_root = _resolved_project_root(root)
     except ValueError:
@@ -109,19 +111,22 @@ def list_launchable_projects(root):
         current_path = Path(current)
         relative = current_path.relative_to(resolved_root)
         entries = set(directories) | set(files)
-        safe_directories = []
-        for name in directories:
-            if name.startswith(".") or name in IGNORED_PROJECT_DIRS:
-                continue
-            child = current_path / name
-            try:
-                if child.is_symlink() or not child.is_dir():
+        if len(relative.parts) >= max_depth:
+            directories.clear()
+        else:
+            safe_directories = []
+            for name in directories:
+                if name.startswith(".") or name in IGNORED_PROJECT_DIRS:
                     continue
-                child.resolve(strict=True).relative_to(resolved_root)
-            except (OSError, RuntimeError, ValueError):
-                continue
-            safe_directories.append(name)
-        directories[:] = safe_directories
+                child = current_path / name
+                try:
+                    if child.is_symlink() or not child.is_dir():
+                        continue
+                    child.resolve(strict=True).relative_to(resolved_root)
+                except (OSError, RuntimeError, ValueError):
+                    continue
+                safe_directories.append(name)
+            directories[:] = safe_directories
         if relative.parts and is_launchable_directory(relative, entries):
             projects.append(relative.as_posix())
     return sorted(projects, key=str.casefold)

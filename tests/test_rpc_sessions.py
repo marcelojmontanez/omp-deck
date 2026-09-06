@@ -185,6 +185,7 @@ class TestRpcSessionManager(unittest.TestCase):
             socket_root=root / "sockets",
             state_root=root / "state",
             project_root=root,
+            project_discovery_depth=2,
             omp_bin="/not/a/real/omp",
             allowed_hosts=("127.0.0.1",),
         )

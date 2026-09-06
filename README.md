@@ -79,6 +79,7 @@ Optional configuration lives at `~/.config/omp-deck/config.json`. Defaults targe
   "host": "127.0.0.1",
   "port": 8787,
   "project_root": "~/dev",
+  "project_discovery_depth": 2,
   "session_root": "~/.omp/agent/sessions",
   "socket_root": "~/.local/state/omp-deck/sockets",
   "state_root": "~/.local/state/omp-deck",
@@ -87,7 +88,7 @@ Optional configuration lives at `~/.config/omp-deck/config.json`. Defaults targe
 }
 ```
 
-Project names are resolved beneath `project_root`; traversal, symlink escapes, broken links, and non-directories are rejected. Restart Deck after a configuration change:
+Project names are resolved beneath `project_root`; traversal, symlink escapes, broken links, and non-directories are rejected. `project_discovery_depth` limits filesystem traversal to 1–8 directory levels and defaults to `2`: direct children and grandchildren are listed, while configured depths beyond two discover only directories containing `.git`, `AGENTS.md`, `Cargo.toml`, `go.mod`, `package.json`, or `pyproject.toml`. Keep `project_root` near the common parent of your projects and increase the depth only when nested repositories must appear. Restart Deck after a configuration change:
 
 ```bash
 omp-deck service restart

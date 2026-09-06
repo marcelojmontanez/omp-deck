@@ -67,6 +67,7 @@ class NormalizedHttpTests(unittest.TestCase):
         self.project_root.mkdir()
         settings = SimpleNamespace(
             allowed_hosts=("127.0.0.1",),
+            project_discovery_depth=2,
             state_root=root / "state",
         )
 
@@ -160,6 +161,7 @@ class NormalizedHttpTests(unittest.TestCase):
         status, _, projects = self.request("GET", "/api/projects", headers={"Cookie": self.cookie})
         self.assertEqual(status, 200)
         self.assertEqual(projects["rootLabel"], "projects-private-root/")
+        self.assertEqual(projects["discoveryDepth"], 2)
         self.assertNotIn(str(self.project_root), json.dumps(projects))
 
     def test_listed_nested_project_can_be_launched_through_encoded_route(self):

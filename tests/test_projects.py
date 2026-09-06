@@ -83,6 +83,22 @@ class ProjectPathTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "invalid project|already exists"):
                 create_project_directory(root, "parent/new")
 
+    def test_discovery_depth_bounds_nested_project_search(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            nested = root / "group" / "project" / "nested-repository"
+            nested.mkdir(parents=True)
+            (nested / "pyproject.toml").write_text("[project]\nname='nested'\n")
+
+            self.assertEqual(
+                list_launchable_projects(root, max_depth=2),
+                ["group", "group/project"],
+            )
+            self.assertEqual(
+                list_launchable_projects(root, max_depth=3),
+                ["group", "group/project", "group/project/nested-repository"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

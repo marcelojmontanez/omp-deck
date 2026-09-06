@@ -31,6 +31,7 @@ class MigrationTests(unittest.TestCase):
             socket_root=self.sockets,
             state_root=self.state,
             project_root=self.projects,
+            project_discovery_depth=2,
             omp_bin="omp",
             allowed_hosts=("127.0.0.1",),
         )

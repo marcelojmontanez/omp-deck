@@ -4,8 +4,6 @@
 
 OMP Deck is a local-first, mobile control plane for one developer's OMP sessions. Python owns orchestration, security, persistence, transport adaptation, and HTTP/SSE delivery. The browser is a dependency-free mobile client. The OMP extension is a documented-API fallback for terminal-owned sessions.
 
-For the planned architecture and completion gates, read `IMPLEMENTATION_PLAN.md` in full. Do not reduce its scope silently. Preserve behavior added after the plan was written.
-
 Deck is not a Collab replacement. It may consume the published Collab protocol internally, but it does not expose rooms, invite links, guest identities, public sharing, or multi-user arbitration.
 
 ## Ownership boundaries
@@ -228,7 +226,7 @@ It runs Ruff linting and formatting checks, text/encoding checks, Python compila
 
 During major implementation, never use the live deployment as a test environment.
 
-Do not modify or restart production installation, config, state, extension, Tailscale routing, or port `8787` until the cutover gate in `IMPLEMENTATION_PLAN.md` passes.
+Do not modify or restart production installation, config, state, extension, Tailscale routing, or port `8787` during isolated implementation.
 
 Use an isolated localhost port and temporary `HOME`, XDG directories, Deck configuration, state, sockets, sessions, uploads, projects, and OMP plugin/profile data. Test generated service files without installing them.
 

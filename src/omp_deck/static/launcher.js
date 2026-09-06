@@ -1,18 +1,54 @@
+function renderProjectOptions(projects) {
+  const select = el['project-select'];
+  select.replaceChildren(
+    new Option('Choose project…', ''),
+    new Option('＋ New directory…', '__new__'),
+  );
+  const sections = new Map();
+  for (const project of projects) {
+    if (typeof project !== 'string' || !project) continue;
+    const section = project.split('/', 1)[0];
+    if (!sections.has(section)) sections.set(section, []);
+    sections.get(section).push(project);
+  }
+  for (const [section, entries] of sections) {
+    if (entries.length === 1 && entries[0] === section) {
+      select.append(new Option(`${section}/`, section));
+      continue;
+    }
+    const group = document.createElement('optgroup');
+    group.label = `${section}/`;
+    for (const project of entries) {
+      const label = project === section ? `Use ${section}/` : project.slice(section.length + 1);
+      group.append(new Option(label, project));
+    }
+    select.append(group);
+  }
+}
+
+
 async function loadLaunchableProjects() {
+  const select = el['project-select'];
+  select.disabled = true;
+  select.replaceChildren(new Option('Loading project directories…', ''));
+  el['launch-state'].textContent = 'Loading directories…';
   try {
     const response = await ompDeckApi.request('/api/projects', {cache: 'no-store'});
     if (!response.ok) throw new Error(`Projects returned ${response.status}`);
     const payload = await response.json();
-    document.getElementById('project-root-label').textContent = `Start OMP in ${payload.rootLabel || 'configured project root'}`;
-    el['project-select'].innerHTML = '<option value="">Choose project…</option>'
-      + '<option value="__new__">＋ New directory…</option>'
-      + (payload.projects || []).map(project =>
-        `<option value="${escapeHtml(project)}">${escapeHtml(project)}</option>`
-      ).join('');
-    syncProjectLauncher();
-    el['launch-state'].textContent = '';
+    const projects = Array.isArray(payload.projects) ? payload.projects : [];
+    const depth = Number.isSafeInteger(payload.discoveryDepth) ? payload.discoveryDepth : 2;
+    document.getElementById('project-root-label').textContent =
+      `Start OMP in ${payload.rootLabel || 'configured project root'} · ${depth} ${depth === 1 ? 'level' : 'levels'}`;
+    renderProjectOptions(projects);
+    el['launch-state'].textContent =
+      `${projects.length} ${projects.length === 1 ? 'directory' : 'directories'} available`;
   } catch (error) {
+    select.replaceChildren(new Option('Projects unavailable', ''));
     el['launch-state'].textContent = error.message;
+  } finally {
+    select.disabled = false;
+    syncProjectLauncher();
   }
 }
 

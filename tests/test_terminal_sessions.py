@@ -202,6 +202,7 @@ class TerminalSessionManagerTests(unittest.TestCase):
             socket_root=socket_root,
             state_root=state_root,
             project_root=root / "project",
+            project_discovery_depth=2,
             omp_bin="omp",
             allowed_hosts=("127.0.0.1",),
         )

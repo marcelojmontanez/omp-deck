@@ -61,10 +61,16 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   const port = await unusedPort();
   await mkdir(path.join(projects, 'demo'), {recursive: true});
   await writeFile(path.join(projects, 'demo', 'pyproject.toml'), '[project]\nname="demo"\nversion="0"\n');
+  await mkdir(path.join(projects, 'group', 'nested'), {recursive: true});
+  await writeFile(
+    path.join(projects, 'group', 'nested', 'pyproject.toml'),
+    '[project]\nname="nested"\nversion="0"\n',
+  );
   await writeFile(config, JSON.stringify({
     host: '127.0.0.1',
     port,
     project_root: projects,
+    project_discovery_depth: 2,
     session_root: path.join(sandbox, 'sessions'),
     socket_root: path.join(state, 'sockets'),
     state_root: state,
@@ -110,11 +116,14 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   ));
   const result = await page.evaluate(async () => {
     const projectsResponse = await fetch('/api/projects', {cache: 'no-store'});
+    const projectsPayload = await projectsResponse.json();
     const cookiesEnabled = navigator.cookieEnabled;
     return {
       projectsStatus: projectsResponse.status,
+      discoveryDepth: projectsPayload.discoveryDepth,
       projectValues: [...document.getElementById('project-select').options].map(option => option.value),
-      launchState: document.getElementById('launch-state').textContent,
+      projectGroups: [...document.querySelectorAll('#project-select optgroup')].map(group => group.label),
+      pickerDisabled: document.getElementById('project-select').disabled,
       localStorageLength: localStorage.length,
       sessionStorageLength: sessionStorage.length,
       overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
@@ -123,7 +132,10 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   });
   assert.equal(result.projectsStatus, 200);
   assert(result.projectValues.includes('demo'));
-  assert.equal(result.launchState, '');
+  assert(result.projectValues.includes('group/nested'));
+  assert(result.projectGroups.includes('group/'));
+  assert.equal(result.discoveryDepth, 2);
+  assert.equal(result.pickerDisabled, false);
   assert.equal(result.localStorageLength, 0);
   assert.equal(result.sessionStorageLength, 0);
   assert(result.overflow <= 0);

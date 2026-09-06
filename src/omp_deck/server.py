@@ -151,7 +151,7 @@ def project_path(project, *, must_exist=True):
 
 
 def launchable_projects():
-    return list_launchable_projects(DEV_ROOT)
+    return list_launchable_projects(DEV_ROOT, max_depth=SETTINGS.project_discovery_depth)
 
 
 def auth_manager():
@@ -312,7 +312,14 @@ class Handler(SimpleHTTPRequestHandler):
             self.reply(200, _usage_service.snapshot())
             return
         if request_path == "/api/projects":
-            self.reply(200, {"projects": launchable_projects(), "rootLabel": f"{DEV_ROOT.name}/"})
+            self.reply(
+                200,
+                {
+                    "projects": launchable_projects(),
+                    "rootLabel": f"{DEV_ROOT.name}/",
+                    "discoveryDepth": SETTINGS.project_discovery_depth,
+                },
+            )
             return
         super().do_GET()
 

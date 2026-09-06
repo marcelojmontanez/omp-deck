@@ -21,6 +21,7 @@ class Settings:
     socket_root: Path
     state_root: Path
     project_root: Path
+    project_discovery_depth: int
     omp_bin: str
     allowed_hosts: tuple[str, ...]
 
@@ -87,6 +88,9 @@ def load_settings(path=None):
     port = int(values.get("port", 8787))
     if not 1 <= port <= 65535:
         raise RuntimeError("port must be between 1 and 65535")
+    project_discovery_depth = values.get("project_discovery_depth", 2)
+    if type(project_discovery_depth) is not int or not 1 <= project_discovery_depth <= 8:
+        raise RuntimeError("project_discovery_depth must be an integer between 1 and 8")
     return Settings(
         host=str(values.get("host", "127.0.0.1")),
         port=port,
@@ -94,6 +98,7 @@ def load_settings(path=None):
         socket_root=expanded(values.get("socket_root", state_home / "omp-deck/sockets")),
         state_root=expanded(values.get("state_root", state_home / "omp-deck")),
         project_root=expanded(values.get("project_root", home / "dev")),
+        project_discovery_depth=project_discovery_depth,
         omp_bin=str(values.get("omp_bin", shutil.which("omp") or home / ".local/bin/omp")),
         allowed_hosts=allowed_hosts(values, str(values.get("host", "127.0.0.1"))),
     )

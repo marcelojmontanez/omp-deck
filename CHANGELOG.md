@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Preserve the entered pairing code and show explicit progress or secure-session errors instead of silently returning to an empty pairing form.
+
 ### Changed
 
 - Bound project-picker discovery to a configurable directory depth, defaulting to two levels, and group nested paths with explicit loading and result feedback on mobile.

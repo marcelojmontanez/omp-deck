@@ -222,8 +222,10 @@ const authScreen = document.getElementById('auth-screen');
 const pairForm = document.getElementById('pair-form');
 const pairToken = document.getElementById('pair-token');
 const authError = document.getElementById('auth-error');
+const authStatus = document.getElementById('auth-status');
+const pairSubmit = document.getElementById('pair-submit');
 
-function showAuthentication() {
+function showAuthentication({clearToken = false} = {}) {
   state.eventSource?.close();
   state.eventSource = null;
   if (state.recoveryTimer) clearInterval(state.recoveryTimer);
@@ -234,7 +236,7 @@ function showAuthentication() {
   state.eventReconnectTimer = null;
   appRoot.hidden = true;
   authScreen.hidden = false;
-  pairToken.value = '';
+  if (clearToken) pairToken.value = '';
   pairToken.focus();
 }
 
@@ -255,14 +257,24 @@ async function showApplication() {
 pairForm.addEventListener('submit', async event => {
   event.preventDefault();
   authError.hidden = true;
+  authStatus.textContent = 'Pairing…';
+  pairSubmit.disabled = true;
   try {
     await ompDeckApi.pair(pairToken.value.trim());
+    authStatus.textContent = 'Paired. Verifying secure session…';
+    const session = await ompDeckApi.session();
+    if (!session.authenticated) {
+      throw new Error('Pairing succeeded, but the secure session was not retained. Open OMP Deck over HTTPS.');
+    }
     await showApplication();
     await loadLaunchableProjects();
   } catch (error) {
+    authStatus.textContent = '';
     authError.textContent = error.message;
     authError.hidden = false;
     pairToken.select();
+  } finally {
+    pairSubmit.disabled = false;
   }
 });
 
@@ -272,7 +284,7 @@ window.addEventListener('omp-deck-auth-required', showAuthentication);
   try {
     const session = await ompDeckApi.session();
     if (session.authenticated) await showApplication();
-    else showAuthentication();
+    else showAuthentication({clearToken: true});
   } catch (error) {
     authError.textContent = error.message;
     authError.hidden = false;

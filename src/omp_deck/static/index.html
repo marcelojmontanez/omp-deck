@@ -22,7 +22,7 @@
       <h1 id="auth-title">Pair this device</h1>
       <p>Enter the one-time code shown by <code>omp-deck pair</code>.</p>
       <label for="pair-token">Pairing code</label>
-      <input id="pair-token" name="token" type="password" autocomplete="one-time-code" required>
+      <input id="pair-token" name="token" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required>
       <button type="submit">Pair device</button>
       <p class="auth-error" id="auth-error" role="alert" hidden></p>
     </form>

@@ -61,9 +61,9 @@ class AuthManagerTests(unittest.TestCase):
         self.assertNotIn(paired.credential, state_text)
         self.assertEqual(list(Path(self.temp.name).glob(".auth.json.*.tmp")), [])
 
-    def test_pairing_is_high_entropy_single_use_and_expiring(self):
+    def test_pairing_is_six_digits_single_use_and_expiring(self):
         secret = self.auth.begin_pairing()
-        self.assertGreaterEqual(len(secret.token), 40)
+        self.assertRegex(secret.token, r"^\d{6}$")
         paired = self.auth.pair(secret.token, source="phone")
         self.assertEqual(self.auth.authenticate(paired.credential).device_id, paired.device.device_id)
         with self.assertRaises(PairingFailed):
@@ -73,6 +73,23 @@ class AuthManagerTests(unittest.TestCase):
         self.wall.advance(31)
         with self.assertRaises(PairingFailed):
             self.auth.pair(expired.token, source="third-phone")
+        with self.assertRaises(PairingFailed):
+            self.auth.pair(expired.token, source="fourth-phone")
+
+    def test_one_failed_attempt_invalidates_pairing_code_globally(self):
+        secret = self.auth.begin_pairing()
+        with self.assertRaises(PairingFailed):
+            self.auth.pair("000000" if secret.token != "000000" else "000001", source="attacker")
+        with self.assertRaises(PairingFailed):
+            self.auth.pair(secret.token, source="phone")
+
+    def test_default_pairing_lifetime_is_one_minute(self):
+        auth = AuthManager(Path(self.temp.name) / "default", now=self.wall, monotonic=self.monotonic)
+        secret = auth.begin_pairing()
+        self.assertEqual(secret.expires_at, self.wall.value + 60)
+        self.wall.advance(61)
+        with self.assertRaises(PairingFailed):
+            auth.pair(secret.token, source="phone")
 
     def test_device_cookie_has_required_public_boundary_attributes(self):
         _, paired = self.pair_device()
@@ -148,10 +165,11 @@ class AuthManagerTests(unittest.TestCase):
                 self.auth.authenticate(credential)
 
     def test_pairing_attempts_are_rate_limited_and_source_table_is_bounded(self):
-        secret = self.auth.begin_pairing()
         for _ in range(2):
+            self.auth.begin_pairing()
             with self.assertRaises(PairingFailed):
                 self.auth.pair("wrong", source="attacker")
+        secret = self.auth.begin_pairing()
         with self.assertRaises(PairingRateLimited):
             self.auth.pair(secret.token, source="attacker")
 
@@ -162,10 +180,13 @@ class AuthManagerTests(unittest.TestCase):
         self.assertLessEqual(len(self.auth._limiter.sources), 2)
 
     def test_rate_limit_window_recovers(self):
-        secret = self.auth.begin_pairing()
         for _ in range(2):
+            self.auth.begin_pairing()
             with self.assertRaises(PairingFailed):
                 self.auth.pair("wrong", source="phone")
+        secret = self.auth.begin_pairing()
+        with self.assertRaises(PairingRateLimited):
+            self.auth.pair(secret.token, source="phone")
         self.monotonic.advance(11)
         paired = self.auth.pair(secret.token, source="phone")
         self.assertEqual(self.auth.authenticate(paired.credential).device_id, paired.device.device_id)

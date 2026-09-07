@@ -5,7 +5,7 @@ from dataclasses import replace
 from datetime import datetime
 
 from omp_deck.event_stream import EventJournal, ReplayUnavailableError
-from omp_deck.fleet_model import CAPABILITIES, FleetModel
+from omp_deck.fleet_model import FleetModel
 from omp_deck.rpc_adapter import AdapterEvent, AdapterSnapshot
 
 
@@ -107,7 +107,6 @@ class FleetModelTests(unittest.TestCase):
         )
         self.assertEqual(session["ompSessionId"], "omp-live")
         self.assertEqual(session["state"], "working")
-        self.assertEqual(session["capabilities"], CAPABILITIES["rpc"])
         self.assertTrue(session["capabilities"]["attachments"])
         self.assertEqual(
             session["model"],

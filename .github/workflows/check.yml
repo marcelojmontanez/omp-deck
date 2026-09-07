@@ -36,6 +36,44 @@ jobs:
         working-directory: ${{ runner.temp }}/omp-deck
         run: python3 tools/check.py
 
+  windows-native:
+    name: Native Windows gate
+    needs: repository-check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install runtime dependencies
+        run: python -m pip install '.[dev]'
+      - name: Run native portability contracts
+        run: >-
+          python -m unittest
+          tests.test_auth
+          tests.test_collab_store
+          tests.test_registry_store
+          tests.test_read_cursors
+          tests.test_request_ledger
+          tests.test_projects
+          tests.test_rpc_sessions
+          tests.test_normalized_http
+          tests.test_windows_native
+      - run: omp-deck --help
+      - name: Download pinned official OMP
+        shell: pwsh
+        run: |
+          $path = Join-Path $env:RUNNER_TEMP "omp.exe"
+          Invoke-WebRequest "https://github.com/can1357/oh-my-pi/releases/download/v18.1.10/omp-windows-x64.exe" -OutFile $path
+          $expected = "00b25bb0ad2992d252326a7ecea2527cfb85019b4a6d24a67842cf3712cd6625"
+          $actual = (Get-FileHash -Algorithm SHA256 $path).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "OMP checksum mismatch: $actual" }
+          "OMP_DECK_WINDOWS_OMP_SMOKE_BIN=$path" >> $env:GITHUB_ENV
+      - name: Exercise managed RPC against official OMP
+        run: python -m unittest tests.test_windows_native.WindowsRpcIntegrationTests
+
   package:
     name: Package and lifecycle gate
     needs: repository-check

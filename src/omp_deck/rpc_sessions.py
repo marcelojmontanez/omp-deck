@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import dataclasses
+import os
+import sys
 import threading
 import uuid
 from collections.abc import Mapping
@@ -292,13 +294,23 @@ class RpcSessionManager:
 
             def client_factory() -> RpcClient:
                 extra_args = ("--resume", resume) if resume else ()
-                return RpcClient(
+                options = {
+                    "cwd": project_path,
+                    "max_event_history": 512,
+                    "max_stderr_chunks": 128,
+                }
+                client = RpcClient(
                     executable=self.settings.omp_bin,
-                    cwd=project_path,
                     session_dir=self.settings.session_root,
                     extra_args=extra_args,
-                    max_event_history=512,
-                    max_stderr_chunks=128,
+                    **options,
+                )
+                command = getattr(client, "command", None)
+                if os.name != "nt" or not isinstance(command, tuple):
+                    return client
+                return RpcClient(
+                    command=(sys.executable, "-m", "omp_deck._windows_job", *command),
+                    **options,
                 )
 
             adapter = SessionAdapter(

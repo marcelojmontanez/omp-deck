@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -62,6 +63,14 @@ CAPABILITIES: dict[str, dict[str, bool]] = {
         "compact": False,
     },
 }
+
+
+def platform_capabilities(adapter_kind: str) -> dict[str, bool]:
+    capabilities = dict(CAPABILITIES[adapter_kind])
+    if os.name == "nt":
+        capabilities["attachments"] = False
+    return capabilities
+
 
 MAX_MESSAGES = 500
 MAX_MESSAGE_BYTES = 2 * 1024 * 1024
@@ -303,7 +312,7 @@ def collab_projection(
 ) -> dict[str, Any]:
     pending = _collab_pending(snapshot.pending_ui_requests[-1] if snapshot.pending_ui_requests else None)
     state = snapshot.state
-    capabilities = dict(CAPABILITIES["collab"])
+    capabilities = platform_capabilities("collab")
     if snapshot.read_only:
         for capability in ("sendMessage", "interrupt", "answerUiRequest", "cancelUiRequest", "attachments"):
             capabilities[capability] = False
@@ -356,7 +365,7 @@ def collab_projection(
 def extension_projection(
     session: Mapping[str, Any], registration: Any, snapshot: Any, instance_id: str, generation: int
 ) -> dict[str, Any]:
-    capabilities = dict(CAPABILITIES["extension"])
+    capabilities = platform_capabilities("extension")
     for capability in capabilities:
         if capability in registration.capabilities:
             capabilities[capability] = capabilities[capability] and bool(registration.capabilities[capability])

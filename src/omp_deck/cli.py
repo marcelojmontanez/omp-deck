@@ -124,6 +124,13 @@ def print_pairing(secret):
     print(f"Expires at Unix time {secret.expires_at}.")
 
 
+def _require_posix_integration(feature):
+    if sys.platform == "win32":
+        raise RuntimeError(
+            f"{feature} is unavailable on native Windows; run `omp-deck serve` and use managed RPC or Collab sessions"
+        )
+
+
 def pair():
     settings = load_settings()
     print_pairing(AuthManager(settings.state_root).begin_pairing())
@@ -133,7 +140,9 @@ def setup(*, tailscale=False):
     path = config_path()
     settings = load_settings(path)
     if sys.platform != "linux" or shutil.which("systemctl") is None:
-        raise RuntimeError("automatic service setup requires Linux with systemd")
+        raise RuntimeError(
+            "automatic service and extension setup requires Linux with systemd; on native Windows, run `omp-deck serve`"
+        )
     if shutil.which(settings.omp_bin) is None and not Path(settings.omp_bin).is_file():
         raise RuntimeError("stock OMP is not installed or not on PATH")
     plugin_preexisting = plugin_installed(settings)
@@ -209,29 +218,53 @@ def doctor():
         checks.append(_check("Configuration", True, detail=str(config_path())))
 
     if settings is None:
-        for label in ("Service", "Health", "OMP executable", "Plugin compatibility", "Authentication"):
-            checks.append(_check(label, False, detail="blocked by invalid configuration"))
+        blocked = ("Service", "Health", "OMP executable", "Extension fallback", "Authentication")
+        for label in blocked:
+            checks.append(
+                _check(
+                    label,
+                    False,
+                    optional=sys.platform == "win32" and label in {"Service", "Extension fallback"},
+                    detail="blocked by invalid configuration",
+                )
+            )
     else:
         health, health_detail = _health_diagnostic(settings)
         omp_available = shutil.which(settings.omp_bin) is not None or Path(settings.omp_bin).is_file()
+        if sys.platform == "win32":
+            service_check = _check(
+                "Service",
+                False,
+                optional=True,
+                detail="native Windows service installation is unavailable; use omp-deck serve",
+            )
+            extension_check = _check(
+                "Extension fallback",
+                False,
+                optional=True,
+                detail="terminal-owned sessions require Collab on native Windows",
+            )
+        else:
+            service_check = _check(
+                "Service",
+                service_status() == 0,
+                detail="systemd user service status",
+            )
+            extension_check = _check(
+                "Extension fallback",
+                plugin_status(settings) if omp_available else False,
+                detail=f"expected omp-deck {PLUGIN_VERSION} for OMP 18.1.10",
+            )
         checks.extend(
             (
-                _check(
-                    "Service",
-                    service_status() == 0,
-                    detail="systemd user service status",
-                ),
+                service_check,
                 _check("Health", health, detail=health_detail),
                 _check(
                     "OMP executable",
                     omp_available,
                     detail=settings.omp_bin,
                 ),
-                _check(
-                    "Plugin compatibility",
-                    plugin_status(settings) if omp_available else False,
-                    detail=f"expected omp-deck {PLUGIN_VERSION} for OMP 18.1.10",
-                ),
+                extension_check,
                 _check(
                     "Authentication",
                     _auth_healthy(settings),
@@ -327,6 +360,8 @@ def main(argv=None):
     plugin_actions.add_parser("remove")
 
     arguments = parser.parse_args(argv)
+    if arguments.command in {"service", "plugin", "purge", "migrate"}:
+        _require_posix_integration(arguments.command)
     if arguments.command == "setup":
         setup(tailscale=arguments.tailscale)
     elif arguments.command == "pair":

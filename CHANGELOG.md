@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- Support native Windows foreground operation with per-user defaults, protected Windows ACLs, named-mutex state locking, project launch and creation, Collab sessions, and managed RPC sessions supervised by a kill-on-close Job Object.
+- Gate native Windows behavior in CI against the pinned official OMP 18.1.10 executable, including descendant-process cleanup.
+
 ### Fixed
 
 - Preserve the entered pairing code and show explicit progress or secure-session errors instead of silently returning to an empty pairing form.
@@ -10,6 +15,7 @@
 
 - Bound project-picker discovery to a configurable directory depth, defaulting to two levels, and group nested paths with explicit loading and result feedback on mobile.
 - Replace long pairing secrets with six-digit codes that expire after one minute and invalidate after the first failed submission.
+- On native Windows, report service and Unix-socket extension integration as unavailable, require Collab for terminal-owned sessions, and disable image attachments until OMP blob ACL validation is supported.
 
 ## 1.0.1 — 2026-09-05
 

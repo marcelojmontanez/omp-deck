@@ -17,11 +17,20 @@ IGNORED_PROJECT_DIRS = {
     "target",
     "vendor",
 }
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
+
+
+def _is_link_like(path):
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return path.is_symlink() or bool(getattr(info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 def _resolved_project_root(root):
     root = Path(root).expanduser()
-    if root.is_symlink():
+    if _is_link_like(root):
         raise ValueError("invalid project root")
     try:
         resolved = root.resolve(strict=True)
@@ -36,7 +45,7 @@ def _reject_symlink_components(root, relative, *, allow_missing_leaf):
     current = root
     for index, part in enumerate(relative.parts):
         current = current / part
-        if current.is_symlink():
+        if _is_link_like(current):
             raise ValueError("invalid project")
         if not current.exists():
             if allow_missing_leaf and index == len(relative.parts) - 1:
@@ -78,6 +87,14 @@ def create_project_directory(root, project):
     candidate = resolve_project_path(root, project, must_exist=False)
     resolved_root = _resolved_project_root(root)
     relative = candidate.relative_to(resolved_root)
+    if os.name == "nt":
+        try:
+            candidate.mkdir()
+        except FileExistsError as error:
+            raise ValueError("project already exists") from error
+        except OSError as error:
+            raise RuntimeError("could not create project") from error
+        return resolve_project_path(resolved_root, relative.as_posix())
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(resolved_root, flags)
     try:
@@ -120,7 +137,7 @@ def list_launchable_projects(root, *, max_depth=2):
                     continue
                 child = current_path / name
                 try:
-                    if child.is_symlink() or not child.is_dir():
+                    if _is_link_like(child) or not child.is_dir():
                         continue
                     child.resolve(strict=True).relative_to(resolved_root)
                 except (OSError, RuntimeError, ValueError):

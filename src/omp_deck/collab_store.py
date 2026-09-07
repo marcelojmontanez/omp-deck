@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import copy
-import fcntl
 import json
 import os
 import re
-import stat
 import threading
 import unicodedata
 from collections.abc import Callable, Iterator, Mapping
@@ -16,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ._atomic_file import replace_bytes
+from ._private_state import PrivateStateFile
 from .collab_protocol import parse_collab_link
 
 SCHEMA_VERSION = 1
@@ -83,6 +81,7 @@ class CollabStore:
         self.max_records = max_records
         self._clock = clock
         self._thread_lock = threading.RLock()
+        self._storage = PrivateStateFile(self.path)
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(state_root={self.state_root!r}, max_records={self.max_records!r})"
@@ -154,83 +153,23 @@ class CollabStore:
     @contextmanager
     def _locked(self) -> Iterator[None]:
         with self._thread_lock:
-            self._ensure_state_root()
-            directory_fd = os.open(
-                self.state_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-            )
-            try:
-                fd = os.open(
-                    self._lock_path.name,
-                    os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
-                    0o600,
-                    dir_fd=directory_fd,
-                )
-                try:
-                    if not stat.S_ISREG(os.fstat(fd).st_mode):
-                        raise OSError("Collab lock path is not a regular file")
-                    os.fchmod(fd, 0o600)
-                    fcntl.flock(fd, fcntl.LOCK_EX)
-                    yield
-                finally:
-                    os.close(fd)
-            finally:
-                os.close(directory_fd)
-
-    def _ensure_state_root(self) -> None:
-        created = False
-        try:
-            info = self.state_root.lstat()
-        except FileNotFoundError:
-            self.state_root.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                os.mkdir(self.state_root, 0o700)
-                created = True
-            except FileExistsError:
-                pass
-            info = self.state_root.lstat()
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-            raise OSError("Collab state root must be a directory, not a symlink")
-        if info.st_uid != os.geteuid():
-            raise PermissionError("Collab state root must be owned by the current user")
-        os.chmod(self.state_root, 0o700)
-        if created:
-            fd = os.open(self.state_root.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
+            with self._storage.locked():
+                yield
 
     @staticmethod
     def _empty() -> dict[str, Any]:
         return {"version": SCHEMA_VERSION, "records": []}
 
     def _read_or_quarantine(self) -> dict[str, Any]:
-        directory_fd = os.open(
-            self.state_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        )
         try:
-            try:
-                fd = os.open(self.path.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory_fd)
-            except FileNotFoundError:
+            raw = self._storage.read(MAX_FILE_BYTES)
+            if raw is None:
                 return self._empty()
-            try:
-                if not stat.S_ISREG(os.fstat(fd).st_mode):
-                    raise OSError("Collab data path is not a regular file")
-                raw = os.read(fd, MAX_FILE_BYTES + 1)
-                oversized = len(raw) > MAX_FILE_BYTES
-                os.fchmod(fd, 0o600)
-            finally:
-                os.close(fd)
-        finally:
-            os.close(directory_fd)
-        try:
-            if oversized:
-                raise CollabStoreValidationError("credential store file is too large")
             self._validate_json_depth(raw)
             data = json.loads(raw)
             self._validate_store(data)
             return data
-        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, CollabStoreValidationError):
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError, CollabStoreValidationError):
             quarantine = self._quarantine()
             raise CollabStoreCorruptionError(quarantine) from None
 
@@ -348,30 +287,7 @@ class CollabStore:
 
     def _quarantine(self) -> Path:
         stamp = re.sub(r"[^0-9]", "", self._timestamp()) or "unknown"
-        base_name = f"{self.path.name}.corrupt.{stamp}"
-        quarantine_name = base_name
-        suffix = 0
-        directory_fd = os.open(
-            self.state_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        )
-        try:
-            while True:
-                try:
-                    os.stat(quarantine_name, dir_fd=directory_fd, follow_symlinks=False)
-                except FileNotFoundError:
-                    break
-                suffix += 1
-                quarantine_name = f"{base_name}.{suffix}"
-            os.replace(self.path.name, quarantine_name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
-            fd = os.open(quarantine_name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory_fd)
-            try:
-                os.fchmod(fd, 0o600)
-            finally:
-                os.close(fd)
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-        return self.state_root / quarantine_name
+        return self._storage.quarantine(f"{self.path.name}.corrupt.{stamp}")
 
     def _write(self, data: dict[str, Any]) -> None:
         self._validate_store(data)
@@ -385,18 +301,4 @@ class CollabStore:
             raise CollabStoreValidationError("credential store could not be serialized") from None
         if len(payload) > MAX_FILE_BYTES:
             raise CollabStoreValidationError("credential store file is too large")
-        directory_fd = os.open(
-            self.state_root,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
-        )
-        try:
-            replace_bytes(directory_fd, self.path.name, payload)
-        finally:
-            os.close(directory_fd)
-
-    def _fsync_directory(self) -> None:
-        fd = os.open(self.state_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        self._storage.replace(payload)

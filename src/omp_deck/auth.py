@@ -7,13 +7,11 @@ subclasses into their HTTP response policy.
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import hmac
 import json
 import os
 import secrets
-import stat
 import threading
 import time
 from collections import OrderedDict, deque
@@ -23,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import _auth_state
+from ._private_state import PrivateStateFile, validate_private_directory, validate_private_file
 
 STATE_VERSION = 1
 COOKIE_NAME = "omp_deck_device"
@@ -125,7 +124,7 @@ class AuthManager:
         self.max_devices = max_devices
         self._now = now
         self._lock = threading.RLock()
-        self._directory_fd = None
+        self._storage = PrivateStateFile(self.path, lock_name=".auth.lock", repair_root=os.name == "nt")
         self._limiter = _AttemptLimiter(pairing_attempts, pairing_window, max_rate_limit_sources, monotonic)
         with self._locked_state():
             pass
@@ -263,84 +262,36 @@ class AuthManager:
             created_at=matched_record["createdAt"],
         )
 
-    def _ensure_state_root(self) -> None:
-        try:
-            self.state_root.mkdir(parents=True, mode=0o700)
-        except FileExistsError:
-            pass
-        try:
-            info = self.state_root.lstat()
-        except OSError as error:
-            raise AuthError("authentication state root is unavailable") from error
-        if (
-            stat.S_ISLNK(info.st_mode)
-            or not stat.S_ISDIR(info.st_mode)
-            or info.st_uid != os.geteuid()
-            or info.st_mode & 0o077
-        ):
-            raise AuthError("authentication state root is unsafe")
-
     @contextmanager
     def _locked_state(self):
         with self._lock:
-            self._ensure_state_root()
-            directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
             try:
-                directory_fd = os.open(self.state_root, directory_flags)
-            except OSError as error:
-                raise AuthError("authentication state root is unavailable") from error
-            try:
-                root_info = os.fstat(directory_fd)
-                if not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid != os.geteuid() or root_info.st_mode & 0o077:
-                    raise AuthError("authentication state root is unsafe")
-                try:
-                    lock_fd = os.open(
-                        ".auth.lock",
-                        os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
-                        0o600,
-                        dir_fd=directory_fd,
-                    )
-                except OSError as error:
-                    raise AuthError("authentication lock is unavailable") from error
-                try:
-                    info = os.fstat(lock_fd)
-                    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
-                        raise AuthError("authentication lock is unsafe")
-                    os.fchmod(lock_fd, 0o600)
-                    fcntl.flock(lock_fd, fcntl.LOCK_EX)
-                    self._directory_fd = directory_fd
-                    self._state = self._load_or_create(directory_fd)
+                with self._storage.locked():
+                    self._state = self._load_or_create()
                     yield
-                finally:
-                    self._directory_fd = None
-                    os.close(lock_fd)
-            finally:
-                os.close(directory_fd)
+            except AuthError:
+                raise
+            except OSError as error:
+                detail = str(error)
+                if "root" in detail:
+                    message = "authentication state root is unsafe"
+                elif "lock" in detail:
+                    message = "authentication lock is unsafe"
+                else:
+                    message = "authentication state is unavailable or unsafe"
+                raise AuthError(message) from error
 
     def _new_state(self) -> dict:
         return {"version": STATE_VERSION, "epoch": secrets.token_hex(32), "pairing": None, "devices": {}}
 
-    def _load_or_create(self, directory_fd) -> dict:
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    def _load_or_create(self) -> dict:
         try:
-            descriptor = os.open("auth.json", flags, dir_fd=directory_fd)
-        except FileNotFoundError:
-            state = self._new_state()
-            self._state = state
-            self._write_state()
-            return state
-        except OSError as error:
-            raise AuthStateCorrupt(self.path) from error
-        try:
-            info = os.fstat(descriptor)
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
-                raise AuthStateCorrupt(self.path)
-            if info.st_size > _auth_state.MAX_STATE_BYTES:
-                raise ValueError("authentication state is too large")
-            os.fchmod(descriptor, 0o600)
-            raw = os.read(descriptor, _auth_state.MAX_STATE_BYTES + 1)
-            if len(raw) > _auth_state.MAX_STATE_BYTES:
-                raise ValueError("authentication state is too large")
+            raw = self._storage.read(_auth_state.MAX_STATE_BYTES)
+            if raw is None:
+                state = self._new_state()
+                self._state = state
+                self._write_state()
+                return state
             state = json.loads(raw)
             self._validate_state(state)
             return state
@@ -355,19 +306,10 @@ class AuthManager:
         ) as error:
             quarantine = self.path.with_name(f"auth.json.corrupt-{int(self._now())}-{secrets.token_hex(4)}")
             try:
-                os.replace(
-                    "auth.json",
-                    quarantine.name,
-                    src_dir_fd=directory_fd,
-                    dst_dir_fd=directory_fd,
-                )
-                os.fsync(directory_fd)
+                quarantine = self._storage.quarantine(quarantine.name)
             except OSError:
                 quarantine = self.path
             raise AuthStateCorrupt(quarantine) from error
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
 
     _validate_state = staticmethod(_auth_state.validate)
 
@@ -379,77 +321,29 @@ class AuthManager:
         }
 
     def _write_state(self) -> None:
-        if self._directory_fd is None:
-            raise RuntimeError("authentication state write requires its lock")
         data = (json.dumps(self._state, sort_keys=True, separators=(",", ":")) + "\n").encode()
-        temporary = f".auth.json.{secrets.token_hex(8)}.tmp"
-        descriptor = os.open(
-            temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-            dir_fd=self._directory_fd,
-        )
-        try:
-            os.fchmod(descriptor, 0o600)
-            with os.fdopen(descriptor, "wb") as stream:
-                descriptor = -1
-                stream.write(data)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(
-                temporary,
-                "auth.json",
-                src_dir_fd=self._directory_fd,
-                dst_dir_fd=self._directory_fd,
-            )
-            os.fsync(self._directory_fd)
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
-            try:
-                os.unlink(temporary, dir_fd=self._directory_fd)
-            except FileNotFoundError:
-                pass
+        self._storage.replace(data)
 
 
 def validate_auth_state(state_root: str | os.PathLike[str]) -> None:
     root = Path(state_root)
     path = root / "auth.json"
+    if not root.exists() and not root.is_symlink():
+        raise RuntimeError("authentication state is missing")
     try:
-        root_stat = root.lstat()
-        path_stat = path.lstat()
-    except FileNotFoundError as error:
-        raise RuntimeError("authentication state is missing") from error
+        validate_private_directory(root)
     except OSError as error:
-        raise RuntimeError(f"cannot inspect authentication state: {error}") from error
-    if (
-        root.is_symlink()
-        or not stat.S_ISDIR(root_stat.st_mode)
-        or root_stat.st_uid != os.geteuid()
-        or stat.S_IMODE(root_stat.st_mode) != 0o700
-    ):
-        raise RuntimeError("authentication state directory is unsafe")
-    if (
-        path.is_symlink()
-        or not stat.S_ISREG(path_stat.st_mode)
-        or path_stat.st_uid != os.geteuid()
-        or stat.S_IMODE(path_stat.st_mode) != 0o600
-        or path_stat.st_size > _auth_state.MAX_STATE_BYTES
-    ):
-        raise RuntimeError("authentication state file is unsafe")
+        raise RuntimeError("authentication state directory is unsafe") from error
+    try:
+        validate_private_file(path, _auth_state.MAX_STATE_BYTES)
+    except OSError as error:
+        raise RuntimeError("authentication state file is unsafe") from error
     lock = root / ".auth.lock"
     if lock.exists() or lock.is_symlink():
         try:
-            lock_stat = lock.lstat()
+            validate_private_file(lock, _auth_state.MAX_STATE_BYTES)
         except OSError as error:
-            raise RuntimeError(f"cannot inspect authentication lock: {error}") from error
-        if (
-            lock.is_symlink()
-            or not stat.S_ISREG(lock_stat.st_mode)
-            or lock_stat.st_uid != os.geteuid()
-            or stat.S_IMODE(lock_stat.st_mode) != 0o600
-        ):
-            raise RuntimeError("authentication lock is unsafe")
+            raise RuntimeError("authentication lock is unsafe") from error
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
         AuthManager._validate_state(state)

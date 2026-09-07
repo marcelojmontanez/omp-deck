@@ -17,6 +17,7 @@ def _mark_cursor_in_process(path, index, start, failures):
     try:
         start.wait()
         CursorStore(path).mark_read(f"session-{index}", f"message-{index}")
+        failures.put(None)
     except BaseException as error:
         failures.put(f"{type(error).__name__}: {error}")
 
@@ -50,7 +51,12 @@ class CursorStoreTests(unittest.TestCase):
             model.apply_rpc_snapshot("deck-1", instance_id="one", generation=1, snapshot=snapshot)
             self.assertTrue(model.get("deck-1")["unread"])
             self.assertFalse(model.mark_read("deck-1")["unread"])
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            if os.name == "nt":
+                from omp_deck._windows_security import is_private_path
+
+                self.assertTrue(is_private_path(path))
+            else:
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
             restarted = FleetModel(cursor_store=CursorStore(path))
             restarted.load_record(record)
@@ -68,7 +74,7 @@ class CursorStoreTests(unittest.TestCase):
     def test_concurrent_processes_do_not_lose_cursor_updates(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "cursors.json"
-            context = multiprocessing.get_context("fork")
+            context = multiprocessing.get_context("spawn" if os.name == "nt" else "fork")
             start = context.Event()
             failures = context.Queue()
             processes = [
@@ -85,7 +91,8 @@ class CursorStoreTests(unittest.TestCase):
                 process.join(10)
                 self.assertEqual(process.exitcode, 0)
 
-            self.assertTrue(failures.empty())
+            outcomes = [failures.get(timeout=2) for _ in processes]
+            self.assertEqual(outcomes, [None] * len(processes))
             store = CursorStore(path)
             self.assertEqual(
                 {store.last_read(f"session-{index}") for index in range(12)},
@@ -105,6 +112,7 @@ class CursorStoreTests(unittest.TestCase):
             self.assertEqual(store.last_read("deck-1"), None)
             self.assertEqual(store.quarantined_path.read_text(encoding="utf-8"), "not-json")
 
+    @unittest.skipIf(os.name == "nt", "Windows symlink creation requires elevated privileges")
     def test_symlink_store_is_never_read(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
             target = Path(outside) / "private.json"
@@ -120,6 +128,7 @@ class CursorStoreTests(unittest.TestCase):
             self.assertTrue(path.is_symlink())
             self.assertIsNone(store.quarantined_path)
 
+    @unittest.skipIf(os.name == "nt", "Windows symlink creation requires elevated privileges")
     def test_importing_server_does_not_touch_cursor_state_before_authentication(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

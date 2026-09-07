@@ -5,12 +5,13 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
+from ._platform_paths import default_config_path, default_omp_path, default_state_root
+from ._private_state import validate_private_directory, validate_private_file
+
 
 def config_path():
-    config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    return Path(
-        os.path.abspath(Path(os.environ.get("OMP_DECK_CONFIG", config_home / "omp-deck/config.json")).expanduser())
-    )
+    default = default_config_path()
+    return Path(os.path.abspath(Path(os.environ.get("OMP_DECK_CONFIG", default)).expanduser()))
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,19 @@ def allowed_hosts(values, host):
 
 
 def _read_config(path):
+    if os.name == "nt":
+        if not path.exists() and not path.is_symlink():
+            return {}
+        try:
+            validate_private_directory(path.parent)
+            validate_private_file(path, 64 * 1024)
+            raw = path.read_bytes()
+        except OSError as error:
+            raise RuntimeError(f"cannot read {path}: {error}") from error
+        try:
+            return json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimeError(f"cannot read {path}: {error}") from error
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
@@ -84,7 +98,7 @@ def load_settings(path=None):
         raise RuntimeError(f"{path} must contain a JSON object")
 
     home = Path.home()
-    state_home = Path(os.environ.get("XDG_STATE_HOME", home / ".local/state"))
+    state_root = default_state_root()
     port = int(values.get("port", 8787))
     if not 1 <= port <= 65535:
         raise RuntimeError("port must be between 1 and 65535")
@@ -95,10 +109,10 @@ def load_settings(path=None):
         host=str(values.get("host", "127.0.0.1")),
         port=port,
         session_root=expanded(values.get("session_root", home / ".omp/agent/sessions")),
-        socket_root=expanded(values.get("socket_root", state_home / "omp-deck/sockets")),
-        state_root=expanded(values.get("state_root", state_home / "omp-deck")),
+        socket_root=expanded(values.get("socket_root", state_root / "sockets")),
+        state_root=expanded(values.get("state_root", state_root)),
         project_root=expanded(values.get("project_root", home / "dev")),
         project_discovery_depth=project_discovery_depth,
-        omp_bin=str(values.get("omp_bin", shutil.which("omp") or home / ".local/bin/omp")),
+        omp_bin=str(values.get("omp_bin", shutil.which("omp") or default_omp_path())),
         allowed_hosts=allowed_hosts(values, str(values.get("host", "127.0.0.1"))),
     )

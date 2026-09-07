@@ -100,15 +100,16 @@ class TerminalSessionManager:
                     status="disconnected",
                     reason="Collaboration connection unavailable",
                 )
-        with self._lock:
-            if self._watcher is None:
-                self._stop.clear()
-                self._watcher = threading.Thread(
-                    target=self._watch_extensions,
-                    name="omp-deck-extension-discovery",
-                    daemon=True,
-                )
-                self._watcher.start()
+        if os.name != "nt":
+            with self._lock:
+                if self._watcher is None:
+                    self._stop.clear()
+                    self._watcher = threading.Thread(
+                        target=self._watch_extensions,
+                        name="omp-deck-extension-discovery",
+                        daemon=True,
+                    )
+                    self._watcher.start()
         return failures
 
     def close(self, timeout: float = 5.0) -> None:

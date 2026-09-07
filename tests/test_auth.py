@@ -56,7 +56,12 @@ class AuthManagerTests(unittest.TestCase):
         state = json.loads(state_text)
 
         self.assertEqual(state["version"], 1)
-        self.assertEqual(stat.S_IMODE(state_path.stat().st_mode), 0o600)
+        if os.name == "nt":
+            from omp_deck._windows_security import is_private_path
+
+            self.assertTrue(is_private_path(state_path))
+        else:
+            self.assertEqual(stat.S_IMODE(state_path.stat().st_mode), 0o600)
         self.assertNotIn(secret.token, state_text)
         self.assertNotIn(paired.credential, state_text)
         self.assertEqual(list(Path(self.temp.name).glob(".auth.json.*.tmp")), [])
@@ -271,9 +276,24 @@ class AuthManagerTests(unittest.TestCase):
         self.assertEqual(state_path.read_text(), "not-json")
         self.assertEqual(list(Path(self.temp.name).glob("auth.json.corrupt-*")), [])
 
+    @unittest.skipIf(os.name == "nt", "POSIX mode semantics")
     def test_read_only_validation_rejects_unsafe_lock(self):
         lock = Path(self.temp.name) / ".auth.lock"
         os.chmod(lock, 0o644)
+        with self.assertRaisesRegex(RuntimeError, "lock is unsafe"):
+            validate_auth_state(self.temp.name)
+
+    @unittest.skipUnless(os.name == "nt", "Windows ACL semantics")
+    def test_read_only_validation_rejects_inherited_windows_acl(self):
+        import subprocess
+
+        lock = Path(self.temp.name) / ".auth.lock"
+        subprocess.run(
+            ["icacls", str(lock), "/inheritance:e"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
         with self.assertRaisesRegex(RuntimeError, "lock is unsafe"):
             validate_auth_state(self.temp.name)
 
@@ -290,6 +310,7 @@ class AuthManagerTests(unittest.TestCase):
             paired.device.device_id,
         )
 
+    @unittest.skipIf(os.name == "nt", "Windows symlink creation requires elevated privileges")
     def test_symlink_state_root_is_rejected_without_mutating_target(self):
         with tempfile.TemporaryDirectory() as directory:
             parent = Path(directory)

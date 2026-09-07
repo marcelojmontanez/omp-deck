@@ -7,9 +7,10 @@ Deck is not a Collab replacement. It does not expose rooms, invite links, partic
 ## Supported platform and versions
 
 - Linux with a systemd user session for managed background service operation
+- Native Windows 11 for foreground operation
 - Python 3.11 or 3.12
-- stock OMP 18.1.10 on `PATH`
-- Bun 1.3.14 or newer for official OMP plugin installation and removal
+- stock OMP 18.1.10 on `PATH` or in its official per-user install location
+- Bun 1.3.14 or newer for Linux OMP extension installation and removal
 - Tailscale only for the optional supported phone-access path
 
 The official Python `omp-rpc` client and extension peer dependency are pinned to the OMP 18.1.10 source release. Other OMP versions are not claimed as supported until the RPC, extension, and Collab compatibility suites pass for them. Deck does not patch, fork, or replace OMP.
@@ -22,14 +23,16 @@ Python normalizes all transports into one session model. The browser uses advert
 
 | Indicator | Ownership and behavior |
 | --- | --- |
-| Green, **RPC session** | Deck launched and supervises `omp --mode rpc`. Full managed controls, remote Ask responses, model/thinking controls, todos, subagents, and image prompts are available when advertised. |
+| Green, **RPC session** | Deck launches and supervises `omp --mode rpc`. Full managed controls, remote Ask responses, model/thinking controls, todos, and subagents are available when advertised. Image prompts are available on Linux. |
 | Amber, **Terminal session via Collab** | A terminal-owned OMP session connected through an imported writable Collab link. Published pi-wire permissions and request settlement rules apply. The link remains server-side. |
-| Amber, **Terminal session via extension** | A terminal-owned session discovered through the bundled OMP plugin and private Unix socket. Only extension-advertised controls are enabled. Ask is visible but must be answered in the terminal. |
+| Amber, **Terminal session via extension** | On Linux, a terminal-owned session discovered through the bundled OMP plugin and private Unix socket. Only extension-advertised controls are enabled. Ask is visible but must be answered in the terminal. |
 | Red, **Disconnected** | The transport is unavailable. Session state remains visible when persisted, but mutating controls are disabled. |
 
-Capabilities can differ by transport, authorization, connection state, and protocol version. Unavailable controls are disabled rather than silently emulated. Extension disconnects never abort the terminal session. Collab failures affect only the imported Collab session.
+Capabilities can differ by transport, authorization, connection state, platform, and protocol version. Unavailable controls are disabled rather than silently emulated. Native Windows disables image attachments until OMP blob paths can be validated against Windows ACLs, and terminal-owned sessions require Collab because the Unix-socket extension is not installed there. Extension disconnects never abort the terminal session. Collab failures affect only the imported Collab session.
 
 ## Install
+
+### Linux
 
 Install through a standard isolated Python tool manager:
 
@@ -49,6 +52,18 @@ omp-deck setup --tailscale
 ```
 
 Deck refuses to modify Tailscale when any Serve route already exists. Review and configure a distinct route manually instead. Tailscale changes may require device or tailnet administrator authorization; the systemd user service itself does not require root.
+
+### Native Windows
+
+Install from PowerShell with `uv tool` or `pipx`, then run Deck in the foreground:
+
+```powershell
+uv tool install 'git+https://github.com/marcelojmontanez/omp-deck.git'
+omp-deck config validate
+omp-deck serve
+```
+
+In another PowerShell window, run `omp-deck pair` to issue a browser pairing code. The defaults use `%APPDATA%\OMP Deck\config.json`, `%LOCALAPPDATA%\OMP Deck\state`, `%USERPROFILE%\dev`, and the official OMP executable at `%LOCALAPPDATA%\omp\omp.exe`. `service`, `plugin`, `migrate`, `purge`, and automatic `setup` are intentionally unavailable on Windows; use managed RPC sessions or Collab links and uninstall the Python tool with its tool manager. Configure Tailscale Serve separately when phone access is required.
 
 ## Use
 
@@ -72,7 +87,7 @@ omp-deck serve
 
 ## Configuration
 
-Optional configuration lives at `~/.config/omp-deck/config.json`. Defaults target a standard OMP installation:
+Optional configuration lives at `~/.config/omp-deck/config.json` on Linux or `%APPDATA%\OMP Deck\config.json` on Windows. The example below shows Linux defaults; Windows uses the paths listed in the installation section.
 
 ```json
 {
@@ -88,11 +103,9 @@ Optional configuration lives at `~/.config/omp-deck/config.json`. Defaults targe
 }
 ```
 
-Project names are resolved beneath `project_root`; traversal, symlink escapes, broken links, and non-directories are rejected. `project_discovery_depth` limits filesystem traversal to 1–8 directory levels and defaults to `2`: direct children and grandchildren are listed, while configured depths beyond two discover only directories containing `.git`, `AGENTS.md`, `Cargo.toml`, `go.mod`, `package.json`, or `pyproject.toml`. Keep `project_root` near the common parent of your projects and increase the depth only when nested repositories must appear. Restart Deck after a configuration change:
+Project names are resolved beneath `project_root`; traversal, symlink escapes, broken links, and non-directories are rejected. `project_discovery_depth` limits filesystem traversal to 1–8 directory levels and defaults to `2`: direct children and grandchildren are listed, while configured depths beyond two discover only directories containing `.git`, `AGENTS.md`, `Cargo.toml`, `go.mod`, `package.json`, or `pyproject.toml`. Keep `project_root` near the common parent of your projects and increase the depth only when nested repositories must appear.
 
-```bash
-omp-deck service restart
-```
+Restart Deck after a configuration change with `omp-deck service restart` on Linux. On Windows, stop the foreground process with Ctrl+C and run `omp-deck serve` again.
 
 ## Pairing and remote access
 
@@ -110,15 +123,15 @@ Every API, SSE, and blob request requires a paired device cookie. Mutations also
 
 ## Retained data
 
-Server state defaults to `~/.local/state/omp-deck`:
+Server state defaults to `~/.local/state/omp-deck` on Linux and `%LOCALAPPDATA%\OMP Deck\state` on Windows:
 
 - `registry.json`: stable Deck session identities and non-secret recovery metadata;
 - `auth.json`: installation verifier and hashed device credentials;
 - `cursors.json`: last-read message cursors;
 - `collab.json`: protected Collab credentials while imported;
-- `sockets/`: extension registration metadata and Unix sockets.
+- `sockets/`: Linux extension registration metadata and Unix sockets.
 
-Sensitive files are atomic, bounded, mode `0600`, and corruption is surfaced or quarantined. OMP transcripts and blobs remain under OMP's own directories. The browser keeps drafts, optimistic sends, object URLs, and rendered state in memory only; it does not persist transcripts, paths, identifiers, usage, Collab links, or credentials in Web Storage. Object URLs are revoked when their owning draft or session is removed.
+Sensitive files are atomic and bounded. Linux enforces owner-only mode `0600`; Windows enforces a protected current-user ACL and uses named mutexes for cross-process locking. OMP transcripts and blobs remain under OMP's own directories. The browser keeps drafts, optimistic sends, object URLs, and rendered state in memory only; it does not persist transcripts, paths, identifiers, usage, Collab links, or credentials in Web Storage. Object URLs are revoked when their owning draft or session is removed.
 
 Live browser state uses authenticated SSE with bounded replay. Low-frequency snapshot recovery replaces state when a cursor is stale. The compatibility JSONL reader is isolated and bounded; it is not a discovery mechanism, live event source, or control protocol.
 

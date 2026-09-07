@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import copy
-import fcntl
 import json
 import math
 import os
 import re
-import stat
 import threading
 import uuid
 from collections.abc import Callable, Iterator, Mapping
@@ -17,13 +15,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ._atomic_file import replace_bytes
+from ._private_state import PrivateStateFile
 
 SCHEMA_VERSION = 1
 DEFAULT_MAX_RECORDS = 1_000
 _ADAPTER_KINDS = frozenset({"rpc", "collab", "extension"})
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-_DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 _FORBIDDEN_METADATA_MARKERS = (
     "authorization",
     "content",
@@ -146,6 +143,7 @@ class RegistryStore:
         self._id_factory = id_factory
         self._lock = threading.RLock()
         self._lock_path = self.path.with_name(f".{self.path.name}.lock")
+        self._storage = PrivateStateFile(self.path)
 
     def load(self) -> list[dict[str, Any]]:
         """Return an isolated snapshot ordered by creation/insertion order."""
@@ -246,70 +244,24 @@ class RegistryStore:
     @contextmanager
     def _locked(self) -> Iterator[None]:
         with self._lock:
-            self._ensure_parent()
-            directory_fd = os.open(
-                self.path.parent,
-                _DIRECTORY_FLAGS,
-            )
             try:
-                try:
-                    fd = os.open(
-                        self._lock_path.name,
-                        os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
-                        0o600,
-                        dir_fd=directory_fd,
-                    )
-                except OSError as error:
-                    raise RegistryError("cannot safely open registry lock") from error
-                try:
-                    if not stat.S_ISREG(os.fstat(fd).st_mode):
-                        raise RegistryError("registry lock is not a regular file")
-                    os.fchmod(fd, 0o600)
-                    fcntl.flock(fd, fcntl.LOCK_EX)
+                with self._storage.locked():
                     yield
-                finally:
-                    os.close(fd)
-            finally:
-                os.close(directory_fd)
-
-    def _ensure_parent(self) -> None:
-        try:
-            info = self.path.parent.lstat()
-        except FileNotFoundError:
-            self.path.parent.mkdir(parents=True, mode=0o700)
-            info = self.path.parent.lstat()
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
-            raise RegistryError("registry root is unsafe")
-        os.chmod(self.path.parent, 0o700)
+            except RegistryError:
+                raise
+            except OSError as error:
+                raise RegistryError("cannot safely lock registry") from error
 
     def _empty(self) -> dict[str, Any]:
         return {"version": SCHEMA_VERSION, "generation": 0, "sessions": []}
 
     def _read_or_quarantine(self) -> dict[str, Any]:
-        directory_fd = os.open(
-            self.path.parent,
-            _DIRECTORY_FLAGS,
-        )
         try:
-            try:
-                fd = os.open(
-                    self.path.name,
-                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-                    dir_fd=directory_fd,
-                )
-            except FileNotFoundError:
-                return self._empty()
-            except OSError as error:
-                raise RegistryError("cannot safely open registry") from error
-            try:
-                if not stat.S_ISREG(os.fstat(fd).st_mode):
-                    raise RegistryError("registry is not a regular file")
-                raw = os.read(fd, 8 * 1024 * 1024 + 1)
-                os.fchmod(fd, 0o600)
-            finally:
-                os.close(fd)
-        finally:
-            os.close(directory_fd)
+            raw = self._storage.read(8 * 1024 * 1024)
+        except OSError as error:
+            raise RegistryError("cannot safely open registry") from error
+        if raw is None:
+            return self._empty()
         try:
             if len(raw) > 8 * 1024 * 1024:
                 raise RegistryValidationError("registry file is too large")
@@ -407,44 +359,7 @@ class RegistryStore:
 
     def _quarantine(self) -> Path:
         stamp = re.sub(r"[^0-9]", "", self._timestamp()) or "unknown"
-        base_name = f"{self.path.name}.corrupt.{stamp}"
-        quarantine_name = base_name
-        suffix = 0
-        directory_fd = os.open(
-            self.path.parent,
-            _DIRECTORY_FLAGS,
-        )
-        try:
-            while True:
-                try:
-                    os.stat(
-                        quarantine_name,
-                        dir_fd=directory_fd,
-                        follow_symlinks=False,
-                    )
-                except FileNotFoundError:
-                    break
-                suffix += 1
-                quarantine_name = f"{base_name}.{suffix}"
-            os.replace(
-                self.path.name,
-                quarantine_name,
-                src_dir_fd=directory_fd,
-                dst_dir_fd=directory_fd,
-            )
-            fd = os.open(
-                quarantine_name,
-                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-                dir_fd=directory_fd,
-            )
-            try:
-                os.fchmod(fd, 0o600)
-            finally:
-                os.close(fd)
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-        return self.path.parent / quarantine_name
+        return self._storage.quarantine(f"{self.path.name}.corrupt.{stamp}")
 
     def _write(self, data: dict[str, Any]) -> None:
         self._validate_store(data)
@@ -455,8 +370,4 @@ class RegistryStore:
         ).encode("utf-8")
         if len(payload) > 8 * 1024 * 1024:
             raise RegistryValidationError("registry file is too large")
-        directory_fd = os.open(self.path.parent, _DIRECTORY_FLAGS)
-        try:
-            replace_bytes(directory_fd, self.path.name, payload)
-        finally:
-            os.close(directory_fd)
+        self._storage.replace(payload)

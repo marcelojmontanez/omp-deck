@@ -64,12 +64,19 @@ class CollabStoreTests(unittest.TestCase):
 
     def test_file_and_lock_are_owner_only(self):
         self.store.put("deck-session", WRITE_LINK)
-        self.assertEqual(stat.S_IMODE(self.store.path.stat().st_mode), 0o600)
-        self.assertEqual(stat.S_IMODE((self.root / ".collab.json.lock").stat().st_mode), 0o600)
-        os.chmod(self.store.path, 0o644)
-        CollabStore(self.root).list()
-        self.assertEqual(stat.S_IMODE(self.store.path.stat().st_mode), 0o600)
-        self.assertEqual(stat.S_IMODE(self.root.stat().st_mode), 0o700)
+        if os.name == "nt":
+            from omp_deck._windows_security import is_private_path
+
+            self.assertTrue(is_private_path(self.store.path))
+            self.assertTrue(is_private_path(self.root / ".collab.json.lock"))
+            self.assertTrue(is_private_path(self.root))
+        else:
+            self.assertEqual(stat.S_IMODE(self.store.path.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE((self.root / ".collab.json.lock").stat().st_mode), 0o600)
+            os.chmod(self.store.path, 0o644)
+            CollabStore(self.root).list()
+            self.assertEqual(stat.S_IMODE(self.store.path.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(self.root.stat().st_mode), 0o700)
 
     def test_corruption_is_quarantined_without_secret_in_error(self):
         self.root.mkdir()
@@ -82,7 +89,12 @@ class CollabStoreTests(unittest.TestCase):
         self.assertNotIn(leaked, repr(error))
         self.assertFalse(self.store.path.exists())
         self.assertTrue(error.quarantine_path.exists())
-        self.assertEqual(stat.S_IMODE(error.quarantine_path.stat().st_mode), 0o600)
+        if os.name == "nt":
+            from omp_deck._windows_security import is_private_path
+
+            self.assertTrue(is_private_path(error.quarantine_path))
+        else:
+            self.assertEqual(stat.S_IMODE(error.quarantine_path.stat().st_mode), 0o600)
 
     def test_concurrent_instances_do_not_lose_records(self):
         stores = [CollabStore(self.root) for _ in range(20)]
@@ -105,7 +117,7 @@ class CollabStoreTests(unittest.TestCase):
         self.assertEqual({item["sessionId"] for item in self.store.list()}, {f"session-{i}" for i in range(20)})
 
     def test_concurrent_processes_do_not_lose_records(self):
-        context = multiprocessing.get_context("fork")
+        context = multiprocessing.get_context("spawn" if os.name == "nt" else "fork")
         start = context.Event()
         failures = context.Queue()
         processes = [
@@ -124,6 +136,7 @@ class CollabStoreTests(unittest.TestCase):
             {f"process-{index}" for index in range(12)},
         )
 
+    @unittest.skipIf(os.name == "nt", "POSIX mode semantics")
     def test_chmod_error_is_not_quarantined(self):
         self.store.put("session", WRITE_LINK)
         with mock.patch("omp_deck.collab_store.os.chmod", side_effect=PermissionError("denied")):
@@ -176,6 +189,7 @@ class CollabStoreTests(unittest.TestCase):
         with self.assertRaises(CollabStoreCorruptionError):
             self.store.list()
 
+    @unittest.skipIf(os.name == "nt", "Windows symlink creation requires elevated privileges")
     def test_symlink_roots_lock_and_data_paths_are_rejected(self):
         target = Path(self.temp.name) / "target"
         target.mkdir()
@@ -207,7 +221,8 @@ class CollabStoreTests(unittest.TestCase):
 
     def test_serialization_error_does_not_chain_secret_document(self):
         self.store.put("session", WRITE_LINK)
-        data = self.store._read_or_quarantine()
+        with self.store._locked():
+            data = self.store._read_or_quarantine()
         secret = repr(data)
         with mock.patch(
             "omp_deck.collab_store.json.dumps",

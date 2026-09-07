@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ from omp_deck.projects import (
 
 
 class ProjectPathTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "creating symlinks requires Windows developer mode")
     def test_rejects_symlinked_project_and_root(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -28,6 +30,7 @@ class ProjectPathTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "invalid project root"):
                 resolve_project_path(linked_root, "new", must_exist=False)
 
+    @unittest.skipIf(os.name == "nt", "creating symlinks requires Windows developer mode")
     def test_rejects_broken_links_and_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -77,6 +80,10 @@ class ProjectPathTests(unittest.TestCase):
 
             created = create_project_directory(root, "parent/new")
             self.assertEqual(created, parent / "new")
+            if os.name == "nt":
+                with self.assertRaisesRegex(ValueError, "already exists"):
+                    create_project_directory(root, "parent/new")
+                return
 
             created.rmdir()
             created.symlink_to(root, target_is_directory=True)

@@ -7,12 +7,12 @@ from typing import Any
 
 from ._fleet_extension import project_extension_event
 from ._fleet_projection import (
-    CAPABILITIES,
     collab_projection,
     extension_projection,
     now,
     pending_ui_projection,
     plain_json,
+    platform_capabilities,
     rpc_projection,
     strict_clone,
 )
@@ -78,7 +78,7 @@ class FleetModel:
                     "instanceId": None,
                     "reason": "not connected",
                 },
-                "capabilities": dict(CAPABILITIES[adapter_kind]),
+                "capabilities": platform_capabilities(adapter_kind),
                 "messages": copy.deepcopy(existing.get("messages", [])) if existing else [],
                 "todos": copy.deepcopy(existing.get("todos", [])) if existing else [],
                 "subagents": copy.deepcopy(existing.get("subagents", [])) if existing else [],

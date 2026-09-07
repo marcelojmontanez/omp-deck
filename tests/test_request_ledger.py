@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -36,8 +37,14 @@ class RequestLedgerTests(unittest.TestCase):
             with self.assertRaises(RequestConflictError):
                 RequestLedger(path).reserve("rpc-command:session", "request-1", "b" * 64)
 
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-            self.assertEqual(first.lock_path.stat().st_mode & 0o777, 0o600)
+            if os.name == "nt":
+                from omp_deck._windows_security import is_private_path
+
+                self.assertTrue(is_private_path(path))
+                self.assertTrue(is_private_path(first.lock_path))
+            else:
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(first.lock_path.stat().st_mode & 0o777, 0o600)
 
     def test_stale_temporary_file_does_not_block_future_writes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -61,6 +68,7 @@ class RequestLedgerTests(unittest.TestCase):
             self.assertTrue(stale.exists())
             self.assertTrue(path.exists())
 
+    @unittest.skipIf(os.name == "nt", "Windows symlink creation requires elevated privileges")
     def test_symlinked_lock_is_rejected_without_touching_target(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

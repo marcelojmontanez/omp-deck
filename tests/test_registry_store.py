@@ -60,13 +60,19 @@ class RegistryStoreTests(unittest.TestCase):
     def test_registry_and_lock_are_owner_only(self):
         store = self.make_store()
         self.create_session(store)
-        os.chmod(store.path, 0o644)
+        if os.name == "nt":
+            from omp_deck._windows_security import is_private_path
 
-        store.load()
+            store.load()
+            self.assertTrue(is_private_path(store.path))
+            self.assertTrue(is_private_path(store._lock_path))
+        else:
+            os.chmod(store.path, 0o644)
+            store.load()
+            self.assertEqual(store.path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(store._lock_path.stat().st_mode & 0o777, 0o600)
 
-        self.assertEqual(store.path.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(store._lock_path.stat().st_mode & 0o777, 0o600)
-
+    @unittest.skipIf(os.name == "nt", "Windows symlink creation requires elevated privileges")
     def test_symlinked_lock_is_rejected_without_changing_target(self):
         victim = self.tmp_path / "victim"
         victim.write_text("unrelated", encoding="utf-8")

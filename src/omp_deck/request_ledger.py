@@ -1,18 +1,16 @@
 from __future__ import annotations
 
 import copy
-import fcntl
 import json
 import os
 import re
-import stat
 import threading
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from ._atomic_file import replace_bytes
+from ._private_state import PrivateStateFile
 
 _SCHEMA_VERSION = 1
 _MAX_FILE_BYTES = 2 * 1024 * 1024
@@ -37,6 +35,7 @@ class RequestLedger:
         self.lock_path = self.path.with_name(f".{self.path.name}.lock")
         self.max_records = max_records
         self._thread_lock = threading.RLock()
+        self._storage = PrivateStateFile(self.path)
 
     def lookup(self, scope: str, request_id: str, fingerprint: str) -> dict[str, Any] | None:
         self._validate_identity(scope, request_id, fingerprint)
@@ -167,66 +166,17 @@ class RequestLedger:
     @contextmanager
     def _locked(self) -> Iterator[None]:
         with self._thread_lock:
-            self._ensure_root()
-            directory_fd = os.open(
-                self.path.parent,
-                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
-            )
-            try:
-                descriptor = os.open(
-                    self.lock_path.name,
-                    os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
-                    0o600,
-                    dir_fd=directory_fd,
-                )
-                try:
-                    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                        raise OSError("request ledger lock is not a regular file")
-                    os.fchmod(descriptor, 0o600)
-                    fcntl.flock(descriptor, fcntl.LOCK_EX)
-                    yield
-                finally:
-                    os.close(descriptor)
-            finally:
-                os.close(directory_fd)
-
-    def _ensure_root(self) -> None:
-        try:
-            info = self.path.parent.lstat()
-        except FileNotFoundError:
-            self.path.parent.mkdir(parents=True, mode=0o700)
-            info = self.path.parent.lstat()
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
-            raise OSError("request ledger root is unsafe")
-        os.chmod(self.path.parent, 0o700)
+            with self._storage.locked():
+                yield
 
     @staticmethod
     def _empty() -> dict[str, Any]:
         return {"version": _SCHEMA_VERSION, "records": []}
 
     def _read(self) -> dict[str, Any]:
-        directory_fd = os.open(
-            self.path.parent,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
-        )
-        try:
-            try:
-                descriptor = os.open(
-                    self.path.name,
-                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-                    dir_fd=directory_fd,
-                )
-            except FileNotFoundError:
-                return self._empty()
-            try:
-                if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                    raise OSError("request ledger is not a regular file")
-                raw = os.read(descriptor, _MAX_FILE_BYTES + 1)
-                os.fchmod(descriptor, 0o600)
-            finally:
-                os.close(descriptor)
-        finally:
-            os.close(directory_fd)
+        raw = self._storage.read(_MAX_FILE_BYTES)
+        if raw is None:
+            return self._empty()
         if len(raw) > _MAX_FILE_BYTES:
             raise RequestLedgerError("request ledger is too large")
         try:
@@ -270,11 +220,4 @@ class RequestLedger:
         ).encode("utf-8")
         if len(payload) > _MAX_FILE_BYTES:
             raise RequestLedgerError("request ledger is too large")
-        directory_fd = os.open(
-            self.path.parent,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
-        )
-        try:
-            replace_bytes(directory_fd, self.path.name, payload)
-        finally:
-            os.close(directory_fd)
+        self._storage.replace(payload)

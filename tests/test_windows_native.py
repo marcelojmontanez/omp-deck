@@ -176,7 +176,7 @@ class WindowsPlatformTests(unittest.TestCase):
     def test_terminal_discovery_requires_private_named_pipe_metadata(self):
         from omp_deck._private_state import ensure_private_directory
         from omp_deck._terminal_discovery import discover_extension_candidates
-        from omp_deck._windows_security import secure_path
+        from omp_deck._windows_security import secure_created_path, secure_path
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "sockets"
@@ -202,6 +202,7 @@ class WindowsPlatformTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            secure_created_path(metadata)
             candidates = discover_extension_candidates(root)
             self.assertEqual(set(candidates), {session_id})
             discovered_endpoint, discovered_metadata = candidates[session_id]

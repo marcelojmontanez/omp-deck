@@ -9,7 +9,13 @@ from pathlib import Path
 from ._atomic_file import replace_bytes as replace_bytes_at
 
 if os.name == "nt":
-    from ._windows_security import is_private_path, named_mutex, owned_by_current_user, secure_path
+    from ._windows_security import (
+        is_private_path,
+        named_mutex,
+        owned_by_current_user,
+        secure_created_path,
+        secure_path,
+    )
 else:
     import fcntl
 
@@ -42,9 +48,11 @@ def ensure_private_directory(path: Path, *, repair: bool = True) -> None:
     if _unsupported_path(info) or not stat.S_ISDIR(info.st_mode):
         raise OSError(f"private state root is unsafe: {path}")
     if os.name == "nt":
-        if not owned_by_current_user(path):
+        if created:
+            secure_created_path(path)
+        elif not owned_by_current_user(path):
             raise PermissionError(f"private state root is not owned by the current user: {path}")
-        if created or repair:
+        elif repair:
             secure_path(path)
         elif not is_private_path(path):
             raise OSError(f"private state root has unsafe permissions: {path}")
@@ -153,13 +161,21 @@ class PrivateStateFile:
             os.close(directory_fd)
 
     def _prepare_windows_lock(self) -> None:
-        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
-        descriptor = os.open(self.lock_path, flags, 0o600)
+        flags = os.O_RDWR | getattr(os, "O_BINARY", 0)
+        created = False
+        try:
+            descriptor = os.open(self.lock_path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+            created = True
+        except FileExistsError:
+            descriptor = os.open(self.lock_path, flags)
         try:
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode):
                 raise OSError("private state lock is not a regular file")
-            secure_path(self.lock_path)
+            if created:
+                secure_created_path(self.lock_path)
+            else:
+                secure_path(self.lock_path)
         finally:
             os.close(descriptor)
 
@@ -221,7 +237,7 @@ class PrivateStateFile:
                 break
             if temporary is None:
                 raise OSError("could not allocate an atomic temporary file")
-            secure_path(temporary)
+            secure_created_path(temporary)
             with os.fdopen(descriptor, "wb") as stream:
                 descriptor = -1
                 stream.write(payload)

@@ -23,6 +23,11 @@ class FakeRunner:
 
 
 class LifecycleTests(unittest.TestCase):
+    def setUp(self):
+        platform = patch.object(lifecycle.sys, "platform", "linux")
+        platform.start()
+        self.addCleanup(platform.stop)
+
     def environment(self, home):
         return {
             "HOME": str(home),
@@ -173,8 +178,8 @@ class LifecycleTests(unittest.TestCase):
                             "npm": [
                                 {
                                     "name": "omp-deck",
-                                    "version": "1.1.0",
-                                    "manifest": {"version": "1.1.0"},
+                                    "version": "1.2.0",
+                                    "manifest": {"version": "1.2.0"},
                                 }
                             ]
                         }
@@ -432,7 +437,7 @@ class LifecycleTests(unittest.TestCase):
 
     def test_plugin_backup_reuses_existing_rollback_source(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             state_root = root / "state" / "omp-deck"
             backup = state_root.parent / ".omp-deck-setup-rollback-existing" / "plugin"
             backup.mkdir(parents=True)

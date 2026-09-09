@@ -126,8 +126,8 @@ def print_pairing(secret):
 
 
 def _require_supported_migration():
-    if sys.platform == "win32":
-        raise RuntimeError("legacy migration is unavailable on native Windows")
+    if sys.platform != "linux":
+        raise RuntimeError("legacy migration is available on Linux only")
 
 
 def pair():
@@ -142,7 +142,9 @@ def setup(*, tailscale=False):
         raise RuntimeError("automatic service setup requires a systemd user session")
     if sys.platform == "win32" and (shutil.which("schtasks.exe") is None or shutil.which("powershell.exe") is None):
         raise RuntimeError("automatic service setup requires Windows Task Scheduler and PowerShell")
-    if sys.platform not in {"linux", "win32"}:
+    if sys.platform == "darwin" and shutil.which("launchctl") is None:
+        raise RuntimeError("automatic service setup requires macOS launchd")
+    if sys.platform not in {"linux", "win32", "darwin"}:
         raise RuntimeError("automatic service setup is unsupported on this platform")
     if shutil.which(settings.omp_bin) is None and not Path(settings.omp_bin).is_file():
         raise RuntimeError("stock OMP is not installed or not on PATH")
@@ -228,7 +230,10 @@ def doctor():
         service_check = _check(
             "Service",
             service_status() == 0,
-            detail=("per-user Windows scheduled task" if sys.platform == "win32" else "systemd user service status"),
+            detail={
+                "win32": "per-user Windows scheduled task",
+                "darwin": "per-user macOS LaunchAgent",
+            }.get(sys.platform, "systemd user service status"),
         )
         extension_check = _check(
             "Extension fallback",

@@ -6,10 +6,10 @@ Deck is not a Collab replacement. It does not expose rooms, invite links, partic
 
 ## Supported platform and versions
 
-- Linux with a systemd user session, or native Windows 11 with Task Scheduler, for managed background service operation
+- Linux with a systemd user session, macOS with a logged-in graphical user session, or native Windows 11 with Task Scheduler, for managed background service operation
 - Python 3.11 or 3.12
 - stock OMP 18.1.10 on `PATH` or in its official per-user install location
-- Bun 1.3.14 or newer for Linux OMP extension installation and removal
+- Bun 1.3.14 or newer for Linux and macOS OMP extension installation and removal
 - Tailscale only for the optional supported phone-access path
 
 The official Python `omp-rpc` client and extension peer dependency are pinned to the OMP 18.1.10 source release. Other OMP versions are not claimed as supported until the RPC, extension, and Collab compatibility suites pass for them. Deck does not patch, fork, or replace OMP.
@@ -24,14 +24,16 @@ Python normalizes all transports into one session model. The browser uses advert
 | --- | --- |
 | Green, **RPC session** | Deck launches and supervises `omp --mode rpc`. Full managed controls, remote Ask responses, model/thinking controls, todos, subagents, and image prompts are available when advertised. |
 | Amber, **Terminal session via Collab** | A terminal-owned OMP session connected through an imported writable Collab link. Published pi-wire permissions and request settlement rules apply. The link remains server-side. |
-| Amber, **Terminal session via extension** | A terminal-owned session discovered through the bundled OMP plugin and a private Unix socket on Linux or same-user named pipe on Windows. Only extension-advertised controls are enabled. Ask is visible but must be answered in the terminal. |
+| Amber, **Terminal session via extension** | A terminal-owned session discovered through the bundled OMP plugin and a private Unix socket on Linux/macOS or same-user named pipe on Windows. Only extension-advertised controls are enabled. Ask is visible but must be answered in the terminal. |
 | Red, **Disconnected** | The transport is unavailable. Session state remains visible when persisted, but mutating controls are disabled. |
 
 Capabilities can differ by transport, authorization, connection state, platform, and protocol version. Unavailable controls are disabled rather than silently emulated. Extension disconnects never abort the terminal session. Collab failures affect only the imported Collab session.
 
+Extension shutdown follows OMP's deferred shutdown request: it may wait for OMP's next idle boundary rather than immediately exit an idle terminal. Deck does not inject terminal input or force-kill that session.
+
 ## Install
 
-### Linux
+### Linux and macOS
 
 Install through a standard isolated Python tool manager:
 
@@ -42,7 +44,7 @@ pipx install 'git+https://github.com/marcelojmontanez/omp-deck.git'
 omp-deck setup
 ```
 
-`setup` installs and validates the bundled plugin through `omp plugin`, generates and starts the per-user background service, checks `/healthz`, and prints a one-time pairing code. Linux uses a systemd user service; Windows uses a least-privilege Task Scheduler logon task. Enter the code on the browser pairing screen. It is exchanged by POST and is never placed in a URL or browser storage.
+`setup` installs and validates the bundled plugin through `omp plugin`, generates and starts the per-user background service, checks `/healthz`, and prints a one-time pairing code. Linux uses a systemd user service; macOS uses a LaunchAgent; Windows uses a least-privilege Task Scheduler logon task. Enter the code on the browser pairing screen. It is exchanged by POST and is never placed in a URL or browser storage.
 
 To configure the supported Tailscale Serve route during setup:
 
@@ -51,6 +53,16 @@ omp-deck setup --tailscale
 ```
 
 Deck refuses to modify Tailscale when any Serve route already exists. Review and configure a distinct route manually instead. Tailscale changes may require device or tailnet administrator authorization; the per-user Deck service itself does not require root or elevation.
+
+#### macOS service behavior
+
+Use Python 3.11 or 3.12, not an older Apple-provided Python. Install the supported OMP version and Bun separately; Deck does not replace your OMP installation.
+
+Setup installs `~/Library/LaunchAgents/com.omp-deck.agent.plist` in the current user's graphical login domain. Run it as your normal user, without `sudo`, while that user is logged into the Mac desktop. An SSH shell can manage the service while the graphical login exists. Headless SSH-only startup is not supported. The service starts at graphical login, restarts after failures, and stops at logout. A sleeping or powered-off Mac is not remotely available; Deck does not prevent sleep.
+
+macOS retains the same XDG defaults as Linux: configuration at `~/.config/omp-deck/config.json`, installation ownership records at `~/.local/share/omp-deck`, and state at `~/.local/state/omp-deck`. The LaunchAgent preserves your configured XDG directories and OMP profile directory. After changing those environment variables, rerun `omp-deck setup`; a plain service restart retains the installed environment. `service status` reports whether the LaunchAgent is loaded; `doctor` also checks actual HTTP health.
+
+Managed RPC, Collab, Unix-socket terminal discovery, image attachments, setup rollback, service removal, and ownership-checked purge use the same commands as Linux. Legacy migration remains Linux-only. Each Deck installation controls its own machine; cross-machine aggregation is not provided.
 
 ### Native Windows
 
@@ -85,7 +97,7 @@ omp-deck serve
 
 ## Configuration
 
-Optional configuration lives at `~/.config/omp-deck/config.json` on Linux or `%APPDATA%\OMP Deck\config.json` on Windows. The example below shows Linux defaults; Windows uses the paths listed in the installation section.
+Optional configuration lives at `~/.config/omp-deck/config.json` on Linux/macOS or `%APPDATA%\OMP Deck\config.json` on Windows. The example below shows Unix defaults; Windows uses the paths listed in the installation section.
 
 ```json
 {
@@ -105,6 +117,10 @@ Project names are resolved beneath `project_root`; traversal, symlink escapes, b
 
 Restart Deck after a configuration change with `omp-deck service restart`.
 
+On Linux/macOS, the extension and Deck must share the same `XDG_STATE_HOME`; the extension publishes under `omp-deck/sockets` within that directory. A custom `socket_root` must point there. The complete Unix socket pathname must fit within 103 UTF-8 bytes on macOS or 107 on Linux. An oversized path leaves the extension unavailable with an explicit warning; use a shorter shared state directory.
+
+When upgrading from Deck 1.1.x, rerun `omp-deck setup` and restart terminal-owned OMP sessions to load the new plugin. Older Unix endpoint names are no longer discovered.
+
 ## Pairing and remote access
 
 Treat authenticated Deck access as terminal access to the host. The supported remote path is:
@@ -121,15 +137,15 @@ Every API, SSE, and blob request requires a paired device cookie. Mutations also
 
 ## Retained data
 
-Server state defaults to `~/.local/state/omp-deck` on Linux and `%LOCALAPPDATA%\OMP Deck\state` on Windows:
+Server state defaults to `~/.local/state/omp-deck` on Linux/macOS and `%LOCALAPPDATA%\OMP Deck\state` on Windows:
 
 - `registry.json`: stable Deck session identities and non-secret recovery metadata;
 - `auth.json`: installation verifier and hashed device credentials;
 - `cursors.json`: last-read message cursors;
 - `collab.json`: protected Collab credentials while imported;
-- `sockets/`: extension registration metadata plus Unix sockets on Linux or same-user named-pipe endpoints on Windows.
+- `sockets/`: extension registration metadata plus Unix sockets on Linux/macOS or same-user named-pipe endpoints on Windows.
 
-Sensitive files are atomic and bounded. Linux enforces owner-only mode `0600`; Windows enforces a protected current-user ACL and uses named mutexes for cross-process locking. OMP transcripts and blobs remain under OMP's own directories. The browser keeps drafts, optimistic sends, object URLs, and rendered state in memory only; it does not persist transcripts, paths, identifiers, usage, Collab links, or credentials in Web Storage. Object URLs are revoked when their owning draft or session is removed.
+Sensitive files are atomic and bounded. Linux/macOS enforce owner-only mode `0600`; Windows enforces a protected current-user ACL and uses named mutexes for cross-process locking. OMP transcripts and blobs remain under OMP's own directories. The browser keeps drafts, optimistic sends, object URLs, and rendered state in memory only; it does not persist transcripts, paths, identifiers, usage, Collab links, or credentials in Web Storage. Object URLs are revoked when their owning draft or session is removed.
 
 Live browser state uses authenticated SSE with bounded replay. Low-frequency snapshot recovery replaces state when a cursor is stale. The compatibility JSONL reader is isolated and bounded; it is not a discovery mechanism, live event source, or control protocol.
 

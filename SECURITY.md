@@ -55,8 +55,8 @@ the owner identity; use device posture rules as well when access must be limited
 to one specific phone rather than every device owned by that identity.
 
 Tailscale Serve configuration may require device or tailnet administrator
-authorization. This is separate from the systemd user service, which does not
-itself require root.
+authorization. This is separate from Deck's per-user systemd service, macOS
+LaunchAgent, or Windows scheduled task, which do not require root or elevation.
 
 ## Unsupported exposure
 
@@ -83,7 +83,10 @@ storage, and deletes it when the session is removed.
 
 Managed sessions use OMP's official RPC client. Terminal-owned sessions use the
 published Collab protocol or the bundled extension's private Unix socket on
-Linux and authenticated named pipe on Windows. Windows connection tokens remain
+Linux/macOS and authenticated named pipe on Windows. Unix discovery requires a
+private current-user directory and registration metadata, an owned socket, and
+matching session/connection identities. Linux additionally checks socket peer
+credentials; macOS relies on the private filesystem boundary. Windows connection tokens remain
 in a protected current-user metadata directory, and Deck verifies that the
 named-pipe server process belongs to the current user before authenticating.
 Extension fallback cannot answer Ask remotely and never injects terminal keys.

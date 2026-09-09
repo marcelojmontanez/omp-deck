@@ -83,6 +83,34 @@ jobs:
           OPENAI_API_KEY: omp-deck-ci-not-a-real-key
         run: python -m unittest tests.test_windows_native.WindowsRpcIntegrationTests
 
+  macos-native:
+    name: Native macOS gate
+    needs: repository-check
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+      - name: Install runtime dependencies
+        run: python3 -m pip install '.[dev]'
+      - name: Install plugin development dependencies
+        working-directory: src/omp_deck/plugin
+        run: npm ci
+      - name: Exercise native contracts and isolated LaunchAgent lifecycle
+        env:
+          OMP_DECK_MACOS_LAUNCHD_SMOKE: "1"
+        run: python3 -m unittest discover -s tests
+      - run: omp-deck --help
+      - name: Exercise Unix-socket plugin
+        working-directory: src/omp_deck/plugin
+        run: npm run check
+
   package:
     name: Package and lifecycle gate
     needs: repository-check

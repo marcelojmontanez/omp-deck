@@ -175,7 +175,7 @@ class FakeRpcClient:
 class TestRpcSessionManager(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        root = Path(self.temporary.name)
+        root = Path(self.temporary.name).resolve()
         self.project = root / "project"
         self.project.mkdir()
         self.settings = Settings(

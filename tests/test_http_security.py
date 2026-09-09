@@ -66,6 +66,25 @@ class HttpSecurityTests(unittest.TestCase):
         cookie = headers["Set-Cookie"].split(";", 1)[0]
         return cookie, payload["csrfToken"]
 
+    def test_http_startup_does_not_require_reverse_dns(self):
+        with patch("socket.getfqdn", side_effect=OSError("reverse DNS unavailable")):
+            httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=2)
+            try:
+                connection.request("GET", "/api/sessions")
+                response = connection.getresponse()
+                self.assertEqual(response.status, 401)
+                self.assertEqual(json.loads(response.read()), {"error": "authentication required"})
+            finally:
+                connection.close()
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=2)
+
     def test_private_routes_require_authentication_and_no_store(self):
         status, headers, payload = self.request("GET", "/api/sessions")
 

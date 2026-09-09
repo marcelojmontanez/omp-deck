@@ -74,7 +74,7 @@ class ProjectPathTests(unittest.TestCase):
 
     def test_creation_uses_directory_descriptors_and_rejects_replacement(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             parent = root / "parent"
             parent.mkdir()
 

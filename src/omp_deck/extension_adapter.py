@@ -14,6 +14,7 @@ from collections.abc import Callable, Mapping
 from types import MappingProxyType
 from typing import Any
 
+from ._extension_endpoint import unix_endpoint_name
 from ._extension_protocol import (
     ExtensionAdapterError,
     ExtensionDisconnected,
@@ -295,6 +296,8 @@ class ExtensionAdapter:
         strings = (frame["ompVersion"], frame["connectionId"], frame["sessionId"], frame["project"])
         if any(not isinstance(value, str) or not value or len(value) > 4096 for value in strings):
             raise ExtensionProtocolError("invalid registration")
+        if "\0" in frame["connectionId"] or "\0" in frame["sessionId"]:
+            raise ExtensionProtocolError("invalid registration")
         if frame["title"] is not None and (not isinstance(frame["title"], str) or len(frame["title"]) > 4096):
             raise ExtensionProtocolError("invalid registration")
         session = _object(frame["session"], "session")
@@ -320,9 +323,14 @@ class ExtensionAdapter:
         if any(type(value) is not bool for value in caps.values()):
             raise ExtensionProtocolError("invalid capabilities")
         basename = os.path.basename(self.socket_path)
-        socket_id = hashlib.sha256(frame["sessionId"].encode("utf-8")).hexdigest()[:24]
-        suffix = ".pipe" if os.name == "nt" else ".sock"
-        if not basename.startswith(socket_id + ".") or not basename.endswith("." + frame["connectionId"] + suffix):
+        if os.name == "nt":
+            socket_id = hashlib.sha256(frame["sessionId"].encode("utf-8")).hexdigest()[:24]
+            valid_identity = basename.startswith(socket_id + ".") and basename.endswith(
+                "." + frame["connectionId"] + ".pipe"
+            )
+        else:
+            valid_identity = basename == unix_endpoint_name(frame["sessionId"], frame["connectionId"])
+        if not valid_identity:
             raise ExtensionProtocolError("registration socket identity mismatch")
         return ExtensionRegistration(
             1,

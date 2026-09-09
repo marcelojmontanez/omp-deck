@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import socket
+import sys
 import tempfile
 import threading
 import unittest
@@ -13,6 +14,7 @@ from types import MappingProxyType
 from unittest.mock import patch
 
 from omp_deck._collab_imports import CollabImportError
+from omp_deck._extension_endpoint import unix_endpoint_name
 from omp_deck._terminal_commands import TerminalCommandConflict
 from omp_deck._terminal_discovery import discover_extension_candidates
 from omp_deck.collab_adapter import CollabAdapter, CollabSnapshot
@@ -137,14 +139,13 @@ class FakeExtensionAdapter:
         self.callback = on_event
         self.calls = []
         self.closed = False
-        connection = Path(socket_path).name.removesuffix(".sock").rsplit(".", 1)[-1]
         self.registration = ExtensionRegistration(
             protocol_version=1,
             omp_version="9.8.7",
             session_id="omp-extension",
             project="/work/project",
             title="Extension title",
-            connection_id=connection,
+            connection_id="connection-1",
             capabilities=MappingProxyType(dict(self.capabilities)),
         )
         self._snapshot = ExtensionSnapshot(
@@ -188,7 +189,7 @@ class FakeExtensionAdapter:
 
 class TerminalSessionManagerTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(dir="/tmp" if sys.platform == "darwin" else None)
         self.addCleanup(self.temp.cleanup)
         root = Path(self.temp.name)
         socket_root = root / "sockets"
@@ -232,12 +233,14 @@ class TerminalSessionManagerTests(unittest.TestCase):
         )
 
     def unix_registration(self, session="omp-extension", connection="connection-1", **changes):
-        socket_id = hashlib.sha256(session.encode()).hexdigest()[:24]
-        path = self.settings.socket_root / f"{socket_id}.123.{connection}.sock"
+        path = self.settings.socket_root / unix_endpoint_name(session, connection)
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         listener.bind(str(path))
         self.addCleanup(listener.close)
         metadata = {
+            "protocol": "omp-deck-fallback-v1",
+            "version": 1,
+            "type": "registration",
             "sessionId": session,
             "connectionId": connection,
             "project": "/work/project",
@@ -265,13 +268,27 @@ class TerminalSessionManagerTests(unittest.TestCase):
         (self.settings.socket_root / "symlink.sock.json").symlink_to(target)
         (self.settings.socket_root / "oversize.sock.json").write_bytes(b" " * (64 * 1024 + 1))
 
-        wrong_path = self.settings.socket_root / "wrong.123.connection-x.sock"
+        legacy_session = "different"
+        legacy_connection = "connection-x"
+        legacy_socket_id = hashlib.sha256(legacy_session.encode()).hexdigest()[:24]
+        wrong_path = self.settings.socket_root / f"{legacy_socket_id}.123.{legacy_connection}.sock"
         wrong = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         wrong.bind(str(wrong_path))
         self.addCleanup(wrong.close)
-        Path(str(wrong_path) + ".json").write_text(
-            json.dumps({"sessionId": "different", "connectionId": "connection-x"}), encoding="utf-8"
+        legacy_metadata_path = Path(str(wrong_path) + ".json")
+        legacy_metadata_path.write_text(
+            json.dumps(
+                {
+                    "protocol": "omp-deck-fallback-v1",
+                    "version": 1,
+                    "type": "registration",
+                    "sessionId": legacy_session,
+                    "connectionId": legacy_connection,
+                }
+            ),
+            encoding="utf-8",
         )
+        legacy_metadata_path.chmod(0o600)
         regular = self.settings.socket_root / "regular.123.connection-y.sock"
         regular.write_text("not a socket", encoding="utf-8")
         Path(str(regular) + ".json").write_text(

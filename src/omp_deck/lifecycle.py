@@ -20,7 +20,7 @@ from .installation_paths import (
     validate_manifest,
 )
 
-PLUGIN_VERSION = "1.1.0"
+PLUGIN_VERSION = "1.2.0"
 PLUGIN_NAME = "omp-deck"
 PLUGIN_ROOT = Path(__file__).resolve().parent / "plugin"
 
@@ -48,6 +48,18 @@ class ServiceSnapshot:
     config_mode: int | None = None
 
 
+def _service_adapter():
+    if os.name == "nt":
+        from . import _windows_lifecycle
+
+        return _windows_lifecycle
+    if sys.platform == "darwin":
+        from . import _macos_lifecycle
+
+        return _macos_lifecycle
+    return None
+
+
 def _file_snapshot(path):
     if not path.is_file() or path.is_symlink():
         return None, None
@@ -55,10 +67,9 @@ def _file_snapshot(path):
 
 
 def capture_service_state(*, settings=None, config_path=None, runner=None):
-    if os.name == "nt":
-        from ._windows_lifecycle import capture_service_state as capture_windows_service_state
-
-        return capture_windows_service_state(
+    adapter = _service_adapter()
+    if adapter is not None:
+        return adapter.capture_service_state(
             settings=settings,
             config_path=config_path,
             runner=runner or run,
@@ -88,6 +99,22 @@ def capture_service_state(*, settings=None, config_path=None, runner=None):
         ).returncode
         == 0
     )
+    roots = _capture_roots(paths)
+    return ServiceSnapshot(
+        unit,
+        unit_mode,
+        manifest,
+        manifest_mode,
+        enabled,
+        active,
+        paths,
+        roots,
+        config,
+        config_mode,
+    )
+
+
+def _capture_roots(paths):
     roots = []
     for root in dict.fromkeys((paths.install_root, paths.config_root, paths.state_root)):
         existed = root.exists() and not root.is_symlink()
@@ -101,18 +128,7 @@ def capture_service_state(*, settings=None, config_path=None, runner=None):
                 entries,
             )
         )
-    return ServiceSnapshot(
-        unit,
-        unit_mode,
-        manifest,
-        manifest_mode,
-        enabled,
-        active,
-        paths,
-        tuple(roots),
-        config,
-        config_mode,
-    )
+    return tuple(roots)
 
 
 def _restore_root(snapshot):
@@ -138,25 +154,16 @@ def _restore_root(snapshot):
 
 
 def restore_service_state(snapshot, *, runner=None):
-    if os.name == "nt":
-        from ._windows_lifecycle import restore_service_state as restore_windows_service_state
-
-        return restore_windows_service_state(snapshot, runner=runner or run)
+    adapter = _service_adapter()
+    if adapter is not None:
+        return adapter.restore_service_state(snapshot, runner=runner or run)
     runner = runner or run
     paths = snapshot.installation or installation_paths()
     runner(
         ["systemctl", "--user", "stop", "omp-deck.service"],
         check=False,
     )
-    for path, content, mode in (
-        (paths.unit_path, snapshot.unit, snapshot.unit_mode),
-        (paths.manifest_path, snapshot.manifest, snapshot.manifest_mode),
-        (paths.config_path, snapshot.config, snapshot.config_mode),
-    ):
-        if content is None:
-            path.unlink(missing_ok=True)
-        else:
-            write_atomic(path, content.decode("utf-8"), mode)
+    _restore_service_files(snapshot, paths)
     if snapshot.installation is not None:
         for root in reversed(snapshot.roots):
             _restore_root(root)
@@ -185,6 +192,18 @@ def restore_service_state(snapshot, *, runner=None):
     )
 
 
+def _restore_service_files(snapshot, paths):
+    for path, content, mode in (
+        (paths.unit_path, snapshot.unit, snapshot.unit_mode),
+        (paths.manifest_path, snapshot.manifest, snapshot.manifest_mode),
+        (paths.config_path, snapshot.config, snapshot.config_mode),
+    ):
+        if content is None:
+            path.unlink(missing_ok=True)
+        else:
+            write_atomic(path, content, mode)
+
+
 def _plugin_record(settings, *, runner=None):
     runner = runner or run
     result = runner(
@@ -193,7 +212,7 @@ def _plugin_record(settings, *, runner=None):
         capture_output=True,
     )
     if result.returncode:
-        return None
+        raise RuntimeError("cannot inspect installed OMP plugins")
     try:
         records = json.loads(result.stdout).get("npm", [])
         return next(item for item in records if isinstance(item, dict) and item.get("name") == PLUGIN_NAME)
@@ -232,7 +251,9 @@ def backup_plugin(settings, *, runner=None):
 def restore_plugin(settings, backup, *, runner=None):
     runner = runner or run
     if backup is None:
-        return remove_plugin(settings.omp_bin, runner=runner)
+        if plugin_installed(settings, runner=runner):
+            return remove_plugin(settings.omp_bin, runner=runner)
+        return None
     return runner([settings.omp_bin, "plugin", "install", str(backup)])
 
 
@@ -262,7 +283,11 @@ def write_atomic(path, content, mode=None):
     fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(temporary_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        if isinstance(content, bytes):
+            stream = os.fdopen(fd, "wb")
+        else:
+            stream = os.fdopen(fd, "w", encoding="utf-8")
+        with stream:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
@@ -366,10 +391,9 @@ def remove_plugin(omp_bin="omp", *, runner=run):
 
 
 def install_service(settings, config_path, *, runner=run, start=True):
-    if os.name == "nt":
-        from ._windows_lifecycle import install_service as install_windows_service
-
-        return install_windows_service(
+    adapter = _service_adapter()
+    if adapter is not None:
+        return adapter.install_service(
             settings,
             config_path,
             runner=runner,
@@ -388,10 +412,9 @@ def install_service(settings, config_path, *, runner=run, start=True):
 
 
 def service_status(*, runner=run):
-    if os.name == "nt":
-        from ._windows_lifecycle import service_status as windows_service_status
-
-        return windows_service_status(runner=runner)
+    adapter = _service_adapter()
+    if adapter is not None:
+        return adapter.service_status(runner=runner)
     return runner(
         ["systemctl", "--user", "status", "omp-deck.service"],
         check=False,
@@ -399,18 +422,16 @@ def service_status(*, runner=run):
 
 
 def restart_service(*, runner=run):
-    if os.name == "nt":
-        from ._windows_lifecycle import restart_service as restart_windows_service
-
-        return restart_windows_service(runner=runner)
+    adapter = _service_adapter()
+    if adapter is not None:
+        return adapter.restart_service(runner=runner)
     runner(["systemctl", "--user", "restart", "omp-deck.service"])
 
 
 def remove_service(*, runner=run):
-    if os.name == "nt":
-        from ._windows_lifecycle import remove_service as remove_windows_service
-
-        return remove_windows_service(runner=runner)
+    adapter = _service_adapter()
+    if adapter is not None:
+        return adapter.remove_service(runner=runner)
     paths = validate_manifest(installation_paths())
     runner(
         ["systemctl", "--user", "disable", "--now", "omp-deck.service"],

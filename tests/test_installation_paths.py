@@ -37,11 +37,13 @@ class InstallationPathTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
             state_home = home / "state"
-            state_home.mkdir()
-            (state_home / ".omp-deck-owned").write_text("owned\n")
+            mark_owned(state_home)
+            sentinel = state_home / "unrelated"
+            sentinel.write_text("preserved")
             with patch.dict("os.environ", {"XDG_STATE_HOME": str(state_home)}):
-                with self.assertRaisesRegex(RuntimeError, "unsafe"):
+                with self.assertRaises(RuntimeError):
                     remove_owned_root(state_home, (state_home,))
+            self.assertEqual(sentinel.read_text(), "preserved")
 
 
 if __name__ == "__main__":

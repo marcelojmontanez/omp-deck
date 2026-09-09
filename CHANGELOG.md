@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Added
+
+- Support native macOS with a per-user LaunchAgent, graphical-login startup, failure restarts, setup rollback, health diagnostics, and ownership-checked removal and purge. The service requires a logged-in desktop user and does not prevent Mac sleep.
+- Add a native macOS CI gate for LaunchAgent lifecycle, Python portability contracts, and the Unix-socket plugin.
+
+### Changed
+
+- Shorten Unix extension endpoint names to fit macOS socket limits. After upgrading, rerun `omp-deck setup` and restart terminal-owned OMP sessions; older Unix endpoints are no longer discovered.
+- Reject legacy migration outside Linux. macOS and Windows use the normal setup commands.
+
+### Fixed
+
+- Keep HTTP startup independent of reverse DNS, which could delay macOS readiness.
+- Avoid concurrent private-state lock creation failures on APFS.
+- Refuse purging configured XDG roots reached through filesystem aliases.
+- Preserve the original setup error when plugin installation fails before creating a plugin.
+
 ## 1.1.0 — 2026-09-09
 
 ### Added

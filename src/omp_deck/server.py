@@ -5,6 +5,7 @@ import threading
 from http.server import SimpleHTTPRequestHandler
 from http.server import ThreadingHTTPServer as _ThreadingHTTPServer
 from pathlib import Path
+from socketserver import TCPServer
 from urllib.parse import urlparse
 
 from ._sse import send_stream
@@ -66,6 +67,12 @@ _terminal_manager = None
 class ThreadingHTTPServer(_ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
+
+    def server_bind(self):
+        # HTTPServer's reverse-DNS lookup blocked macOS startup before listen().
+        # Deck authorizes Host separately and needs only the bound address here.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 _terminal_manager_lock = threading.Lock()

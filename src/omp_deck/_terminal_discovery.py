@@ -10,6 +10,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from ._extension_endpoint import unix_endpoint_name
+
 _MAX_METADATA_BYTES = 64 * 1024
 _OpenFile = Callable[[Path, int], int]
 
@@ -127,7 +129,13 @@ def _validated_candidate(
         metadata, modified_ns = _read_metadata(metadata_path, open_file, uid)
         session_id = metadata.get("sessionId")
         connection_id = metadata.get("connectionId")
-        if not _nonempty_string(session_id) or not _nonempty_string(connection_id):
+        if (
+            metadata.get("protocol") != "omp-deck-fallback-v1"
+            or metadata.get("version") != 1
+            or metadata.get("type") != "registration"
+            or not _nonempty_string(session_id)
+            or not _nonempty_string(connection_id)
+        ):
             return None
         socket_path = Path(str(metadata_path)[:-5])
         if not _valid_socket(socket_path, session_id, connection_id, uid):
@@ -170,14 +178,12 @@ def _valid_metadata_info(info: os.stat_result, uid: int) -> bool:
 
 def _valid_socket(socket_path: Path, session_id: str, connection_id: str, uid: int) -> bool:
     info = socket_path.stat(follow_symlinks=False)
-    socket_id = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:24]
     return (
         stat.S_ISSOCK(info.st_mode)
         and info.st_uid == uid
-        and socket_path.name.startswith(socket_id + ".")
-        and socket_path.name.endswith("." + connection_id + ".sock")
+        and socket_path.name == unix_endpoint_name(session_id, connection_id)
     )
 
 
 def _nonempty_string(value: object) -> bool:
-    return isinstance(value, str) and bool(value)
+    return isinstance(value, str) and bool(value) and "\0" not in value

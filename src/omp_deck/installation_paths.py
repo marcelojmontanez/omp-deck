@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -65,7 +66,11 @@ def installation_paths(*, config_file=None, state_root=None):
     config_path = absolute_path(config_file) if config_file is not None else config_root / "omp-deck/config.json"
     return InstallationPaths(
         install_root=install_root,
-        unit_path=config_root / "systemd/user/omp-deck.service",
+        unit_path=(
+            Path.home() / "Library/LaunchAgents/com.omp-deck.agent.plist"
+            if sys.platform == "darwin"
+            else config_root / "systemd/user/omp-deck.service"
+        ),
         config_root=config_path.parent,
         config_path=config_path,
         state_root=absolute_path(state_root) if state_root is not None else state_root_path / "omp-deck",
@@ -190,9 +195,9 @@ def remove_owned_root(root, approved_roots):
     forbidden = {
         Path(home.anchor),
         home,
-        absolute_path(config_home()),
-        absolute_path(data_home()),
-        absolute_path(state_home()),
+        absolute_path(config_home()).resolve(),
+        absolute_path(data_home()).resolve(),
+        absolute_path(state_home()).resolve(),
     }
     if _is_link_like(root):
         raise RuntimeError(f"refusing to purge symlink or reparse point: {root}")

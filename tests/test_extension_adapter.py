@@ -9,6 +9,7 @@ import time
 import unittest
 from types import MappingProxyType
 
+from omp_deck._extension_endpoint import unix_endpoint_name
 from omp_deck.extension_adapter import (
     PROTOCOL,
     ExtensionAdapter,
@@ -23,7 +24,7 @@ CONNECTION = "connection-1"
 PATH = (
     rf"\\.\pipe\{hashlib.sha256(SESSION.encode()).hexdigest()[:24]}.123.{CONNECTION}.pipe"
     if os.name == "nt"
-    else f"/tmp/{hashlib.sha256(SESSION.encode()).hexdigest()[:24]}.123.{CONNECTION}.sock"
+    else f"/tmp/{unix_endpoint_name(SESSION, CONNECTION)}"
 )
 
 

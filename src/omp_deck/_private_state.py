@@ -136,12 +136,13 @@ class PrivateStateFile:
             root_info = os.fstat(directory_fd)
             if not stat.S_ISDIR(root_info.st_mode) or not _posix_owned(root_info):
                 raise OSError("private state root is unsafe")
-            descriptor = os.open(
-                self.lock_path.name,
-                os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
-                0o600,
-                dir_fd=directory_fd,
-            )
+            flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+            # APFS can return ENOENT for concurrent non-exclusive O_CREAT opens.
+            # Elect one creator, then open the persistent lock without creation.
+            try:
+                descriptor = os.open(self.lock_path.name, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory_fd)
+            except FileExistsError:
+                descriptor = os.open(self.lock_path.name, flags, dir_fd=directory_fd)
             try:
                 info = os.fstat(descriptor)
                 if not stat.S_ISREG(info.st_mode) or not _posix_owned(info):

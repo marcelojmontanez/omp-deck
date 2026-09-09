@@ -15,6 +15,7 @@ const MAX_PENDING_WRITE_BYTES = 4 * MAX_LINE_BYTES;
 const MAX_HISTORY_MESSAGES = 500;
 const MAX_HISTORY_CHUNK_MESSAGES = 64;
 const WINDOWS = process.platform === "win32";
+const UNIX_SOCKET_PATH_BYTES = process.platform === "linux" ? 108 : 104;
 const SOCKET_DIR = WINDOWS
   ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "OMP Deck", "state", "sockets")
   : path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "omp-deck", "sockets");
@@ -48,6 +49,8 @@ export default function ompDeck(pi: ExtensionAPI) {
   let heartbeatTimer: ManagedTimer | undefined;
   let reconnectAttempt = 0;
   const sessionSocketId = (sessionId: string): string => createHash("sha256").update(sessionId).digest("hex").slice(0, 24);
+  const unixEndpointName = (sessionId: string): string => createHash("sha256")
+    .update(sessionId).update("\0").update(connectionId).digest("hex").slice(0, 24) + ".sock";
   let stopping = false;
   let lifecycleGeneration = 0;
   let lifecycleTail = Promise.resolve();
@@ -381,8 +384,14 @@ export default function ompDeck(pi: ExtensionAPI) {
       if (!WINDOWS) await fs.promises.chmod(SOCKET_DIR, 0o700);
       if (stopping || generation !== lifecycleGeneration) return;
       const identity = sessionIdentity(context);
-      const endpointName = `${sessionSocketId(identity.id)}.${process.pid}.${connectionId}.${WINDOWS ? "pipe" : "sock"}`;
+      const endpointName = WINDOWS
+        ? `${sessionSocketId(identity.id)}.${process.pid}.${connectionId}.pipe`
+        : unixEndpointName(identity.id);
       socketPath = WINDOWS ? `\\\\.\\pipe\\${endpointName}` : path.join(SOCKET_DIR, endpointName);
+      const socketPathBytes = WINDOWS ? 0 : Buffer.byteLength(socketPath) + 1;
+      if (socketPathBytes > UNIX_SOCKET_PATH_BYTES) {
+        throw new Error(`Unix socket path requires ${socketPathBytes} bytes; platform limit is ${UNIX_SOCKET_PATH_BYTES}`);
+      }
       metadataPath = path.join(SOCKET_DIR, `${endpointName}.json`);
       listener = net.createServer((socket) => accept(socket, context));
       server = listener;

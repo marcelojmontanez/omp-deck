@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import shutil
 import signal
 import socket
@@ -124,11 +125,9 @@ def print_pairing(secret):
     print(f"Expires at Unix time {secret.expires_at}.")
 
 
-def _require_posix_integration(feature):
+def _require_supported_migration():
     if sys.platform == "win32":
-        raise RuntimeError(
-            f"{feature} is unavailable on native Windows; run `omp-deck serve` and use managed RPC or Collab sessions"
-        )
+        raise RuntimeError("legacy migration is unavailable on native Windows")
 
 
 def pair():
@@ -139,10 +138,12 @@ def pair():
 def setup(*, tailscale=False):
     path = config_path()
     settings = load_settings(path)
-    if sys.platform != "linux" or shutil.which("systemctl") is None:
-        raise RuntimeError(
-            "automatic service and extension setup requires Linux with systemd; on native Windows, run `omp-deck serve`"
-        )
+    if sys.platform == "linux" and shutil.which("systemctl") is None:
+        raise RuntimeError("automatic service setup requires a systemd user session")
+    if sys.platform == "win32" and (shutil.which("schtasks.exe") is None or shutil.which("powershell.exe") is None):
+        raise RuntimeError("automatic service setup requires Windows Task Scheduler and PowerShell")
+    if sys.platform not in {"linux", "win32"}:
+        raise RuntimeError("automatic service setup is unsupported on this platform")
     if shutil.which(settings.omp_bin) is None and not Path(settings.omp_bin).is_file():
         raise RuntimeError("stock OMP is not installed or not on PATH")
     plugin_preexisting = plugin_installed(settings)
@@ -220,41 +221,20 @@ def doctor():
     if settings is None:
         blocked = ("Service", "Health", "OMP executable", "Extension fallback", "Authentication")
         for label in blocked:
-            checks.append(
-                _check(
-                    label,
-                    False,
-                    optional=sys.platform == "win32" and label in {"Service", "Extension fallback"},
-                    detail="blocked by invalid configuration",
-                )
-            )
+            checks.append(_check(label, False, detail="blocked by invalid configuration"))
     else:
         health, health_detail = _health_diagnostic(settings)
         omp_available = shutil.which(settings.omp_bin) is not None or Path(settings.omp_bin).is_file()
-        if sys.platform == "win32":
-            service_check = _check(
-                "Service",
-                False,
-                optional=True,
-                detail="native Windows service installation is unavailable; use omp-deck serve",
-            )
-            extension_check = _check(
-                "Extension fallback",
-                False,
-                optional=True,
-                detail="terminal-owned sessions require Collab on native Windows",
-            )
-        else:
-            service_check = _check(
-                "Service",
-                service_status() == 0,
-                detail="systemd user service status",
-            )
-            extension_check = _check(
-                "Extension fallback",
-                plugin_status(settings) if omp_available else False,
-                detail=f"expected omp-deck {PLUGIN_VERSION} for OMP 18.1.10",
-            )
+        service_check = _check(
+            "Service",
+            service_status() == 0,
+            detail=("per-user Windows scheduled task" if sys.platform == "win32" else "systemd user service status"),
+        )
+        extension_check = _check(
+            "Extension fallback",
+            plugin_status(settings) if omp_available else False,
+            detail=f"expected omp-deck {PLUGIN_VERSION} for OMP 18.1.10",
+        )
         checks.extend(
             (
                 service_check,
@@ -305,7 +285,9 @@ def validate_config():
     return 0
 
 
-def serve():
+def serve(config=None):
+    if config is not None:
+        os.environ["OMP_DECK_CONFIG"] = str(Path(config).expanduser())
     from .server import HOST, PORT, Handler, ThreadingHTTPServer, start_runtime, stop_runtime
 
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)
@@ -339,7 +321,8 @@ def main(argv=None):
     config_actions = config.add_subparsers(dest="config_action", required=True)
     config_actions.add_parser("validate")
     commands.add_parser("doctor", help="check configuration and integrations")
-    commands.add_parser("serve", help="run OMP Deck in the foreground")
+    serve_parser = commands.add_parser("serve", help="run OMP Deck in the foreground")
+    serve_parser.add_argument("--config", help="use this configuration file")
     commands.add_parser("purge", help="remove service, plugin, configuration, and state")
     migrate_parser = commands.add_parser("migrate", help="plan or apply legacy session and cursor migration")
     migrate_parser.add_argument(
@@ -348,7 +331,7 @@ def main(argv=None):
         help="write normalized registry and cursor records",
     )
 
-    service = commands.add_parser("service", help="manage the systemd user service")
+    service = commands.add_parser("service", help="manage the background service")
     service_actions = service.add_subparsers(dest="service_action", required=True)
     service_actions.add_parser("install", help="generate, enable, and start the service")
     for action in ("status", "restart", "remove"):
@@ -360,8 +343,8 @@ def main(argv=None):
     plugin_actions.add_parser("remove")
 
     arguments = parser.parse_args(argv)
-    if arguments.command in {"service", "plugin", "purge", "migrate"}:
-        _require_posix_integration(arguments.command)
+    if arguments.command == "migrate":
+        _require_supported_migration()
     if arguments.command == "setup":
         setup(tailscale=arguments.tailscale)
     elif arguments.command == "pair":
@@ -371,7 +354,7 @@ def main(argv=None):
     elif arguments.command == "doctor":
         return doctor()
     elif arguments.command == "serve":
-        serve()
+        serve(config=arguments.config)
     elif arguments.command == "purge":
         try:
             omp_bin = load_settings().omp_bin

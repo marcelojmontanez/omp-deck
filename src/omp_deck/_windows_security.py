@@ -13,6 +13,7 @@ _KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 _TOKEN_QUERY = 0x0008
 _TOKEN_USER = 1
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _ERROR_INSUFFICIENT_BUFFER = 122
 _SE_FILE_OBJECT = 1
 _OWNER_SECURITY_INFORMATION = 0x00000001
@@ -115,6 +116,8 @@ _ADVAPI32.SetNamedSecurityInfoW.argtypes = (
 )
 _ADVAPI32.SetNamedSecurityInfoW.restype = wintypes.DWORD
 _ADVAPI32.EqualSid.argtypes = (c_void_p, c_void_p)
+_ADVAPI32.ConvertSidToStringSidW.argtypes = (c_void_p, POINTER(wintypes.LPWSTR))
+_ADVAPI32.ConvertSidToStringSidW.restype = wintypes.BOOL
 _ADVAPI32.EqualSid.restype = wintypes.BOOL
 _ADVAPI32.GetAclInformation.argtypes = (c_void_p, c_void_p, wintypes.DWORD, wintypes.DWORD)
 _ADVAPI32.GetAclInformation.restype = wintypes.BOOL
@@ -122,6 +125,8 @@ _ADVAPI32.GetAce.argtypes = (c_void_p, wintypes.DWORD, POINTER(c_void_p))
 _ADVAPI32.GetAce.restype = wintypes.BOOL
 _ADVAPI32.GetSecurityDescriptorControl.argtypes = (c_void_p, POINTER(wintypes.WORD), POINTER(wintypes.DWORD))
 _ADVAPI32.GetSecurityDescriptorControl.restype = wintypes.BOOL
+_KERNEL32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+_KERNEL32.OpenProcess.restype = wintypes.HANDLE
 _KERNEL32.GetCurrentProcess.restype = wintypes.HANDLE
 _KERNEL32.CloseHandle.argtypes = (wintypes.HANDLE,)
 _KERNEL32.CloseHandle.restype = wintypes.BOOL
@@ -144,22 +149,38 @@ def _check_status(status: int, operation: str) -> None:
         raise OSError(status, f"{operation} failed")
 
 
+def _token_user_sid(token: wintypes.HANDLE) -> tuple[ctypes.Array[ctypes.c_char], c_void_p]:
+    required = wintypes.DWORD()
+    _ADVAPI32.GetTokenInformation(token, _TOKEN_USER, None, 0, byref(required))
+    if ctypes.get_last_error() != _ERROR_INSUFFICIENT_BUFFER:
+        raise _winerror()
+    buffer = ctypes.create_string_buffer(required.value)
+    if not _ADVAPI32.GetTokenInformation(token, _TOKEN_USER, buffer, required, byref(required)):
+        raise _winerror()
+    return buffer, cast(buffer, POINTER(_TokenUser)).contents.user.sid
+
+
 def _current_user_sid() -> tuple[ctypes.Array[ctypes.c_char], c_void_p]:
     token = wintypes.HANDLE()
     if not _ADVAPI32.OpenProcessToken(_KERNEL32.GetCurrentProcess(), _TOKEN_QUERY, byref(token)):
         raise _winerror()
     try:
-        required = wintypes.DWORD()
-        _ADVAPI32.GetTokenInformation(token, _TOKEN_USER, None, 0, byref(required))
-        if ctypes.get_last_error() != _ERROR_INSUFFICIENT_BUFFER:
-            raise _winerror()
-        buffer = ctypes.create_string_buffer(required.value)
-        if not _ADVAPI32.GetTokenInformation(token, _TOKEN_USER, buffer, required, byref(required)):
-            raise _winerror()
-        sid = cast(buffer, POINTER(_TokenUser)).contents.user.sid
-        return buffer, sid
+        return _token_user_sid(token)
     finally:
         _KERNEL32.CloseHandle(token)
+
+
+def current_user_sid_string() -> str:
+    sid_buffer, sid = _current_user_sid()
+    value = wintypes.LPWSTR()
+    try:
+        if not _ADVAPI32.ConvertSidToStringSidW(sid, byref(value)):
+            raise _winerror()
+        return value.value
+    finally:
+        del sid_buffer
+        if value:
+            _KERNEL32.LocalFree(value)
 
 
 def _path_kind(path: Path) -> bool:
@@ -201,6 +222,27 @@ def owned_by_current_user(path: Path) -> bool:
     finally:
         del sid_buffer
         _KERNEL32.LocalFree(descriptor)
+
+
+def process_owned_by_current_user(process_id: int) -> bool:
+    process = _KERNEL32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, process_id)
+    if not process:
+        raise _winerror()
+    token = wintypes.HANDLE()
+    try:
+        if not _ADVAPI32.OpenProcessToken(process, _TOKEN_QUERY, byref(token)):
+            raise _winerror()
+        process_buffer, process_sid = _token_user_sid(token)
+        current_buffer, current_sid = _current_user_sid()
+        try:
+            return bool(_ADVAPI32.EqualSid(process_sid, current_sid))
+        finally:
+            del process_buffer
+            del current_buffer
+    finally:
+        if token:
+            _KERNEL32.CloseHandle(token)
+        _KERNEL32.CloseHandle(process)
 
 
 def secure_path(path: Path) -> None:

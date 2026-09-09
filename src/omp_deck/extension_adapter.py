@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import socket
 import threading
 import time
@@ -28,9 +29,14 @@ from ._extension_protocol import (
 
 PROTOCOL = "omp-deck-fallback-v1"
 _MISSING = object()
+_CONNECTION_TOKEN = re.compile(r"[0-9a-f]{64}")
 
 
-def _default_connector(path: str) -> socket.socket:
+def _default_connector(path: str):
+    if os.name == "nt":
+        from ._windows_pipe import connect_named_pipe
+
+        return connect_named_pipe(path)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.connect(path)
     return sock
@@ -42,16 +48,17 @@ class ExtensionAdapter:
         socket_path: str,
         on_event: Callable[[Mapping[str, Any]], None] | None = None,
         *,
-        connector: Callable[[str], socket.socket] = _default_connector,
+        connector: Callable[[str], Any] = _default_connector,
         clock: Callable[[], float] = time.monotonic,
         frame_limit: int = 1024 * 1024,
         event_limit: int = 512,
         response_limit: int = 128,
         registration_timeout: float = 5,
+        connection_token: str | None = None,
         heartbeat_timeout: float = 50,
     ) -> None:
         if not isinstance(socket_path, str) or not socket_path or "\x00" in socket_path:
-            raise ValueError("socket_path must be a non-empty Unix socket path")
+            raise ValueError("socket_path must be a non-empty extension endpoint")
         if on_event is not None and not callable(on_event):
             raise TypeError("on_event must be callable")
         if not callable(connector) or not callable(clock):
@@ -66,16 +73,21 @@ class ExtensionAdapter:
         for name, value in (("registration_timeout", registration_timeout), ("heartbeat_timeout", heartbeat_timeout)):
             if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
                 raise ValueError(f"{name} must be positive")
+        if connection_token is not None and (
+            not isinstance(connection_token, str) or _CONNECTION_TOKEN.fullmatch(connection_token) is None
+        ):
+            raise ValueError("connection_token must be a 256-bit lowercase hexadecimal token")
         self.socket_path = socket_path
         self._on_event = on_event
         self._connector = connector
+        self._connection_token = connection_token
         self._clock = clock
         self._frame_limit = frame_limit
         self._event_limit = event_limit
         self._response_limit = response_limit
         self._registration_timeout = float(registration_timeout)
         self._heartbeat_timeout = float(heartbeat_timeout)
-        self._sock: socket.socket | None = None
+        self._sock: Any | None = None
         self._reader: threading.Thread | None = None
         self._buffer = bytearray()
         self._send_lock = threading.Lock()
@@ -103,7 +115,7 @@ class ExtensionAdapter:
                 return self._registration
             self._closed = False
             self._reason = None
-        sock: socket.socket | None = None
+        sock: Any | None = None
         try:
             sock = self._connector(self.socket_path)
             if not all(hasattr(sock, name) for name in ("recv", "sendall", "settimeout", "close")):
@@ -119,6 +131,15 @@ class ExtensionAdapter:
                 if peer_uid != os.geteuid():
                     raise ExtensionProtocolError("extension peer ownership mismatch")
             sock.settimeout(self._registration_timeout)
+            if self._connection_token is not None:
+                handshake = (
+                    json.dumps(
+                        {"protocol": PROTOCOL, "version": 1, "type": "connect", "token": self._connection_token},
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    + b"\n"
+                )
+                sock.sendall(handshake)
             registration = self._parse_registration(self._read_frame())
             snapshot_frame = self._parse_event(self._read_frame(), require_snapshot=True)
             self._registration = registration
@@ -300,7 +321,8 @@ class ExtensionAdapter:
             raise ExtensionProtocolError("invalid capabilities")
         basename = os.path.basename(self.socket_path)
         socket_id = hashlib.sha256(frame["sessionId"].encode("utf-8")).hexdigest()[:24]
-        if not basename.startswith(socket_id + ".") or not basename.endswith("." + frame["connectionId"] + ".sock"):
+        suffix = ".pipe" if os.name == "nt" else ".sock"
+        if not basename.startswith(socket_id + ".") or not basename.endswith("." + frame["connectionId"] + suffix):
             raise ExtensionProtocolError("registration socket identity mismatch")
         return ExtensionRegistration(
             1,

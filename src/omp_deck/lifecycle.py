@@ -20,7 +20,7 @@ from .installation_paths import (
     validate_manifest,
 )
 
-PLUGIN_VERSION = "1.0.1"
+PLUGIN_VERSION = "1.1.0"
 PLUGIN_NAME = "omp-deck"
 PLUGIN_ROOT = Path(__file__).resolve().parent / "plugin"
 
@@ -55,6 +55,14 @@ def _file_snapshot(path):
 
 
 def capture_service_state(*, settings=None, config_path=None, runner=None):
+    if os.name == "nt":
+        from ._windows_lifecycle import capture_service_state as capture_windows_service_state
+
+        return capture_windows_service_state(
+            settings=settings,
+            config_path=config_path,
+            runner=runner or run,
+        )
     runner = runner or run
     paths = (
         installation_paths(config_file=config_path, state_root=settings.state_root)
@@ -130,6 +138,10 @@ def _restore_root(snapshot):
 
 
 def restore_service_state(snapshot, *, runner=None):
+    if os.name == "nt":
+        from ._windows_lifecycle import restore_service_state as restore_windows_service_state
+
+        return restore_windows_service_state(snapshot, runner=runner or run)
     runner = runner or run
     paths = snapshot.installation or installation_paths()
     runner(
@@ -295,6 +307,10 @@ def service_unit(config_path, executable=sys.executable):
 
 
 def prepare_installation(settings, config_path):
+    if os.name == "nt":
+        from ._windows_lifecycle import prepare_installation as prepare_windows_installation
+
+        return prepare_windows_installation(settings, config_path)
     paths = installation_paths(config_file=config_path, state_root=settings.state_root)
     mark_owned(paths.install_root)
     mark_owned(paths.config_root, allowed_existing=(paths.config_path,), mode=0o700)
@@ -312,6 +328,10 @@ def prepare_installation(settings, config_path):
 
 
 def install_plugin(settings, *, runner=run):
+    if os.name == "nt":
+        from ._private_state import ensure_private_directory
+
+        ensure_private_directory(settings.socket_root)
     if not (PLUGIN_ROOT / "package.json").is_file():
         raise RuntimeError("bundled OMP Deck plugin is missing")
     runner([settings.omp_bin, "plugin", "install", str(PLUGIN_ROOT)])
@@ -346,6 +366,15 @@ def remove_plugin(omp_bin="omp", *, runner=run):
 
 
 def install_service(settings, config_path, *, runner=run, start=True):
+    if os.name == "nt":
+        from ._windows_lifecycle import install_service as install_windows_service
+
+        return install_windows_service(
+            settings,
+            config_path,
+            runner=runner,
+            start=start,
+        )
     base_paths = installation_paths()
     if base_paths.unit_path.exists():
         validate_manifest(base_paths)
@@ -359,6 +388,10 @@ def install_service(settings, config_path, *, runner=run, start=True):
 
 
 def service_status(*, runner=run):
+    if os.name == "nt":
+        from ._windows_lifecycle import service_status as windows_service_status
+
+        return windows_service_status(runner=runner)
     return runner(
         ["systemctl", "--user", "status", "omp-deck.service"],
         check=False,
@@ -366,10 +399,18 @@ def service_status(*, runner=run):
 
 
 def restart_service(*, runner=run):
+    if os.name == "nt":
+        from ._windows_lifecycle import restart_service as restart_windows_service
+
+        return restart_windows_service(runner=runner)
     runner(["systemctl", "--user", "restart", "omp-deck.service"])
 
 
 def remove_service(*, runner=run):
+    if os.name == "nt":
+        from ._windows_lifecycle import remove_service as remove_windows_service
+
+        return remove_windows_service(runner=runner)
     paths = validate_manifest(installation_paths())
     runner(
         ["systemctl", "--user", "disable", "--now", "omp-deck.service"],

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {mkdtemp, readdir, rm} from 'node:fs/promises';
+import {mkdtemp, readFile, readdir, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
@@ -22,8 +22,9 @@ async function connect(socketPath) {
 
 test('plugin events preserve sequence and synchronize active history', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'od-'));
-  const previousStateHome = process.env.XDG_STATE_HOME;
-  process.env.XDG_STATE_HOME = root;
+  const stateVariable = process.platform === 'win32' ? 'LOCALAPPDATA' : 'XDG_STATE_HOME';
+  const previousStateHome = process.env[stateVariable];
+  process.env[stateVariable] = root;
   const handlers = new Map();
   const timers = new Set();
   const warnings = [];
@@ -76,10 +77,35 @@ test('plugin events preserve sequence and synchronize active history', async () 
     const {default: register} = await import(`${PLUGIN.href}?test=${Date.now()}`);
     register(pi);
     await handlers.get('session_start')({}, context);
-    const socketDirectory = path.join(root, 'omp-deck', 'sockets');
-    const socketName = (await readdir(socketDirectory)).find(name => name.endsWith('.sock'));
+    const socketDirectory = process.platform === 'win32'
+      ? path.join(root, 'OMP Deck', 'state', 'sockets')
+      : path.join(root, 'omp-deck', 'sockets');
+    const suffix = process.platform === 'win32' ? '.pipe.json' : '.sock';
+    const socketName = (await readdir(socketDirectory)).find(name => name.endsWith(suffix));
     assert(socketName, `plugin socket was not created: ${JSON.stringify(warnings)}`);
-    socket = await connect(path.join(socketDirectory, socketName));
+    const metadata = process.platform === 'win32'
+      ? JSON.parse(await readFile(path.join(socketDirectory, socketName), 'utf8'))
+      : null;
+    const endpoint = metadata?.endpoint || path.join(socketDirectory, socketName);
+    if (metadata) {
+      const rejected = await connect(endpoint);
+      rejected.write(`${JSON.stringify({
+        protocol: 'omp-deck-fallback-v1',
+        version: 1,
+        type: 'connect',
+        token: '0'.repeat(64),
+      })}\n`);
+      await new Promise(resolve => rejected.once('close', resolve));
+    }
+    socket = await connect(endpoint);
+    if (metadata) {
+      socket.write(`${JSON.stringify({
+        protocol: 'omp-deck-fallback-v1',
+        version: 1,
+        type: 'connect',
+        token: metadata.authToken,
+      })}\n`);
+    }
     const lines = readline.createInterface({input: socket, crlfDelay: Infinity});
     const frames = lines[Symbol.asyncIterator]();
     const registration = JSON.parse((await frames.next()).value);
@@ -138,8 +164,8 @@ test('plugin events preserve sequence and synchronize active history', async () 
       clearTimeout(timer);
       clearInterval(timer);
     }
-    if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME;
-    else process.env.XDG_STATE_HOME = previousStateHome;
+    if (previousStateHome === undefined) delete process.env[stateVariable];
+    else process.env[stateVariable] = previousStateHome;
     await rm(root, {recursive: true, force: true});
   }
 });

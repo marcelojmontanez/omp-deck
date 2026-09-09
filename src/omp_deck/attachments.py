@@ -17,6 +17,16 @@ def blob_root():
 def read_blob(digest):
     if not isinstance(digest, str) or _DIGEST.fullmatch(digest) is None:
         return None
+    if os.name == "nt":
+        from ._windows_files import read_user_owned_file
+
+        root = blob_root()
+        for suffix in _CANDIDATE_SUFFIXES:
+            name = f"{digest}{suffix}"
+            payload = read_user_owned_file(root, root / name, _MAX_BLOB_BYTES)
+            if payload is not None and hashlib.sha256(payload).hexdigest() == digest:
+                return name, payload
+        return None
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         directory_fd = os.open(blob_root(), flags)

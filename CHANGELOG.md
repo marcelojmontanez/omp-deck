@@ -2,10 +2,13 @@
 
 ## Unreleased
 
+## 1.1.0 — 2026-09-07
+
 ### Added
 
-- Support native Windows foreground operation with per-user defaults, protected Windows ACLs, named-mutex state locking, project launch and creation, Collab sessions, and managed RPC sessions supervised by a kill-on-close Job Object.
-- Gate native Windows behavior in CI against the pinned official OMP 18.1.10 executable, including descendant-process cleanup.
+- Support native Windows with per-user defaults, protected ACLs and named-mutex state locking, project launch and creation, managed RPC supervision through kill-on-close Job Objects, Collab, ACL-validated image attachments, named-pipe extension fallback, and ownership-safe purge.
+- Add a least-privilege per-user Task Scheduler logon service on Windows with bounded failure restarts, transactional setup rollback, health diagnostics, and explicit install, status, restart, and removal commands.
+- Gate native Windows behavior in CI against the pinned official OMP 18.1.10 executable, including descendant-process cleanup, Task Scheduler lifecycle, named-pipe protocol behavior, and attachment ACL rejection.
 
 ### Fixed
 
@@ -15,7 +18,7 @@
 
 - Bound project-picker discovery to a configurable directory depth, defaulting to two levels, and group nested paths with explicit loading and result feedback on mobile.
 - Replace long pairing secrets with six-digit codes that expire after one minute and invalidate after the first failed submission.
-- On native Windows, report service and Unix-socket extension integration as unavailable, require Collab for terminal-owned sessions, and disable image attachments until OMP blob ACL validation is supported.
+- Normalize Windows and Linux behind the same advertised capabilities while keeping legacy migration Linux-only.
 
 ## 1.0.1 — 2026-09-05
 

@@ -1,6 +1,6 @@
 {
   "name": "omp-deck",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "OMP Deck session bridge extension",
   "type": "module",
   "license": "MIT",
@@ -18,7 +18,8 @@
     ".": "./omp-deck.ts"
   },
   "files": [
-    "omp-deck.ts"
+    "omp-deck.ts",
+    "named-pipe-auth.ts"
   ],
   "scripts": {
     "check": "tsc --noEmit && node --test --experimental-strip-types ../../../tests/plugin_behavior_test.mjs",

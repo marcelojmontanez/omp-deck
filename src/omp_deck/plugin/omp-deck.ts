@@ -1,9 +1,10 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { authenticateNamedPipe } from "./named-pipe-auth.ts";
 
 const PROTOCOL = "omp-deck-fallback-v1";
 const MAX_LINE_BYTES = 1024 * 1024;
@@ -13,7 +14,10 @@ const MAX_QUEUED_REQUESTS = 64;
 const MAX_PENDING_WRITE_BYTES = 4 * MAX_LINE_BYTES;
 const MAX_HISTORY_MESSAGES = 500;
 const MAX_HISTORY_CHUNK_MESSAGES = 64;
-const SOCKET_DIR = path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "omp-deck", "sockets");
+const WINDOWS = process.platform === "win32";
+const SOCKET_DIR = WINDOWS
+  ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "OMP Deck", "state", "sockets")
+  : path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "omp-deck", "sockets");
 
 type JsonObject = Record<string, unknown>;
 type ManagedTimer = Parameters<ExtensionContext["clearTimer"]>[0];
@@ -36,6 +40,7 @@ export default function ompDeck(pi: ExtensionAPI) {
   const connectionId = randomUUID();
   const peers = new Set<Peer>();
   let ctx: ExtensionContext | undefined;
+  const windowsToken = randomBytes(32).toString("hex");
   let server: net.Server | undefined;
   let socketPath: string | undefined;
   let metadataPath: string | undefined;
@@ -273,7 +278,7 @@ export default function ompDeck(pi: ExtensionAPI) {
     }
   }
 
-  function accept(socket: net.Socket, context: ExtensionContext): void {
+  function attach(socket: net.Socket, context: ExtensionContext): void {
     const peer: Peer = {
       socket,
       input: Buffer.alloc(0),
@@ -324,9 +329,22 @@ export default function ompDeck(pi: ExtensionAPI) {
     socket.on("error", (error) => pi.logger.warn("OMP Deck fallback peer error", { error: error.message }));
     socket.on("close", () => peers.delete(peer));
   }
+  function accept(socket: net.Socket, context: ExtensionContext): void {
+    if (!WINDOWS) {
+      attach(socket, context);
+      return;
+    }
+    authenticateNamedPipe(socket, context, windowsToken, (remainder) => {
+      attach(socket, context);
+      if (remainder.length) socket.emit("data", remainder);
+    });
+  }
+
+
 
   async function removeFiles(): Promise<void> {
-    for (const file of [metadataPath, socketPath]) {
+    const files = WINDOWS ? [metadataPath] : [metadataPath, socketPath];
+    for (const file of files) {
       if (file) await fs.promises.unlink(file).catch((error: NodeJS.ErrnoException) => {
         if (error.code !== "ENOENT") pi.logger.warn("OMP Deck fallback cleanup failed", { error: error.message });
       });
@@ -360,11 +378,12 @@ export default function ompDeck(pi: ExtensionAPI) {
       await closeServer();
       if (stopping || generation !== lifecycleGeneration) return;
       await fs.promises.mkdir(SOCKET_DIR, { recursive: true, mode: 0o700 });
-      await fs.promises.chmod(SOCKET_DIR, 0o700);
+      if (!WINDOWS) await fs.promises.chmod(SOCKET_DIR, 0o700);
       if (stopping || generation !== lifecycleGeneration) return;
       const identity = sessionIdentity(context);
-      socketPath = path.join(SOCKET_DIR, `${sessionSocketId(identity.id)}.${process.pid}.${connectionId}.sock`);
-      metadataPath = `${socketPath}.json`;
+      const endpointName = `${sessionSocketId(identity.id)}.${process.pid}.${connectionId}.${WINDOWS ? "pipe" : "sock"}`;
+      socketPath = WINDOWS ? `\\\\.\\pipe\\${endpointName}` : path.join(SOCKET_DIR, endpointName);
+      metadataPath = path.join(SOCKET_DIR, `${endpointName}.json`);
       listener = net.createServer((socket) => accept(socket, context));
       server = listener;
       listener.on("error", (error) => {
@@ -383,8 +402,11 @@ export default function ompDeck(pi: ExtensionAPI) {
         else if (listener.listening) await new Promise<void>((resolve) => listener!.close(() => resolve()));
         return;
       }
-      await fs.promises.chmod(socketPath, 0o600);
-      await fs.promises.writeFile(metadataPath, `${JSON.stringify(registration(context))}\n`, { mode: 0o600 });
+      if (!WINDOWS) await fs.promises.chmod(socketPath, 0o600);
+      const metadata = WINDOWS
+        ? { ...registration(context), endpoint: socketPath, pid: process.pid, authToken: windowsToken }
+        : registration(context);
+      await fs.promises.writeFile(metadataPath, `${JSON.stringify(metadata)}\n`, { mode: 0o600 });
       if (stopping || generation !== lifecycleGeneration || server !== listener) {
         if (server === listener) await closeServer();
         return;

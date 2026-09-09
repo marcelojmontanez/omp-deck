@@ -82,7 +82,10 @@ session. Deck never returns that link through HTTP, SSE, logs, or browser
 storage, and deletes it when the session is removed.
 
 Managed sessions use OMP's official RPC client. Terminal-owned sessions use the
-published Collab protocol or the bundled extension's private Unix socket.
+published Collab protocol or the bundled extension's private Unix socket on
+Linux and authenticated named pipe on Windows. Windows connection tokens remain
+in a protected current-user metadata directory, and Deck verifies that the
+named-pipe server process belongs to the current user before authenticating.
 Extension fallback cannot answer Ask remotely and never injects terminal keys.
 Deck has no tmux or `/proc` control path. A bounded JSONL reader exists only for
 explicit compatibility recovery; transcript text is not an authorization or
@@ -93,9 +96,10 @@ control protocol.
 All state-bearing routes require an authenticated device cookie. Mutations also
 require an exact allowed Origin and a session-bound CSRF token. Host headers,
 body lengths, JSON shapes, image count/type/size, project paths, protocol
-versions, request IDs, event sequences, and socket peer identity are validated
-at ingress. Private responses use `no-store`, a restrictive CSP, and browser
-hardening headers.
+versions, request IDs, event sequences, and transport peer identity are
+validated at ingress. Windows blob reads bind ACL, owner, reparse-point, size,
+and final-path validation to the opened handles. Private responses use
+`no-store`, a restrictive CSP, and browser hardening headers.
 
 Server state contains stable session metadata, hashed device credentials,
 last-read cursors, and imported Collab credentials. Sensitive files are written
@@ -104,9 +108,9 @@ quarantined rather than silently trusted. OMP retains its own transcripts and
 blobs. The browser retains drafts, optimistic requests, and rendered state only
 in memory and revokes attachment object URLs when their owner is removed.
 
-Removing the systemd service does not delete configuration or state. `purge`
-deletes only paths proven to be Deck-owned and refuses roots, home directories,
-shallow ancestors, and symlinks.
+Removing the per-user background service does not delete configuration or
+state. `purge` deletes only paths proven to be Deck-owned and refuses roots,
+home directories, shallow ancestors, symlinks, and Windows reparse points.
 
 ## Reporting a vulnerability
 

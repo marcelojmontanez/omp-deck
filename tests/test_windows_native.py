@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import ctypes
+import hashlib
+import json
 import os
+import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
-from omp_deck import cli
+from omp_deck import lifecycle
 from omp_deck._fleet_projection import platform_capabilities
 from omp_deck._platform_paths import (
     default_config_path,
@@ -18,6 +24,7 @@ from omp_deck._platform_paths import (
     default_omp_path,
     default_state_root,
 )
+from omp_deck.auth import AuthManager
 from omp_deck.fleet_model import FleetModel
 from omp_deck.rpc_sessions import RpcSessionManager
 from omp_deck.settings import Settings
@@ -60,18 +67,26 @@ class WindowsPlatformTests(unittest.TestCase):
             ):
                 self.assertEqual(default_config_path(), app_data / "OMP Deck" / "config.json")
                 self.assertEqual(default_state_root(), local_app_data / "OMP Deck" / "state")
-                self.assertEqual(default_install_root(), local_app_data / "OMP Deck")
+                self.assertEqual(default_install_root(), local_app_data / "OMP Deck" / "install")
                 self.assertEqual(default_omp_path(), local_app_data / "omp" / "omp.exe")
 
-    def test_cli_refuses_unsupported_service_management(self):
-        with patch.object(cli, "service_status") as service_status:
-            with self.assertRaisesRegex(RuntimeError, "unavailable on native Windows"):
-                cli.main(["service", "status"])
-        service_status.assert_not_called()
+    def test_task_definition_runs_as_current_interactive_user(self):
+        from omp_deck._windows_lifecycle import task_xml
 
-    def test_windows_capabilities_disable_blob_attachments(self):
-        self.assertFalse(platform_capabilities("rpc")["attachments"])
-        self.assertFalse(platform_capabilities("collab")["attachments"])
+        definition = task_xml(
+            Path(r"C:\Users\owner\AppData\Roaming\OMP Deck\config.json"),
+            executable=r"C:\Tools\python.exe",
+            user_sid="S-1-5-21-123",
+        )
+        self.assertIn("<LogonType>InteractiveToken</LogonType>", definition)
+        self.assertIn("<RunLevel>LeastPrivilege</RunLevel>", definition)
+        self.assertIn("<RestartOnFailure>", definition)
+        self.assertIn(r"<Command>C:\Tools\python.exe</Command>", definition)
+        self.assertIn("serve", definition)
+
+    def test_windows_capabilities_include_acl_safe_attachments(self):
+        self.assertTrue(platform_capabilities("rpc")["attachments"])
+        self.assertTrue(platform_capabilities("collab")["attachments"])
 
     def test_job_wrapper_terminates_descendant_processes(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -104,6 +119,191 @@ class WindowsPlatformTests(unittest.TestCase):
                 _wait_for_process_exit(descendant_id, 5000),
                 "terminating the RPC supervisor left a descendant running",
             )
+
+    def test_extension_adapter_uses_native_named_pipe(self):
+        from omp_deck.extension_adapter import ExtensionAdapter, ExtensionAdapterError
+
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is unavailable")
+        session_id = "windows-pipe-session"
+        connection_id = "connection-1"
+        auth_token = "a" * 64
+        socket_id = hashlib.sha256(session_id.encode()).hexdigest()[:24]
+        endpoint = rf"\\.\pipe\{socket_id}.123.{connection_id}.pipe"
+        fixture = Path(__file__).parent / "fixtures" / "fake_extension_pipe_server.mjs"
+        process = subprocess.Popen(
+            [node, str(fixture), endpoint, session_id, connection_id, auth_token],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        def cleanup_process():
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+            process.stdout.close()
+            process.stderr.close()
+
+        self.addCleanup(cleanup_process)
+        ready = threading.Event()
+        output = []
+
+        def read_ready():
+            output.append(process.stdout.readline())
+            ready.set()
+
+        reader = threading.Thread(target=read_ready)
+        reader.start()
+        self.assertTrue(ready.wait(10), "named-pipe fixture did not start")
+        self.assertEqual(output, ["READY\n"], process.stderr.read() if process.poll() is not None else "")
+        denied = ExtensionAdapter(endpoint, connection_token="b" * 64)
+        with self.assertRaises(ExtensionAdapterError):
+            denied.start()
+        denied.close()
+        adapter = ExtensionAdapter(endpoint, connection_token=auth_token)
+        try:
+            registration = adapter.start()
+            self.assertEqual(registration.session_id, session_id)
+            self.assertTrue(adapter.refresh().idle)
+        finally:
+            adapter.close()
+            process.terminate()
+            process.wait(timeout=5)
+            reader.join(timeout=5)
+
+    def test_terminal_discovery_requires_private_named_pipe_metadata(self):
+        from omp_deck._private_state import ensure_private_directory
+        from omp_deck._terminal_discovery import discover_extension_candidates
+        from omp_deck._windows_security import secure_path
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "sockets"
+            ensure_private_directory(root)
+            session_id = "windows-discovery-session"
+            connection_id = str(uuid.uuid4())
+            socket_id = hashlib.sha256(session_id.encode()).hexdigest()[:24]
+            name = f"{socket_id}.{os.getpid()}.{connection_id}.pipe"
+            endpoint = rf"\\.\pipe\{name}"
+            metadata = root / f"{name}.json"
+            metadata.write_text(
+                json.dumps(
+                    {
+                        "protocol": "omp-deck-fallback-v1",
+                        "version": 1,
+                        "type": "registration",
+                        "sessionId": session_id,
+                        "connectionId": connection_id,
+                        "endpoint": endpoint,
+                        "pid": os.getpid(),
+                        "authToken": "a" * 64,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            candidates = discover_extension_candidates(root)
+            self.assertEqual(set(candidates), {session_id})
+            discovered_endpoint, discovered_metadata = candidates[session_id]
+            self.assertEqual(str(discovered_endpoint), endpoint)
+            self.assertEqual(discovered_metadata["connectionId"], connection_id)
+            subprocess.run(
+                ["icacls.exe", str(root), "/grant", "*S-1-1-0:(OI)(CI)M", "/Q"],
+                check=True,
+                capture_output=True,
+            )
+            try:
+                self.assertEqual(discover_extension_candidates(root), {})
+            finally:
+                secure_path(root)
+
+
+@unittest.skipUnless(
+    _WINDOWS and os.environ.get("OMP_DECK_WINDOWS_TASK_SMOKE") == "1",
+    "set OMP_DECK_WINDOWS_TASK_SMOKE=1 for Task Scheduler integration",
+)
+class WindowsTaskIntegrationTests(unittest.TestCase):
+    def test_scheduled_task_starts_healthy_server_and_is_removed(self):
+        from omp_deck import _windows_lifecycle
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+            environment = {
+                "APPDATA": str(root / "roaming"),
+                "LOCALAPPDATA": str(root / "local"),
+            }
+            task_name = f"OMP Deck Test {uuid.uuid4()}"
+            task_path = rf"\{task_name}"
+            state_command = f"(Get-ScheduledTask -TaskName '{task_name}' -ErrorAction Stop).State.ToString()"
+
+            def cleanup():
+                subprocess.run(
+                    ["schtasks.exe", "/End", "/TN", task_path],
+                    check=False,
+                    capture_output=True,
+                )
+                subprocess.run(
+                    ["schtasks.exe", "/Delete", "/TN", task_path, "/F"],
+                    check=False,
+                    capture_output=True,
+                )
+
+            self.addCleanup(cleanup)
+            with (
+                patch.dict(os.environ, environment),
+                patch.multiple(
+                    _windows_lifecycle,
+                    _TASK_NAME=task_name,
+                    _TASK_PATH=task_path,
+                    _QUERY=("schtasks.exe", "/Query", "/TN", task_path),
+                    _STATE_COMMAND=state_command,
+                ),
+            ):
+                config = root / "roaming" / "OMP Deck" / "config.json"
+                state_root = root / "local" / "OMP Deck" / "state"
+                project_root = root / "projects"
+                project_root.mkdir()
+                settings = Settings(
+                    host="127.0.0.1",
+                    port=port,
+                    session_root=root / "sessions",
+                    socket_root=state_root / "sockets",
+                    state_root=state_root,
+                    project_root=project_root,
+                    project_discovery_depth=2,
+                    omp_bin=sys.executable,
+                    allowed_hosts=("127.0.0.1", "localhost"),
+                )
+                _windows_lifecycle._write_private(
+                    config,
+                    json.dumps(
+                        {
+                            "host": settings.host,
+                            "port": port,
+                            "state_root": str(state_root),
+                            "project_root": str(project_root),
+                            "session_root": str(settings.session_root),
+                            "socket_root": str(settings.socket_root),
+                            "omp_bin": sys.executable,
+                        }
+                    ).encode(),
+                )
+                AuthManager(state_root)
+                lifecycle.install_service(settings, config)
+                try:
+                    self.assertTrue(lifecycle.check_health(settings, timeout=15)["ok"])
+                    self.assertEqual(lifecycle.service_status(), 0)
+                finally:
+                    lifecycle.remove_service()
+                query = subprocess.run(
+                    ["schtasks.exe", "/Query", "/TN", task_path],
+                    check=False,
+                    capture_output=True,
+                )
+                self.assertNotEqual(query.returncode, 0)
 
 
 @unittest.skipUnless(

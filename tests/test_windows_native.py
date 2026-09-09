@@ -331,7 +331,9 @@ class WindowsRpcIntegrationTests(unittest.TestCase):
             )
             manager = RpcSessionManager(settings, FleetModel())
             try:
-                session = manager.launch("smoke", project)
+                result = manager.launch_request("windows-rpc-smoke", "smoke")
+                self.assertEqual(result["status"], "accepted")
+                session = result["session"]
                 self.assertEqual(session["transport"]["status"], "connected")
                 self.assertEqual(session["transport"]["kind"], "rpc")
                 self.assertTrue(session["ompSessionId"])

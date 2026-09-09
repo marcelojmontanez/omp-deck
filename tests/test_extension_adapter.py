@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import socket
 import threading
 import time
@@ -19,7 +20,11 @@ from omp_deck.extension_adapter import (
 
 SESSION = "session-1"
 CONNECTION = "connection-1"
-PATH = f"/tmp/{hashlib.sha256(SESSION.encode()).hexdigest()[:24]}.123.{CONNECTION}.sock"
+PATH = (
+    rf"\\.\pipe\{hashlib.sha256(SESSION.encode()).hexdigest()[:24]}.123.{CONNECTION}.pipe"
+    if os.name == "nt"
+    else f"/tmp/{hashlib.sha256(SESSION.encode()).hexdigest()[:24]}.123.{CONNECTION}.sock"
+)
 
 
 def registration(**changes):
@@ -129,6 +134,25 @@ class ExtensionAdapterTests(unittest.TestCase):
         finally:
             adapter.close()
             peer.close()
+
+    def test_connection_token_is_validated_and_sent_before_registration(self):
+        for token in ("short", "A" * 64, 1):
+            with self.subTest(token=token):
+                with self.assertRaises(ValueError):
+                    ExtensionAdapter(PATH, connection_token=token)
+
+        peer = self.make_peer()
+        adapter = self.make_adapter(peer, connection_token="a" * 64)
+        adapter.start()
+        self.assertEqual(
+            peer.read(),
+            {
+                "protocol": PROTOCOL,
+                "version": 1,
+                "type": "connect",
+                "token": "a" * 64,
+            },
+        )
 
     def test_start_rejects_wrong_registration(self):
         cases = [

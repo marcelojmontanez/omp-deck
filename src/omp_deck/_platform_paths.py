@@ -37,7 +37,8 @@ def default_state_root() -> Path:
 
 def default_install_root() -> Path:
     name = _APP_NAME if os.name == "nt" else "omp-deck"
-    return data_home() / name
+    root = data_home() / name
+    return root / "install" if os.name == "nt" else root
 
 
 def default_omp_path() -> Path:

@@ -36,6 +36,8 @@ def discover_extension_candidates(
     effective_uid: int | None = None,
 ) -> dict[str, tuple[Path, dict[str, Any]]]:
     """Return the newest securely validated registration for each OMP session."""
+    if os.name == "nt":
+        return _discover_windows_candidates(root)
     uid = os.geteuid() if effective_uid is None else effective_uid
     if not _safe_discovery_root(root, uid):
         return {}
@@ -49,6 +51,58 @@ def discover_extension_candidates(
         if prior is None or modified_ns > prior[2]:
             candidates[session_id] = (socket_path, metadata, modified_ns)
     return {session_id: (socket_path, metadata) for session_id, (socket_path, metadata, _) in candidates.items()}
+
+
+def _discover_windows_candidates(root: Path) -> dict[str, tuple[Path, dict[str, Any]]]:
+    from ._windows_security import is_private_path, owned_by_current_user
+
+    if not is_private_path(root):
+        return {}
+    candidates: dict[str, tuple[Path, dict[str, Any], int]] = {}
+    for metadata_path in root.glob("*.pipe.json"):
+        try:
+            info = metadata_path.lstat()
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or getattr(info, "st_file_attributes", 0) & 0x0400
+                or info.st_size > _MAX_METADATA_BYTES
+                or not owned_by_current_user(metadata_path)
+            ):
+                continue
+            with metadata_path.open("rb") as stream:
+                raw = stream.read(_MAX_METADATA_BYTES + 1)
+            if len(raw) > _MAX_METADATA_BYTES:
+                continue
+            metadata = json.loads(raw)
+            session_id = metadata.get("sessionId")
+            connection_id = metadata.get("connectionId")
+            endpoint = metadata.get("endpoint")
+            pid = metadata.get("pid")
+            auth_token = metadata.get("authToken")
+            if (
+                metadata.get("protocol") != "omp-deck-fallback-v1"
+                or metadata.get("version") != 1
+                or metadata.get("type") != "registration"
+                or not all(_nonempty_string(value) for value in (session_id, connection_id, endpoint))
+                or not isinstance(auth_token, str)
+                or len(auth_token) != 64
+                or any(character not in "0123456789abcdef" for character in auth_token)
+                or len(endpoint) > 256
+                or type(pid) is not int
+                or pid <= 0
+            ):
+                continue
+            socket_id = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:24]
+            expected_name = f"{socket_id}.{pid}.{connection_id}.pipe.json"
+            expected_endpoint = rf"\\.\pipe\{expected_name[:-5]}"
+            if metadata_path.name != expected_name or endpoint != expected_endpoint:
+                continue
+            prior = candidates.get(session_id)
+            if prior is None or info.st_mtime_ns > prior[2]:
+                candidates[session_id] = (Path(endpoint), metadata, info.st_mtime_ns)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
+            continue
+    return {session_id: (endpoint, metadata) for session_id, (endpoint, metadata, _modified) in candidates.items()}
 
 
 def _safe_discovery_root(root: Path, uid: int) -> bool:

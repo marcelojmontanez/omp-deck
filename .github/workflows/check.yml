@@ -47,8 +47,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
       - name: Install runtime dependencies
         run: python -m pip install '.[dev]'
+      - name: Install plugin development dependencies
+        working-directory: src/omp_deck/plugin
+        run: npm ci
       - name: Run native portability contracts
         run: >-
           python -m unittest
@@ -57,11 +63,20 @@ jobs:
           tests.test_registry_store
           tests.test_read_cursors
           tests.test_request_ledger
+          tests.test_attachments
+          tests.test_extension_adapter
           tests.test_projects
           tests.test_rpc_sessions
           tests.test_normalized_http
           tests.test_windows_native
       - run: omp-deck --help
+      - name: Exercise Windows named-pipe plugin
+        working-directory: src/omp_deck/plugin
+        run: npm run check
+      - name: Exercise per-user Task Scheduler lifecycle
+        env:
+          OMP_DECK_WINDOWS_TASK_SMOKE: "1"
+        run: python -m unittest tests.test_windows_native.WindowsTaskIntegrationTests
       - name: Download pinned official OMP
         shell: pwsh
         run: |

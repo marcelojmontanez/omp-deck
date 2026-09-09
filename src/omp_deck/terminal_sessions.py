@@ -100,16 +100,15 @@ class TerminalSessionManager:
                     status="disconnected",
                     reason="Collaboration connection unavailable",
                 )
-        if os.name != "nt":
-            with self._lock:
-                if self._watcher is None:
-                    self._stop.clear()
-                    self._watcher = threading.Thread(
-                        target=self._watch_extensions,
-                        name="omp-deck-extension-discovery",
-                        daemon=True,
-                    )
-                    self._watcher.start()
+        with self._lock:
+            if self._watcher is None:
+                self._stop.clear()
+                self._watcher = threading.Thread(
+                    target=self._watch_extensions,
+                    name="omp-deck-extension-discovery",
+                    daemon=True,
+                )
+                self._watcher.start()
         return failures
 
     def close(self, timeout: float = 5.0) -> None:
@@ -310,10 +309,10 @@ class TerminalSessionManager:
     def _watch_extensions(self) -> None:
         while not self._stop.is_set():
             try:
+                options = {} if os.name == "nt" else {"open_file": os.open, "effective_uid": os.geteuid()}
                 candidates = discover_extension_candidates(
                     self.settings.socket_root,
-                    open_file=os.open,
-                    effective_uid=os.geteuid(),
+                    **options,
                 )
                 self._reconcile_extensions(candidates)
             except Exception:
@@ -416,7 +415,10 @@ class TerminalSessionManager:
                     event=event,
                 )
 
-        adapter = ExtensionAdapter(str(socket_path), on_event=on_event)
+        adapter_options = {"on_event": on_event}
+        if os.name == "nt":
+            adapter_options["connection_token"] = metadata.get("authToken")
+        adapter = ExtensionAdapter(str(socket_path), **adapter_options)
         runtime = _Runtime(session_id, connection_id, generation, "extension", adapter, socket_path)
         with self._lock:
             if self._stop.is_set() or self._ignored_extensions.get(session_id) == connection_id:

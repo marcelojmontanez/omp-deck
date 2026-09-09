@@ -6,8 +6,7 @@ Deck is not a Collab replacement. It does not expose rooms, invite links, partic
 
 ## Supported platform and versions
 
-- Linux with a systemd user session for managed background service operation
-- Native Windows 11 for foreground operation
+- Linux with a systemd user session, or native Windows 11 with Task Scheduler, for managed background service operation
 - Python 3.11 or 3.12
 - stock OMP 18.1.10 on `PATH` or in its official per-user install location
 - Bun 1.3.14 or newer for Linux OMP extension installation and removal
@@ -23,12 +22,12 @@ Python normalizes all transports into one session model. The browser uses advert
 
 | Indicator | Ownership and behavior |
 | --- | --- |
-| Green, **RPC session** | Deck launches and supervises `omp --mode rpc`. Full managed controls, remote Ask responses, model/thinking controls, todos, and subagents are available when advertised. Image prompts are available on Linux. |
+| Green, **RPC session** | Deck launches and supervises `omp --mode rpc`. Full managed controls, remote Ask responses, model/thinking controls, todos, subagents, and image prompts are available when advertised. |
 | Amber, **Terminal session via Collab** | A terminal-owned OMP session connected through an imported writable Collab link. Published pi-wire permissions and request settlement rules apply. The link remains server-side. |
-| Amber, **Terminal session via extension** | On Linux, a terminal-owned session discovered through the bundled OMP plugin and private Unix socket. Only extension-advertised controls are enabled. Ask is visible but must be answered in the terminal. |
+| Amber, **Terminal session via extension** | A terminal-owned session discovered through the bundled OMP plugin and a private Unix socket on Linux or same-user named pipe on Windows. Only extension-advertised controls are enabled. Ask is visible but must be answered in the terminal. |
 | Red, **Disconnected** | The transport is unavailable. Session state remains visible when persisted, but mutating controls are disabled. |
 
-Capabilities can differ by transport, authorization, connection state, platform, and protocol version. Unavailable controls are disabled rather than silently emulated. Native Windows disables image attachments until OMP blob paths can be validated against Windows ACLs, and terminal-owned sessions require Collab because the Unix-socket extension is not installed there. Extension disconnects never abort the terminal session. Collab failures affect only the imported Collab session.
+Capabilities can differ by transport, authorization, connection state, platform, and protocol version. Unavailable controls are disabled rather than silently emulated. Extension disconnects never abort the terminal session. Collab failures affect only the imported Collab session.
 
 ## Install
 
@@ -43,7 +42,7 @@ pipx install 'git+https://github.com/marcelojmontanez/omp-deck.git'
 omp-deck setup
 ```
 
-`setup` installs and validates the bundled plugin through `omp plugin`, generates and starts the systemd user service, checks `/healthz`, and prints a one-time pairing code. Enter the code on the browser pairing screen. It is exchanged by POST and is never placed in a URL or browser storage.
+`setup` installs and validates the bundled plugin through `omp plugin`, generates and starts the per-user background service, checks `/healthz`, and prints a one-time pairing code. Linux uses a systemd user service; Windows uses a least-privilege Task Scheduler logon task. Enter the code on the browser pairing screen. It is exchanged by POST and is never placed in a URL or browser storage.
 
 To configure the supported Tailscale Serve route during setup:
 
@@ -51,19 +50,18 @@ To configure the supported Tailscale Serve route during setup:
 omp-deck setup --tailscale
 ```
 
-Deck refuses to modify Tailscale when any Serve route already exists. Review and configure a distinct route manually instead. Tailscale changes may require device or tailnet administrator authorization; the systemd user service itself does not require root.
+Deck refuses to modify Tailscale when any Serve route already exists. Review and configure a distinct route manually instead. Tailscale changes may require device or tailnet administrator authorization; the per-user Deck service itself does not require root or elevation.
 
 ### Native Windows
 
-Install from PowerShell with `uv tool` or `pipx`, then run Deck in the foreground:
+Install from PowerShell with `uv tool` or `pipx`, then run setup:
 
 ```powershell
 uv tool install 'git+https://github.com/marcelojmontanez/omp-deck.git'
-omp-deck config validate
-omp-deck serve
+omp-deck setup
 ```
 
-In another PowerShell window, run `omp-deck pair` to issue a browser pairing code. The defaults use `%APPDATA%\OMP Deck\config.json`, `%LOCALAPPDATA%\OMP Deck\state`, `%USERPROFILE%\dev`, and the official OMP executable at `%LOCALAPPDATA%\omp\omp.exe`. `service`, `plugin`, `migrate`, `purge`, and automatic `setup` are intentionally unavailable on Windows; use managed RPC sessions or Collab links and uninstall the Python tool with its tool manager. Configure Tailscale Serve separately when phone access is required.
+`setup` installs the OMP extension fallback, starts Deck through a per-user Task Scheduler logon task, validates service and plugin health, and prints a pairing code. The defaults use `%APPDATA%\OMP Deck\config.json`, `%LOCALAPPDATA%\OMP Deck\install`, `%LOCALAPPDATA%\OMP Deck\state`, `%USERPROFILE%\dev`, and the official OMP executable at `%LOCALAPPDATA%\omp\omp.exe`. Managed RPC, Collab, named-pipe terminal discovery, image attachments, `service`, `plugin`, `purge`, and automatic setup are supported. Legacy `migrate` remains Linux-only.
 
 ## Use
 
@@ -105,7 +103,7 @@ Optional configuration lives at `~/.config/omp-deck/config.json` on Linux or `%A
 
 Project names are resolved beneath `project_root`; traversal, symlink escapes, broken links, and non-directories are rejected. `project_discovery_depth` limits filesystem traversal to 1–8 directory levels and defaults to `2`: direct children and grandchildren are listed, while configured depths beyond two discover only directories containing `.git`, `AGENTS.md`, `Cargo.toml`, `go.mod`, `package.json`, or `pyproject.toml`. Keep `project_root` near the common parent of your projects and increase the depth only when nested repositories must appear.
 
-Restart Deck after a configuration change with `omp-deck service restart` on Linux. On Windows, stop the foreground process with Ctrl+C and run `omp-deck serve` again.
+Restart Deck after a configuration change with `omp-deck service restart`.
 
 ## Pairing and remote access
 
@@ -129,13 +127,15 @@ Server state defaults to `~/.local/state/omp-deck` on Linux and `%LOCALAPPDATA%\
 - `auth.json`: installation verifier and hashed device credentials;
 - `cursors.json`: last-read message cursors;
 - `collab.json`: protected Collab credentials while imported;
-- `sockets/`: Linux extension registration metadata and Unix sockets.
+- `sockets/`: extension registration metadata plus Unix sockets on Linux or same-user named-pipe endpoints on Windows.
 
 Sensitive files are atomic and bounded. Linux enforces owner-only mode `0600`; Windows enforces a protected current-user ACL and uses named mutexes for cross-process locking. OMP transcripts and blobs remain under OMP's own directories. The browser keeps drafts, optimistic sends, object URLs, and rendered state in memory only; it does not persist transcripts, paths, identifiers, usage, Collab links, or credentials in Web Storage. Object URLs are revoked when their owning draft or session is removed.
 
 Live browser state uses authenticated SSE with bounded replay. Low-frequency snapshot recovery replaces state when a cursor is stale. The compatibility JSONL reader is isolated and bounded; it is not a discovery mechanism, live event source, or control protocol.
 
 ## Legacy migration and rollback
+
+Legacy migration is available on Linux only.
 
 `migrate` is read-only unless `--apply` is supplied:
 

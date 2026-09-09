@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -66,10 +65,7 @@ CAPABILITIES: dict[str, dict[str, bool]] = {
 
 
 def platform_capabilities(adapter_kind: str) -> dict[str, bool]:
-    capabilities = dict(CAPABILITIES[adapter_kind])
-    if os.name == "nt":
-        capabilities["attachments"] = False
-    return capabilities
+    return dict(CAPABILITIES[adapter_kind])
 
 
 MAX_MESSAGES = 500

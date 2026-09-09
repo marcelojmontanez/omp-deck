@@ -1,4 +1,6 @@
 import hashlib
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +14,10 @@ class BlobReaderTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
+        if os.name == "nt":
+            from omp_deck._windows_security import secure_path
+
+            secure_path(self.root)
         self.patch = patch.object(attachments, "BLOB_ROOT", self.root)
         self.patch.start()
         self.addCleanup(self.patch.stop)
@@ -44,12 +50,13 @@ class BlobReaderTests(unittest.TestCase):
     def test_rejects_malformed_symlink_poisoned_and_oversized_blobs(self):
         self.assertIsNone(attachments.read_blob("../private"))
 
-        target = self.root / "target.png"
-        target.write_bytes(b"private")
-        symlink = self.root / f"{self.digest}.png"
-        symlink.symlink_to(target)
-        self.assertIsNone(attachments.read_blob(self.digest))
-        symlink.unlink()
+        if os.name != "nt":
+            target = self.root / "target.png"
+            target.write_bytes(b"private")
+            symlink = self.root / f"{self.digest}.png"
+            symlink.symlink_to(target)
+            self.assertIsNone(attachments.read_blob(self.digest))
+            symlink.unlink()
 
         poisoned = self.root / f"{self.digest}.png"
         poisoned.write_bytes(b"not the addressed content")
@@ -66,6 +73,23 @@ class BlobReaderTests(unittest.TestCase):
     def test_rejects_writable_blob_root_and_candidate(self):
         candidate = self.root / f"{self.digest}.png"
         candidate.write_bytes(self.payload)
+        if os.name == "nt":
+            from omp_deck._windows_security import secure_path
+
+            subprocess.run(
+                ["icacls", str(self.root), "/grant", "*S-1-1-0:(OI)(CI)M"],
+                check=True,
+                capture_output=True,
+            )
+            self.assertIsNone(attachments.read_blob(self.digest))
+            secure_path(self.root)
+            subprocess.run(
+                ["icacls", str(candidate), "/grant", "*S-1-1-0:M"],
+                check=True,
+                capture_output=True,
+            )
+            self.assertIsNone(attachments.read_blob(self.digest))
+            return
         candidate.chmod(0o666)
         self.assertIsNone(attachments.read_blob(self.digest))
 

@@ -245,16 +245,7 @@ def process_owned_by_current_user(process_id: int) -> bool:
         _KERNEL32.CloseHandle(process)
 
 
-def secure_path(path: Path) -> None:
-    directory = _path_kind(path)
-    sid_buffer, sid = _current_user_sid()
-    owner, _dacl, descriptor = _security(path)
-    try:
-        if not _ADVAPI32.EqualSid(owner, sid):
-            raise PermissionError(f"private path is not owned by the current user: {path}")
-    finally:
-        _KERNEL32.LocalFree(descriptor)
-
+def _set_private_security(path: Path, directory: bool, sid: c_void_p, *, claim_owner: bool) -> None:
     trustee = _Trustee(None, 0, _TRUSTEE_IS_SID, _TRUSTEE_IS_USER, cast(sid, wintypes.LPWSTR))
     access = _ExplicitAccess(
         _FILE_ALL_ACCESS,
@@ -265,12 +256,15 @@ def secure_path(path: Path) -> None:
     acl = c_void_p()
     try:
         _check_status(_ADVAPI32.SetEntriesInAclW(1, byref(access), None, byref(acl)), "building private ACL")
+        security_information = _DACL_SECURITY_INFORMATION | _PROTECTED_DACL_SECURITY_INFORMATION
+        if claim_owner:
+            security_information |= _OWNER_SECURITY_INFORMATION
         _check_status(
             _ADVAPI32.SetNamedSecurityInfoW(
                 str(path),
                 _SE_FILE_OBJECT,
-                _DACL_SECURITY_INFORMATION | _PROTECTED_DACL_SECURITY_INFORMATION,
-                None,
+                security_information,
+                sid if claim_owner else None,
                 None,
                 acl,
                 None,
@@ -278,9 +272,33 @@ def secure_path(path: Path) -> None:
             "setting private ACL",
         )
     finally:
-        del sid_buffer
         if acl:
             _KERNEL32.LocalFree(acl)
+
+
+def secure_created_path(path: Path) -> None:
+    """Assign current-user ownership and a protected ACL to an entry this process just created."""
+    directory = _path_kind(path)
+    sid_buffer, sid = _current_user_sid()
+    try:
+        _set_private_security(path, directory, sid, claim_owner=True)
+    finally:
+        del sid_buffer
+
+
+def secure_path(path: Path) -> None:
+    directory = _path_kind(path)
+    sid_buffer, sid = _current_user_sid()
+    owner, _dacl, descriptor = _security(path)
+    try:
+        if not _ADVAPI32.EqualSid(owner, sid):
+            raise PermissionError(f"private path is not owned by the current user: {path}")
+    finally:
+        _KERNEL32.LocalFree(descriptor)
+    try:
+        _set_private_security(path, directory, sid, claim_owner=False)
+    finally:
+        del sid_buffer
 
 
 def is_private_path(path: Path) -> bool:

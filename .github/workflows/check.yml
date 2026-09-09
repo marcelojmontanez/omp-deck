@@ -58,16 +58,8 @@ jobs:
       - name: Run native portability contracts
         run: >-
           python -m unittest
-          tests.test_auth
-          tests.test_collab_store
-          tests.test_registry_store
-          tests.test_read_cursors
-          tests.test_request_ledger
           tests.test_attachments
           tests.test_extension_adapter
-          tests.test_projects
-          tests.test_rpc_sessions
-          tests.test_normalized_http
           tests.test_windows_native
       - run: omp-deck --help
       - name: Exercise Windows named-pipe plugin

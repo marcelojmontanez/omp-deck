@@ -15,18 +15,25 @@ class BlobReaderTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         if os.name == "nt":
-            from omp_deck._windows_security import secure_path
+            from omp_deck._windows_security import secure_created_path
 
-            secure_path(self.root)
+            secure_created_path(self.root)
         self.patch = patch.object(attachments, "BLOB_ROOT", self.root)
         self.patch.start()
         self.addCleanup(self.patch.stop)
         self.payload = b"\x89PNG\r\n\x1a\nimage"
         self.digest = hashlib.sha256(self.payload).hexdigest()
 
+    def write_blob(self, path, payload):
+        path.write_bytes(payload)
+        if os.name == "nt":
+            from omp_deck._windows_security import secure_created_path
+
+            secure_created_path(path)
+
     def test_reads_one_bounded_regular_blob(self):
         candidate = self.root / f"{self.digest}.png"
-        candidate.write_bytes(self.payload)
+        self.write_blob(candidate, self.payload)
         with patch.object(
             attachments.os,
             "scandir",
@@ -39,8 +46,8 @@ class BlobReaderTests(unittest.TestCase):
         )
 
     def test_duplicate_content_addressed_names_resolve_to_verified_content(self):
-        (self.root / self.digest).write_bytes(self.payload)
-        (self.root / f"{self.digest}.png").write_bytes(self.payload)
+        self.write_blob(self.root / self.digest, self.payload)
+        self.write_blob(self.root / f"{self.digest}.png", self.payload)
 
         self.assertEqual(
             attachments.read_blob(self.digest),
@@ -59,7 +66,7 @@ class BlobReaderTests(unittest.TestCase):
             symlink.unlink()
 
         poisoned = self.root / f"{self.digest}.png"
-        poisoned.write_bytes(b"not the addressed content")
+        self.write_blob(poisoned, b"not the addressed content")
         self.assertIsNone(attachments.read_blob(self.digest))
 
         poisoned.write_bytes(b"")
@@ -68,11 +75,15 @@ class BlobReaderTests(unittest.TestCase):
         oversized = self.root / f"{self.digest}.png"
         with oversized.open("wb") as stream:
             stream.truncate(16 * 1024 * 1024 + 1)
+        if os.name == "nt":
+            from omp_deck._windows_security import secure_created_path
+
+            secure_created_path(oversized)
         self.assertIsNone(attachments.read_blob(self.digest))
 
     def test_rejects_writable_blob_root_and_candidate(self):
         candidate = self.root / f"{self.digest}.png"
-        candidate.write_bytes(self.payload)
+        self.write_blob(candidate, self.payload)
         if os.name == "nt":
             from omp_deck._windows_security import secure_path
 

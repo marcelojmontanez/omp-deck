@@ -15,7 +15,7 @@ from ._platform_paths import (
 )
 
 if os.name == "nt":
-    from ._windows_security import is_private_path, owned_by_current_user, secure_path
+    from ._windows_security import is_private_path, owned_by_current_user, secure_created_path, secure_path
 
 MANIFEST_NAME = ".install-manifest.json"
 OWNERSHIP_MARKER = ".omp-deck-owned"
@@ -126,6 +126,7 @@ def validate_manifest(paths):
 def mark_owned(root, allowed_existing=(), *, mode=None):
     if _is_link_like(root):
         raise RuntimeError(f"refusing to mark symlink or reparse point as owned: {root}")
+    created = False
     if root.exists():
         info = root.stat(follow_symlinks=False)
         owned = owned_by_current_user(root) if os.name == "nt" else info.st_uid == os.geteuid()
@@ -153,12 +154,17 @@ def mark_owned(root, allowed_existing=(), *, mode=None):
             raise RuntimeError(f"refusing to claim non-empty unowned path: {root}")
     else:
         root.mkdir(parents=True)
+        created = True
     if os.name == "nt":
-        secure_path(root)
+        if created:
+            secure_created_path(root)
+        else:
+            secure_path(root)
     marker = root / OWNERSHIP_MARKER
-    marker.write_text("OMP Deck owned directory\n", encoding="utf-8")
+    with marker.open("x", encoding="utf-8", newline="") as stream:
+        stream.write("OMP Deck owned directory\n")
     if os.name == "nt":
-        secure_path(marker)
+        secure_created_path(marker)
 
     if os.name != "nt" and mode is not None:
         root.chmod(mode)

@@ -11,7 +11,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 from ._private_state import ensure_private_directory
-from ._windows_security import current_user_sid_string, is_private_path, secure_path
+from ._windows_security import current_user_sid_string, is_private_path, secure_created_path, secure_path
 from .installation_paths import (
     InstallationPaths,
     has_ownership_marker,
@@ -136,7 +136,7 @@ def _write_private(path: Path, content: bytes) -> None:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
-        secure_path(temporary)
+        secure_created_path(temporary)
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)

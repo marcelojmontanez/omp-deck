@@ -26,6 +26,7 @@ from omp_deck._platform_paths import (
 )
 from omp_deck.auth import AuthManager
 from omp_deck.fleet_model import FleetModel
+from omp_deck.projects import resolve_project_path
 from omp_deck.rpc_sessions import RpcSessionManager
 from omp_deck.settings import Settings
 
@@ -331,9 +332,7 @@ class WindowsRpcIntegrationTests(unittest.TestCase):
             )
             manager = RpcSessionManager(settings, FleetModel())
             try:
-                result = manager.launch_request("windows-rpc-smoke", "smoke")
-                self.assertEqual(result["status"], "accepted")
-                session = result["session"]
+                session = manager.launch("smoke", resolve_project_path(project_root, "smoke"))
                 self.assertEqual(session["transport"]["status"], "connected")
                 self.assertEqual(session["transport"]["kind"], "rpc")
                 self.assertTrue(session["ompSessionId"])

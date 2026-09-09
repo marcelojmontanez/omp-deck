@@ -79,6 +79,8 @@ jobs:
           if ($actual -ne $expected) { throw "OMP checksum mismatch: $actual" }
           "OMP_DECK_WINDOWS_OMP_SMOKE_BIN=$path" >> $env:GITHUB_ENV
       - name: Exercise managed RPC against official OMP
+        env:
+          OPENAI_API_KEY: omp-deck-ci-not-a-real-key
         run: python -m unittest tests.test_windows_native.WindowsRpcIntegrationTests
 
   package:

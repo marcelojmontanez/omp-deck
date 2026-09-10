@@ -2,7 +2,7 @@
 
 function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
   async function markRead(agent) {
-    if (!agent || agent.inboxState !== 'unread' || document.visibilityState !== 'visible') return;
+    if (!agent || agent.nodeAvailable === false || agent.inboxState !== 'unread' || document.visibilityState !== 'visible') return;
     agent.inboxState = 'read';
     touchRender();
     renderSummary();
@@ -24,6 +24,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     }
   }
   function displayStatus(agent) {
+    if (agent?.nodeAvailable === false) return 'disconnected';
     return agent.executionState || agent.status || 'idle';
   }
   function relativeTime(value) {
@@ -79,19 +80,23 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     const visible = state.agents.filter(matchesFilter);
     el['agent-list'].innerHTML = visible.length ? visible.map(agent => {
       const session = agent.session || {};
-      const status = displayStatus(agent);
+      const status = agent.nodeAvailable === false ? 'disconnected' : displayStatus(agent);
       const children = (agent.subagents || [])
         .filter(subagent => subagent.executionState === 'working');
       const subagents = children.map(subagent =>
         `<span class="subagent"><i class="status-dot ${escapeHtml(subagent.executionState)}"></i><span><strong>${escapeHtml(subagent.label)}</strong><small>${escapeHtml(subagent.activitySummary || subagent.executionState)}</small></span></span>`
       ).join('');
-      return `<button class="agent-card" data-id="${escapeHtml(agent.id)}" type="button">
+      const owner = agent.machineName
+        ? `<span class="agent-machine">${escapeHtml(agent.machineName)}</span>`
+        : '';
+      return `<button class="agent-card" data-id="${escapeHtml(agent.id)}" type="button" aria-label="${escapeHtml(`${agent.project}, ${agent.label}${agent.machineName ? `, on ${agent.machineName}` : ''}`)}">
         <span class="agent-card-top">
           <span class="status-stack"><i class="status-dot ${escapeHtml(status)}"></i>${agent.inboxState === 'unread' ? '<i class="inbox-dot" title="Unread response"></i>' : ''}</span>
           <span>
             <span class="agent-name">${escapeHtml(agent.project)}</span>
+            ${owner}
             <span class="agent-project">${escapeHtml(agent.label)}</span>
-            <span class="activity-summary">${escapeHtml(agent.activitySummary || status.replace('-', ' '))}</span>
+            <span class="activity-summary">${escapeHtml(agent.nodeAvailable === false ? 'Machine unavailable' : (agent.activitySummary || status.replace('-', ' ')))}</span>
           </span>
           <span class="agent-age">${relativeTime(session.updatedMs)}</span>
         </span>
@@ -108,15 +113,20 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
         && state.renderedSessionId === agent?.id
         && state.renderedUpdatedMs === renderKey
         && state.renderedRevision === state.renderRevision) return;
+    const previousRenderedId = state.renderedSessionId;
     state.renderedSessionId = agent?.id || null;
     state.renderedUpdatedMs = renderKey;
     state.renderedRevision = state.renderRevision;
+    if (previousRenderedId && previousRenderedId !== agent?.id) {
+      ompDeckImages.releaseOwner(previousRenderedId);
+    }
     const chips = [];
     const capabilities = agent?.capabilities || {};
+    if (agent?.machineName) chips.push(`<span class="chip machine-chip">${escapeHtml(agent.machineName)}</span>`);
     if (session.model) chips.push(`<span class="chip">${escapeHtml(session.model)}</span>`);
     if (agent) {
       const level = thinkingLevel(agent);
-      chips.push(agent.bridgeConnected && capabilities.setThinking
+      chips.push(agent.nodeAvailable !== false && agent.bridgeConnected && capabilities.setThinking
         ? `<button class="chip" type="button" data-thinking-level="${escapeHtml(level)}">thinking: ${escapeHtml(level)}</button>`
         : `<span class="chip">thinking: ${escapeHtml(level)}</span>`);
     }
@@ -124,15 +134,18 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     const menuCapabilities = {clear: 'compact', interrupt: 'interrupt', quit: 'shutdown'};
     for (const [action, capability] of Object.entries(menuCapabilities)) {
       const button = el['session-menu'].querySelector(`[data-session-action="${action}"]`);
-      const available = Boolean(agent?.bridgeConnected && capabilities[capability]);
+      const available = Boolean(agent?.nodeAvailable !== false && agent?.bridgeConnected && capabilities[capability]);
       button.disabled = !available || (action === 'interrupt' && executionState !== 'working');
       button.title = button.disabled ? `${action} is unavailable for this session` : '';
     }
     const removeButton = el['session-menu'].querySelector('[data-session-action="remove"]');
-    const removable = Boolean(agent && ['collab', 'extension'].includes(agent.transport.kind));
-    removeButton.hidden = !removable;
-    removeButton.disabled = !removable;
-    const transportLabel = agent?.bridgeConnected
+    const removable = Boolean(
+      agent?.nodeAvailable !== false
+      && agent
+      && ['collab', 'extension'].includes(agent.transport.kind)
+    );
+    const transportConnected = Boolean(agent?.nodeAvailable !== false && agent?.bridgeConnected);
+    const transportLabel = transportConnected
       ? agent.transport.kind === 'rpc'
         ? 'RPC session'
         : agent.transport.kind === 'extension'
@@ -141,10 +154,16 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
             ? 'Terminal session via Collab'
             : 'Connected session'
       : 'Disconnected';
-    el['transport-status'].className = `transport-status ${agent?.bridgeConnected ? escapeHtml(agent.transport.kind) : 'disconnected'}`;
+    el['transport-status'].className = `transport-status ${transportConnected ? escapeHtml(agent.transport.kind) : 'disconnected'}`;
     el['transport-status'].title = transportLabel;
     el['transport-status'].querySelector('span').textContent = transportLabel;
-    if (agent?.bridgeConnected === false || executionState === 'disconnected') {
+    if (agent?.nodeAvailable === false) {
+      const machine = ompDeckApi.machine(agent.machineId);
+      const warning = machine?.status === 'unavailable'
+        ? 'Machine access unavailable'
+        : machine?.status === 'connecting' ? 'Machine connecting' : 'Machine offline';
+      chips.push(`<span class="bridge-warning" role="status">${escapeHtml(warning)}</span>`);
+    } else if (agent?.bridgeConnected === false || executionState === 'disconnected') {
       chips.push('<span class="bridge-warning" role="status">Disconnected</span>');
     }
     let taskControl = '';
@@ -194,13 +213,14 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
         : `${eventAttachments(event)}${renderEventDetail(event)}`}
     </article>`).join('') : '<p class="activity-empty">No conversation available yet.</p>';
     el.activity.innerHTML = todoPanel + conversation + archive;
+    if (agent) ompDeckImages.hydrate(el.activity, agent.id);
     el['scroll-newest'].hidden = el.activity.scrollTop < 160;
 
     if (selectionChanged) {
       getComposer().select(agent?.id);
       requestAnimationFrame(() => { el.activity.scrollTop = 0; });
     }
-    const canMessage = Boolean(agent?.bridgeConnected && capabilities.sendMessage);
+    const canMessage = Boolean(agent?.nodeAvailable !== false && agent?.bridgeConnected && capabilities.sendMessage);
     const canAttach = canMessage && Boolean(capabilities.attachments);
     el.message.setAttribute('aria-label', agent ? `Message ${agent.label}` : 'Message selected OMP');
     el.message.placeholder = agent && !canMessage ? 'Messaging is unavailable for this session' : 'Message this OMP…';
@@ -229,6 +249,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
   }
 
   function showMenu() {
+    if (state.selectedId) ompDeckImages.releaseOwner(state.selectedId);
     state.selectedId = null;
     getComposer().select(null);
     el.app.classList.remove('chat-open');
@@ -244,7 +265,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
       const requested = state.agents.find(agent => agent.id === state.pendingSelection);
       if (requested) {
         selectAgent(requested.id, {pushHistory: false});
-      } else {
+      } else if (ompDeckApi.machines().every(machine => ['live', 'offline', 'unavailable'].includes(machine.status))) {
         state.pendingSelection = null;
         const url = new URL(location.href);
         url.searchParams.delete('session');
@@ -252,36 +273,66 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
         showMenu();
       }
     } else if (state.selectedId && !state.agents.some(agent => agent.id === state.selectedId)) {
+      const url = new URL(location.href);
+      url.searchParams.delete('session');
+      history.replaceState({view: 'menu'}, '', url);
       showMenu();
     }
-    el.connection.classList.remove('offline');
-    el['connection-text'].textContent = 'Live';
+    renderMachineControls();
     renderSummary();
     renderList();
     const selection = window.getSelection();
-    void refreshUsage().catch(() => renderUsage({error: 'Usage is temporarily unavailable'}));
     if (!selection || selection.isCollapsed) renderDetail();
     if (state.selectedId) markRead(selectedAgent());
   }
 
-  function noteSnapshotGeneration(generation) {
-    if (Number.isSafeInteger(generation)) state.snapshotGeneration = generation;
+  function noteSnapshotGeneration(machineId, generation) {
+    if (!Number.isSafeInteger(generation)) return;
+    const node = nodeState(machineId);
+    node.snapshotGeneration = generation;
   }
 
-  function applyFleetSnapshot(payload, requestedGeneration = null) {
+  function applyFleetSnapshot(
+    payload,
+    requestedGeneration = null,
+    machineId = 'local',
+    requestedRevision = null,
+  ) {
+    if (!ompDeckApi.authenticated()) return;
+    const node = nodeState(machineId);
     if (
       Number.isSafeInteger(requestedGeneration)
-      && state.snapshotGeneration !== requestedGeneration
+      && node.snapshotGeneration !== requestedGeneration
     ) return;
-    noteSnapshotGeneration(payload.snapshotGeneration);
-    state.agents = (payload.sessions || []).map(projectSession);
+    if (
+      Number.isSafeInteger(requestedRevision)
+      && node.presentationRevision !== requestedRevision
+    ) return;
+    const machine = ompDeckApi.machine(machineId);
+    if (!machine) return;
+    noteSnapshotGeneration(machineId, payload.snapshotGeneration);
+    const projected = (payload.sessions || []).map(session => projectSession(session, machine));
+    const projectedIds = new Set(projected.map(agent => agent.id));
+    for (const agent of state.agents) {
+      if (agent.machineId === machineId && !projectedIds.has(agent.id)) {
+        ompDeckImages.releaseOwner(agent.id);
+      }
+    }
+    state.agents = [
+      ...state.agents.filter(agent => agent.machineId !== machineId),
+      ...projected,
+    ];
     touchRender();
     renderFleet();
   }
 
-  function applyFleetSession(session, snapshotGeneration) {
-    noteSnapshotGeneration(snapshotGeneration);
-    const projected = projectSession(session);
+  function applyFleetSession(session, snapshotGeneration, machineId = 'local') {
+    const machine = ompDeckApi.machine(machineId);
+    if (!machine) return;
+    if (!ompDeckApi.authenticated()) return;
+    noteSnapshotGeneration(machineId, snapshotGeneration);
+    if (!Number.isSafeInteger(snapshotGeneration)) nodeState(machineId).presentationRevision += 1;
+    const projected = projectSession(session, machine);
     const index = state.agents.findIndex(agent => agent.id === projected.id);
     if (index < 0) state.agents.push(projected);
     else state.agents[index] = projected;
@@ -289,10 +340,19 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     renderFleet();
   }
 
-  function removeFleetSession(sessionId, snapshotGeneration) {
-    noteSnapshotGeneration(snapshotGeneration);
-    state.agents = state.agents.filter(agent => agent.id !== sessionId);
-    if (state.selectedId === sessionId) state.selectedId = null;
+  function removeFleetSession(sessionId, snapshotGeneration, machineId = 'local') {
+    noteSnapshotGeneration(machineId, snapshotGeneration);
+    if (!Number.isSafeInteger(snapshotGeneration)) nodeState(machineId).presentationRevision += 1;
+    const id = ompDeckApi.sessionKey(machineId, sessionId);
+    ompDeckImages.releaseOwner(id);
+    state.agents = state.agents.filter(agent => agent.id !== id);
+    if (state.selectedId === id) {
+      state.selectedId = null;
+      const url = new URL(location.href);
+      url.searchParams.delete('session');
+      history.replaceState({view: 'menu'}, '', url);
+      showMenu();
+    }
     touchRender();
     renderFleet();
   }

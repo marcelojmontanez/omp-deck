@@ -102,6 +102,19 @@ class AuthManagerTests(unittest.TestCase):
         for attribute in ("Path=/", "HttpOnly", "Secure", "SameSite=Strict"):
             self.assertIn(attribute, paired.set_cookie)
 
+    def test_custom_cookie_name_is_used_for_pair_and_logout(self):
+        auth = AuthManager(
+            Path(self.temp.name) / "coordinator",
+            cookie_name="omp_deck_coordinator_device",
+            now=self.wall,
+            monotonic=self.monotonic,
+        )
+        secret = auth.begin_pairing()
+        paired = auth.pair(secret.token, source="browser")
+
+        self.assertTrue(paired.set_cookie.startswith("omp_deck_coordinator_device=v1."))
+        self.assertTrue(auth.logout(paired.credential).startswith("omp_deck_coordinator_device=;"))
+
     def test_authentication_survives_restart_but_expired_session_fails(self):
         _, paired = self.pair_device()
         restarted = AuthManager(

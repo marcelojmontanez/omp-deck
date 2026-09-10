@@ -1,4 +1,5 @@
 let usageLoadedAt = 0;
+let usageMachineId = null;
 
 function usageResetTime(value) {
   const seconds = Math.max(0, Math.round((value - Date.now()) / 1000));
@@ -29,9 +30,35 @@ function renderUsage(payload) {
 }
 
 async function refreshUsage() {
-  if (Date.now() - usageLoadedAt < 60_000) return;
+  const machineId = state.selectedMachineId;
+  const machineOrigin = ompDeckApi.machine(machineId)?.origin;
+  if (!machineId) {
+    renderUsage({reports: []});
+    return;
+  }
+  if (state.reloadRequiredMachines.has(machineId)) {
+    renderUsage({error: 'Reload the dashboard to authorize this machine origin.'});
+    return;
+  }
+  if (usageMachineId === machineId && Date.now() - usageLoadedAt < 60_000) return;
+  usageMachineId = machineId;
   usageLoadedAt = Date.now();
-  const response = await ompDeckApi.request('/api/usage', {cache: 'no-store'});
-  if (!response.ok) throw new Error(`Usage returned ${response.status}`);
-  renderUsage(await response.json());
+  try {
+    const response = await ompDeckApi.request('/api/usage', {machineId, cache: 'no-store'});
+    if (!response.ok) throw new Error(`Usage returned ${response.status}`);
+    const payload = await response.json();
+    if (
+      ompDeckApi.authenticated()
+      && !state.reloadRequiredMachines.has(machineId)
+      && state.selectedMachineId === machineId
+      && ompDeckApi.machine(machineId)?.origin === machineOrigin
+    ) renderUsage(payload);
+  } catch (error) {
+    if (
+      ompDeckApi.authenticated()
+      && !state.reloadRequiredMachines.has(machineId)
+      && state.selectedMachineId === machineId
+      && ompDeckApi.machine(machineId)?.origin === machineOrigin
+    ) renderUsage({error: error.message});
+  }
 }

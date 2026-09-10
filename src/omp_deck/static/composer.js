@@ -81,6 +81,10 @@ function createComposer({
 
   function revokeAttachment(attachment) {
     if (!attachment?.url || revokedAttachmentUrls.has(attachment.url)) return;
+    const viewerImage = document.getElementById('image-viewer-image');
+    if (viewerImage?.src === attachment.url && document.getElementById('image-viewer')?.open) {
+      window.closeImageViewer?.();
+    }
     revokedAttachmentUrls.add(attachment.url);
     URL.revokeObjectURL(attachment.url);
   }

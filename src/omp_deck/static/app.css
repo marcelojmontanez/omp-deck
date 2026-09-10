@@ -30,9 +30,9 @@ body {
     radial-gradient(circle at 100% 20%, rgba(155, 140, 255, .11), transparent 32rem),
     var(--bg);
 }
-button, textarea { font: inherit; }
+button, textarea, input, select { font: inherit; }
 button { color: inherit; }
-button:focus-visible, textarea:focus-visible {
+button:focus-visible, textarea:focus-visible, input:focus-visible, select:focus-visible {
   outline: 2px solid var(--cyan);
   outline-offset: 2px;
 }
@@ -312,13 +312,16 @@ button.chip:active { background: #283247; }
   gap: 8px;
   margin-top: 8px;
 }
-.message-attachments a {
+.message-attachments button {
   display: block;
   width: 100%;
+  min-height: 44px;
+  padding: 0;
   overflow: hidden;
   border: 1px solid var(--line-bright);
   border-radius: 10px;
   background: #060910;
+  color: var(--muted);
 }
 .message-attachments img {
   display: block;
@@ -327,6 +330,7 @@ button.chip:active { background: #283247; }
   max-height: min(70vh, 680px);
   object-fit: contain;
 }
+.message-image.image-loading, .message-image.image-failed { padding: 12px; cursor: default; }
 .activity-empty { margin: auto; color: var(--muted); text-align: center; }
 .event {
   --event-color: var(--muted);
@@ -417,7 +421,7 @@ button.chip:active { background: #283247; }
 .event.error .event-detail { white-space: pre-wrap; }
 
 .empty-card { padding: 28px 16px; color: var(--muted); text-align: center; }
-.app.chat-open .appbar, .app.chat-open .overview, .app.chat-open .launcher { display: none; }
+.app.chat-open .appbar, .app.chat-open .overview, .app.chat-open .machine-panel, .app.chat-open .launcher, .app.chat-open .usage { display: none; }
 
 @media (min-width: 761px) {
   .app { height: var(--app-height); }

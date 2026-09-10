@@ -8,7 +8,7 @@ from .auth import AuthenticationFailed, AuthError
 from .event_stream import ReplayUnavailableError
 
 
-def send_stream(handler: Any, fleet_model: Any, authenticate: Callable, credential: str | None) -> None:
+def send_stream(handler: Any, fleet_model: Any, authenticate: Callable[[], Any]) -> None:
     journal = fleet_model.journal
     raw_cursor = handler.headers.get("Last-Event-ID")
     if raw_cursor is None or raw_cursor == "":
@@ -25,7 +25,7 @@ def send_stream(handler: Any, fleet_model: Any, authenticate: Callable, credenti
             initial = [(event.id, event.public()) for event in replay]
 
     try:
-        authenticate(credential)
+        authenticate()
     except AuthenticationFailed:
         handler.reply(401, {"error": "authentication required"})
         return
@@ -41,6 +41,7 @@ def send_stream(handler: Any, fleet_model: Any, authenticate: Callable, credenti
         handler.end_headers()
         handler.connection.settimeout(20)
         for event_id, payload in initial:
+            authenticate()
             _write_event(handler, journal, event_id, payload)
             cursor = event_id
         while True:
@@ -51,22 +52,23 @@ def send_stream(handler: Any, fleet_model: Any, authenticate: Callable, credenti
                 events = ()
             else:
                 replacement = None
-            try:
-                authenticate(credential)
-            except AuthError:
-                handler.close_connection = True
-                return
             if replacement is not None:
+                authenticate()
                 event_id, payload = replacement[0]
                 _write_event(handler, journal, event_id, payload)
                 continue
             if not events:
+                authenticate()
                 handler.wfile.write(b": keepalive\n\n")
                 handler.wfile.flush()
                 continue
             for event in events:
+                authenticate()
                 _write_event(handler, journal, event.id, event.public())
                 cursor = event.id
+    except AuthError:
+        handler.close_connection = True
+        return
     except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
         return
 

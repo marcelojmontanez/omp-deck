@@ -188,11 +188,11 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   assert.match(rendering.cardText, /Worker/);
   assert.doesNotMatch(rendering.cardText, /Sleeper/);
   assert.equal(rendering.selectedId, 'session-1');
-  await page.waitForFunction(() => !state.refreshing);
+  await page.waitForFunction(() => [...state.nodes.values()].every(node => !node.refreshPromise));
   const recovery = await page.evaluate(async () => {
-    state.eventSource?.close();
+    stopEventStreams();
     const originalFetch = window.fetch;
-    const baseGeneration = state.snapshotGeneration + 10;
+    const baseGeneration = nodeState('local').snapshotGeneration + 10;
     let calls = 0;
     let releaseFirst;
     const response = payload => ({
@@ -243,7 +243,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       releaseFirst();
       await activeRefresh;
       const recoveredTitle = state.agents.find(agent => agent.id === 'recovery-session')?.label;
-      const staleRequestGeneration = state.snapshotGeneration;
+      const staleRequestGeneration = nodeState('local').snapshotGeneration;
       applyFleetSession(rawSession('Newest event'), baseGeneration + 3);
       applyFleetSnapshot({
         snapshotGeneration: baseGeneration + 2,
@@ -264,7 +264,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
         restartedTitle: state.agents.find(
           agent => agent.id === 'recovery-session'
         )?.label,
-        snapshotGeneration: state.snapshotGeneration,
+        snapshotGeneration: nodeState('local').snapshotGeneration,
       };
     } finally {
       window.fetch = originalFetch;
@@ -276,6 +276,110 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   assert.equal(recovery.staleIgnoredTitle, 'Newest event');
   assert.equal(recovery.restartedTitle, 'Restarted server');
   assert.equal(recovery.snapshotGeneration > 0, true);
+
+  const normalizedEventOrdering = await page.evaluate(async () => {
+    const machineId = 'local';
+    const sessionId = 'normalized-ordering-session';
+    const projectedId = ompDeckApi.sessionKey(machineId, sessionId);
+    const node = nodeState(machineId);
+    clearTimeout(node.recoveryTimer);
+    node.recoveryTimer = null;
+    const baseGeneration = node.snapshotGeneration + 20;
+    const rawSession = (title, messages = []) => ({
+      id: sessionId,
+      ompSessionId: 'omp-normalized-ordering',
+      title,
+      project: {name: 'demo', path: '/work/demo'},
+      state: 'idle',
+      transport: {
+        kind: 'rpc',
+        status: 'connected',
+        label: 'RPC',
+        instanceId: 'normalized-instance',
+      },
+      capabilities: {},
+      messages,
+      todos: [],
+      subagents: [],
+      pendingUiRequest: null,
+      unread: false,
+      updatedAt: '2026-08-20T12:34:56.789Z',
+      workingOn: null,
+      model: null,
+      thinking: null,
+    });
+    const normalizedEvent = (snapshotGeneration, title) => JSON.stringify({
+      id: snapshotGeneration,
+      snapshotGeneration,
+      sessionId,
+      instanceId: 'normalized-instance',
+      generation: 7,
+      sequence: 41,
+      type: 'session_read',
+      payload: {session: rawSession(title)},
+    });
+    const visibleTitle = () => (
+      document.querySelector(`[data-id="${projectedId}"]`)?.textContent || ''
+    );
+
+    applyFleetSnapshot({
+      snapshotGeneration: baseGeneration,
+      sessions: [rawSession('Authoritative snapshot')],
+    }, null, machineId);
+    applyNodeEvent(machineId, normalizedEvent(baseGeneration + 1, 'First normalized update'));
+    const firstVisible = visibleTitle();
+    applyNodeEvent(machineId, normalizedEvent(baseGeneration + 2, 'Second normalized update'));
+    const secondVisible = visibleTitle();
+    applyNodeEvent(machineId, normalizedEvent(baseGeneration + 1, 'Stale normalized update'));
+    const afterStale = visibleTitle();
+    applyNodeEvent(machineId, normalizedEvent(baseGeneration + 4, 'Gapped normalized update'));
+    const afterGap = visibleTitle();
+    clearTimeout(node.recoveryTimer);
+    node.recoveryTimer = null;
+
+    const largeText = `supported-snapshot-start ${'x'.repeat(224 * 1024)} supported-snapshot-end`;
+    const snapshotData = JSON.stringify({
+      id: baseGeneration + 3,
+      type: 'snapshot',
+      payload: {
+        snapshotGeneration: baseGeneration + 3,
+        sessions: [rawSession('Large transcript', [{
+          id: 'large-message',
+          role: 'assistant',
+          content: [{type: 'text', text: largeText}],
+          createdAt: '2026-08-20T12:34:56.789Z',
+        }])],
+      },
+    });
+    const frame = `id: browser-regression:${baseGeneration + 3}\nevent: fleet\ndata: ${snapshotData}\n\n`;
+    const stream = {
+      controller: new AbortController(),
+      failures: 4,
+      lastEventId: '',
+    };
+    await consumeSse(new Response(new Blob([frame]).stream(), {
+      status: 200,
+      headers: {'Content-Type': 'text/event-stream'},
+    }), machineId, stream);
+    selectAgent(projectedId, {pushHistory: false});
+
+    return {
+      firstVisible,
+      secondVisible,
+      afterStale,
+      afterGap,
+      largeTitleVisible: visibleTitle(),
+      largeTranscriptVisible: document.getElementById('activity').textContent.includes(
+        'supported-snapshot-end'
+      ),
+    };
+  });
+  assert.match(normalizedEventOrdering.firstVisible, /First normalized update/);
+  assert.match(normalizedEventOrdering.secondVisible, /Second normalized update/);
+  assert.match(normalizedEventOrdering.afterStale, /Second normalized update/);
+  assert.match(normalizedEventOrdering.afterGap, /Second normalized update/);
+  assert.match(normalizedEventOrdering.largeTitleVisible, /Large transcript/);
+  assert.equal(normalizedEventOrdering.largeTranscriptVisible, true);
 
   const queueBehavior = await page.evaluate(async () => {
     const originalRequest = ompDeckApi.request;
@@ -651,7 +755,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
             ok: true,
             status: 200,
             json: async () => ({
-              snapshotGeneration: state.snapshotGeneration,
+              snapshotGeneration: nodeState('local').snapshotGeneration,
               sessions: [],
             }),
           };

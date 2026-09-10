@@ -62,7 +62,7 @@ Setup installs `~/Library/LaunchAgents/com.omp-deck.agent.plist` in the current 
 
 macOS retains the same XDG defaults as Linux: configuration at `~/.config/omp-deck/config.json`, installation ownership records at `~/.local/share/omp-deck`, and state at `~/.local/state/omp-deck`. The LaunchAgent preserves your configured XDG directories and OMP profile directory. After changing those environment variables, rerun `omp-deck setup`; a plain service restart retains the installed environment. `service status` reports whether the LaunchAgent is loaded; `doctor` also checks actual HTTP health.
 
-Managed RPC, Collab, Unix-socket terminal discovery, image attachments, setup rollback, service removal, and ownership-checked purge use the same commands as Linux. Legacy migration remains Linux-only. Each Deck installation controls its own machine; cross-machine aggregation is not provided.
+Managed RPC, Collab, Unix-socket terminal discovery, image attachments, setup rollback, service removal, and purge use the same commands as Linux. Legacy migration remains Linux-only. Each Deck installation owns its machine's sessions; an optional coordinator provides a shared multi-machine dashboard.
 
 ### Native Windows
 
@@ -94,6 +94,126 @@ omp-deck serve
 - open **Connect terminal via Collab** and paste a writable link to connect a terminal-owned session;
 - use the session menu to compact, interrupt, shut down, or remove a terminal transport only when that capability is available;
 - answer pending RPC or Collab input requests in the request panel; extension-fallback requests remain terminal-only.
+
+## Multi-machine coordinator
+
+The optional coordinator is a separate Python process. It serves the shared dashboard and owns only the machine directory, viewing-device authentication, and the Ed25519 ticket-signing key. It does not store node transcripts, run OMP, proxy node traffic, or act as a central session/process lifecycle authority. After pairing with the coordinator, the browser connects directly to every enrolled Deck node for sessions, commands, images, usage, and SSE.
+
+Run it on your PC for loopback testing, or on an independently available Linux host for regular use. No particular hosting provider, container runtime, or web server is required. Installing the Python package is enough for a coordinator-only host; do **not** run `omp-deck setup` there unless you also want a local Deck node.
+
+### Run on your PC
+
+Keep coordinator configuration and state separate from the local Deck installation:
+
+```bash
+install -d -m 700 ~/.config/omp-deck-coordinator ~/.local/state/omp-deck-coordinator
+```
+
+Create `~/.config/omp-deck-coordinator/config.json` with:
+
+```json
+{
+  "host": "127.0.0.1",
+  "port": 8790,
+  "origin": "http://localhost:8790",
+  "state_root": "~/.local/state/omp-deck-coordinator"
+}
+```
+
+Then run:
+
+```bash
+chmod 600 ~/.config/omp-deck-coordinator/config.json
+omp-deck coordinator serve --config ~/.config/omp-deck-coordinator/config.json
+```
+
+Open the exact configured `origin`. An origin is only a scheme, hostname, and optional port—no path, query, or fragment—and must be the browser-reachable address actually used by viewers. HTTP is accepted only for `localhost` or a loopback IP and is intended for same-machine testing. A phone cannot use your PC's `localhost`; for remote use, give the coordinator and every node their own browser-reachable HTTPS origin, normally through owner-restricted Tailscale Serve. Every viewing device must be able to reach every node independently, and the proxy must preserve the advertised hostname because nodes require the exact enrolled `Origin` and `Host`. Deck does not change routing or install TLS for the coordinator.
+
+`serve` stays in the foreground and stops on Ctrl+C or SIGTERM. Run this same command under your chosen process supervisor when hosting permanently. The existing `omp-deck service` commands manage the local Deck node, not the coordinator.
+
+### Enroll a machine and pair a viewer
+
+On the coordinator host, register the address of an already-running Deck node. This example uses a separate local test node listening on port `8791`:
+
+```bash
+omp-deck coordinator machine add Desktop \
+  --origin http://127.0.0.1:8791 \
+  --out ~/.config/omp-deck-coordinator/desktop.json \
+  --config ~/.config/omp-deck-coordinator/config.json
+```
+
+The output directory and bundle must remain private and owned by you. On POSIX, an existing output directory must be mode `0700`; the new bundle is mode `0600`. An existing output file is never overwritten. The bundle contains the machine identity, exact coordinator and machine origins, and the coordinator's **public** verification key—not its signing key—but installing it is an explicit authorization to trust that coordinator.
+
+Transfer that bundle to the owning machine through a trusted channel such as SSH. On that machine, explicitly accept it:
+
+```bash
+omp-deck fleet join --file /path/to/desktop.json --config /path/to/node-config.json
+omp-deck fleet status --config /path/to/node-config.json
+```
+
+Omit `--config` to use that node's normal Deck configuration. Keep the bundle owner-only, transfer it only through a trusted channel, and delete working copies after a successful join unless they are in a protected backup. On POSIX, the input file must have no group or world permissions and its parent must be owned by you and not group- or world-writable. The node's `allowed_hosts` must include the hostname in its advertised origin. Joining is live: no service restart or plugin reinstall is required. Repeat enrollment for your Mac or other computers. Replacing an existing trust relationship requires `fleet leave` first.
+
+Back on the coordinator host, create a one-time code for each viewing device:
+
+```bash
+omp-deck coordinator pair --config ~/.config/omp-deck-coordinator/config.json
+```
+
+Enter it at the coordinator dashboard—not at an individual node. Successful pairing reloads the authenticated dashboard so its connection policy includes the enrolled origins. Additional tabs in the same paired browser reuse its cookie. Coordinator and local-node cookies have distinct names, so hosting both on one PC does not overwrite local pairing.
+
+### Availability and revocation
+
+- Each node remains authoritative for its sessions and OMP processes. Switching viewers does not move work between computers, and the coordinator cannot cancel node lifecycle work.
+- An offline machine does not block access to other reachable machines. Its previous browser snapshot is stale presentation, not a claim that its OMP process stopped.
+- A coordinator outage does not stop OMP or cancel work already accepted by a node. The browser can use already-issued tickets only until they expire, no later than 60 seconds after issue; it cannot renew access while the coordinator is unavailable. Each node's independent local pairing remains available. Keep all machine clocks synchronized.
+- Coordinator device logout or revoke-all, and coordinator machine removal, prevent new tickets but cannot retract a ticket already issued to a browser. The maximum remaining authorization window is 60 seconds from ticket issue. An idle SSE connection rechecks authorization before delivering newly available events and closes after expiry.
+- Adding a machine or changing its origin requires an already-open dashboard to reload before the browser policy permits that origin. Reloading clears browser-memory state: manually copy any unsent draft text and retain the original attachment files so you can reattach them afterward.
+
+List or remove directory entries on the coordinator:
+
+```bash
+omp-deck coordinator machine list --config ~/.config/omp-deck-coordinator/config.json
+omp-deck coordinator machine remove MACHINE_ID --config ~/.config/omp-deck-coordinator/config.json
+```
+
+To revoke coordinator access immediately at the owning node, remove its local trust:
+
+```bash
+omp-deck fleet leave --config /path/to/node-config.json
+```
+
+Omit `--config` to use the normal node configuration. The node reloads trust on every request, so this rejects even an otherwise-unexpired fleet ticket without a service restart; a live event stream closes before delivering another event after the failed check. Neither local leave nor coordinator removal deletes sessions or aborts OMP work.
+
+### State, backup, and key-loss recovery
+
+The coordinator state root contains `fleet-coordinator.json` (the private signing key and up to 32 machine directory records), `auth.json` (pairing state and hashed viewing-device credentials), and adjacent lock files. For fleet enrollment, each node adds `fleet-node.json` and its lock alongside its existing Deck state; that record pins the machine identity, exact origins, and coordinator public key. The browser sends its coordinator cookie only to the coordinator, sends direct node requests with a 60-second bearer ticket and no node cookies, and keeps the roster, tickets, drafts, attachments, and rendered transcripts in memory only.
+
+For backup or host migration, stop the coordinator and its supervisor, then securely copy its owner-only configuration and the **complete** state directory. Restore both while the service is stopped, retain owner-only permissions, and keep the exact configured origin. Preserving `fleet-coordinator.json` preserves node trust; preserving `auth.json` preserves paired viewers. Start the restored service with the same command:
+
+```bash
+omp-deck coordinator serve --config ~/.config/omp-deck-coordinator/config.json
+```
+
+Do not edit, partially reconstruct, or generate a replacement key inside either state file. If the signing key or configured origin cannot be restored, select a new empty owner-only state root in the coordinator configuration and explicitly re-enroll every node:
+
+```bash
+# Coordinator host: create a fresh bundle for each node.
+omp-deck coordinator machine add Desktop \
+  --origin https://desktop.example \
+  --out ~/.config/omp-deck-coordinator/desktop-recovery.json \
+  --config ~/.config/omp-deck-coordinator/config.json
+
+# Owning node: remove the old public-key trust, then install the fresh bundle.
+omp-deck fleet leave --config /path/to/node-config.json
+omp-deck fleet join \
+  --file /path/to/desktop-recovery.json \
+  --config /path/to/node-config.json
+
+# Coordinator host: pair each viewing device again if auth.json was not restored.
+omp-deck coordinator pair --config ~/.config/omp-deck-coordinator/config.json
+```
+
+Reload the dashboard after rebuilding the directory, preserving unsent drafts and attachments manually first. Deleting a bundle after a successful join is safe because the node retains its installed trust record. If that node record is later lost, remove the machine's old coordinator entry, add it again to create a new bundle, then run `fleet join`; an existing enrollment cannot be re-exported. If an enrollment export fails and rollback also fails, remove the resulting directory entry before enrolling again. Local Deck `purge` does not administer a separately configured coordinator; stop its supervisor and remove only the deliberately chosen coordinator configuration and state when retiring it.
 
 ## Configuration
 
@@ -133,7 +253,7 @@ Both layers are required. Keep the listener on `127.0.0.1`, use Tailscale Serve 
 
 Pairing uses a six-digit code that expires after one minute. The code is single-use, and the first failed submission invalidates it; run `omp-deck pair` again after a typo or failed attempt.
 
-Every API, SSE, and blob request requires a paired device cookie. Mutations also require an exact trusted Origin and session-bound CSRF token. Devices can log out individually or revoke all paired devices from the session menu.
+Every private API, SSE, and blob request requires a paired device cookie, or an explicitly enrolled coordinator's short-lived machine-specific access ticket. Cookie-authenticated mutations require an exact trusted Origin and session-bound CSRF token; fleet tickets require the exact pinned coordinator Origin and never use ambient node cookies. Devices can log out individually or revoke all paired devices from the session menu.
 
 ## Retained data
 

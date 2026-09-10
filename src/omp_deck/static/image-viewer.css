@@ -28,4 +28,4 @@
   line-height: 1;
   cursor: pointer;
 }
-.message-attachments a, .attachment-preview { cursor: zoom-in; }
+.message-image[data-view-image], .attachment-preview { cursor: zoom-in; }

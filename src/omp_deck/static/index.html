@@ -8,6 +8,7 @@
   <title>OMP Deck</title>
   <link rel="stylesheet" href="/composer.css">
   <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/fleet.css">
   <link rel="stylesheet" href="/todo.css">
   <link rel="stylesheet" href="/launcher.css">
   <link rel="stylesheet" href="/image-viewer.css">
@@ -20,7 +21,7 @@
       <div class="mark" aria-hidden="true">π</div>
       <div class="eyebrow">Private control surface</div>
       <h1 id="auth-title">Pair this device</h1>
-      <p>Enter the one-time code shown by <code>omp-deck pair</code>.</p>
+      <p>Enter the one-time code shown by <code id="pair-command">omp-deck pair</code>.</p>
       <label for="pair-token">Pairing code</label>
       <input id="pair-token" name="token" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required>
       <button id="pair-submit" type="submit">Pair device</button>
@@ -46,6 +47,17 @@
         <span class="metric attention" title="Errors or agents waiting for your input"><strong id="attention-count">0</strong> need attention</span>
         <span class="metric unread"><strong id="unread-count">0</strong> unread</span>
         <span class="metric idle"><strong id="idle-count">0</strong> idle</span>
+      </div>
+    </section>
+    <section class="machine-panel" id="machine-panel" aria-labelledby="machine-panel-title" hidden>
+      <div class="machine-picker">
+        <label id="machine-panel-title" for="machine-select">Control machine</label>
+        <select id="machine-select" aria-describedby="machine-status-list" disabled></select>
+      </div>
+      <div class="machine-status-list" id="machine-status-list" role="status" aria-live="polite"></div>
+      <div class="fleet-reload" id="fleet-reload" role="alert" hidden>
+        <span>The machine roster changed. Reload to authorize connections to newly added origins. Unsaved drafts will be cleared.</span>
+        <button id="fleet-reload-button" type="button">Reload dashboard</button>
       </div>
     </section>
     <section class="usage" id="usage" aria-label="Subscription usage">
@@ -130,6 +142,7 @@
   </dialog>
 
   <script src="/api.js"></script>
+  <script src="/image-loader.js"></script>
   <script src="/markdown.js"></script>
   <script src="/usage.js"></script>
   <script src="/todo-ui.js"></script>

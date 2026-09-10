@@ -37,6 +37,7 @@
 .auth-card p {
   margin: 0;
 }
+.auth-card code { overflow-wrap: anywhere; }
 
 .auth-card label {
   font-weight: 650;

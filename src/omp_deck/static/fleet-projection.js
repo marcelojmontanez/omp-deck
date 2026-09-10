@@ -30,13 +30,16 @@ function todosText(todos) {
   }).join('\n')}`).join('\n');
 }
 
-function projectSession(session) {
+function projectSession(session, machine = null) {
   const status = normalizedStatus(session.state);
   const updatedMs = Date.parse(session.updatedAt || '') || Date.now();
+  const machineId = machine?.id || null;
+  const localId = session.id;
+  const projectedId = machineId ? ompDeckApi.sessionKey(machineId, localId) : localId;
   const activity = (session.messages || []).map(message => {
     const images = Array.isArray(message.content)
       ? message.content.filter(item => item?.type === 'image' && typeof item.url === 'string')
-        .map(item => ({url: item.url}))
+        .map(item => ({url: item.url, machineId}))
       : [];
     return {
       id: message.id,
@@ -48,7 +51,12 @@ function projectSession(session) {
     };
   });
   return {
-    id: session.id,
+    id: projectedId,
+    localId,
+    machineId,
+    machineName: machine?.name || '',
+    machineOrigin: machine?.origin || '',
+    nodeAvailable: machine ? machine.status === 'live' : true,
     project: session.project?.name || 'Terminal',
     cwd: session.project?.path || '',
     label: session.title || 'OMP session',

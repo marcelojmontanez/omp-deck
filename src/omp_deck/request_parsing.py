@@ -25,7 +25,10 @@ def read_json_request(handler, max_bytes=64 * 1024):
         handler.connection.settimeout(previous_timeout)
     if len(body) != length:
         raise ValueError("incomplete request body")
-    value = json.loads(body)
+    try:
+        value = json.loads(body)
+    except RecursionError:
+        raise ValueError("request JSON nesting is too deep") from None
     if not isinstance(value, dict):
         raise ValueError("request body must be a JSON object")
     return value
@@ -247,11 +250,11 @@ def trusted_browser_request(headers, allowed_hosts):
     )
 
 
-def cookie_credential(headers):
+def cookie_credential(headers, name=COOKIE_NAME):
     cookie = SimpleCookie()
     try:
         cookie.load(headers.get("Cookie", ""))
     except Exception:
         return None
-    morsel = cookie.get(COOKIE_NAME)
+    morsel = cookie.get(name)
     return morsel.value if morsel else None

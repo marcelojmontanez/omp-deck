@@ -9,6 +9,7 @@ function renderPendingRequest(agent) {
   const key = pending ? JSON.stringify([
     agent?.id,
     pending,
+    Boolean(agent?.nodeAvailable !== false),
     Boolean(agent?.bridgeConnected),
     Boolean(agent?.capabilities?.answerUiRequest),
     Boolean(agent?.capabilities?.cancelUiRequest),
@@ -26,8 +27,8 @@ function renderPendingRequest(agent) {
     el['pending-request'].hidden = false;
     return;
   }
-  const canAnswer = Boolean(agent.bridgeConnected && agent.capabilities?.answerUiRequest);
-  const canCancel = Boolean(agent.bridgeConnected && agent.capabilities?.cancelUiRequest && pending.allowCancel);
+  const canAnswer = Boolean(agent.nodeAvailable !== false && agent.bridgeConnected && agent.capabilities?.answerUiRequest);
+  const canCancel = Boolean(agent.nodeAvailable !== false && agent.bridgeConnected && agent.capabilities?.cancelUiRequest && pending.allowCancel);
   if (!canAnswer) {
     el['pending-request'].innerHTML = `<div class="request-heading"><strong>${escapeHtml(pending.title || 'Input required')}</strong><span>Unavailable</span></div><p>This request cannot be answered from Deck while this session is disconnected or read-only.</p>`;
     el['pending-request'].hidden = false;
@@ -60,7 +61,7 @@ function renderPendingRequest(agent) {
 async function settlePendingRequest({cancel = false} = {}) {
   const agent = selectedAgent();
   const pending = agent?.pendingUiRequest;
-  if (!agent || !pending || pending.status === 'terminal_only' || !agent.bridgeConnected) return;
+  if (!agent || !pending || pending.status === 'terminal_only' || agent.nodeAvailable === false || !agent.bridgeConnected) return;
   if ((!cancel && !agent.capabilities?.answerUiRequest) || (cancel && !agent.capabilities?.cancelUiRequest)) return;
   const form = el['pending-request'].querySelector('[data-pending-form]');
   const status = form?.querySelector('[role="status"]');
@@ -114,7 +115,7 @@ async function settlePendingRequest({cancel = false} = {}) {
       error.reuseRequestId = ompDeckApi.shouldReuseRequestId(response, payload);
       throw error;
     }
-    await refresh();
+    await refresh(agent.machineId);
     pendingRequestAttempts.delete(attemptKey);
   } catch (error) {
     if (error.reuseRequestId === false) pendingRequestAttempts.delete(attemptKey);

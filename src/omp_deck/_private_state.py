@@ -216,10 +216,10 @@ class PrivateStateFile:
         finally:
             os.close(descriptor)
 
-    def replace(self, payload: bytes) -> None:
+    def replace(self, payload: bytes, *, overwrite: bool = True) -> None:
         self._require_lock()
         if os.name != "nt":
-            replace_bytes_at(self._directory_fd, self.path.name, payload)
+            replace_bytes_at(self._directory_fd, self.path.name, payload, overwrite=overwrite)
             return
         descriptor = -1
         temporary: Path | None = None
@@ -244,13 +244,28 @@ class PrivateStateFile:
                 stream.write(payload)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary, self.path)
+            # Windows rename refuses an existing destination; replace opts in
+            # to overwriting durable stores, but enrollment exports must not.
+            publish = os.replace if overwrite else os.rename
+            publish(temporary, self.path)
             temporary = None
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
+
+    def delete(self) -> bool:
+        self._require_lock()
+        try:
+            if os.name == "nt":
+                self.path.unlink()
+            else:
+                os.unlink(self.path.name, dir_fd=self._directory_fd)
+                os.fsync(self._directory_fd)
+        except FileNotFoundError:
+            return False
+        return True
 
     def quarantine(self, base_name: str) -> Path:
         self._require_lock()

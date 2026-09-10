@@ -47,14 +47,15 @@ el['session-menu'].addEventListener('click', async event => {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({}),
       });
+      if (!ompDeckApi.authenticated()) return;
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
         throw new Error(payload.error || `Removal failed (${response.status})`);
       }
-      removeFleetSession(agent.id);
+      removeFleetSession(agent.localId, undefined, agent.machineId);
       showToast('Terminal session removed', 'success');
     } catch (error) {
-      showToast(error.message, 'error');
+      if (ompDeckApi.authenticated()) showToast(error.message, 'error');
     }
     return;
   }
@@ -72,6 +73,7 @@ el['session-menu'].addEventListener('click', async event => {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({requestId: operationRequestId}),
     });
+    if (!ompDeckApi.authenticated()) return;
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
       const error = new Error(payload.error || `Action failed (${response.status})`);
@@ -82,7 +84,7 @@ el['session-menu'].addEventListener('click', async event => {
     showToast(`${action[0].toUpperCase()}${action.slice(1)} requested`, 'success');
   } catch (error) {
     if (error.reuseRequestId === false) sessionActionAttempts.delete(attemptKey);
-    showToast(error.message, 'error');
+    if (ompDeckApi.authenticated()) showToast(error.message, 'error');
   }
 });
 

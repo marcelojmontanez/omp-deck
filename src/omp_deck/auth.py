@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -112,16 +113,20 @@ class AuthManager:
         pairing_window: float = 60,
         max_rate_limit_sources: int = 1024,
         max_devices: int = 64,
+        cookie_name: str = COOKIE_NAME,
         now: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
     ):
         if pairing_ttl < 1 or session_ttl < 1 or max_devices < 1 or max_devices > _auth_state.MAX_PERSISTED_DEVICES:
             raise ValueError("authentication lifetimes and limits must be positive and bounded")
+        if not isinstance(cookie_name, str) or re.fullmatch(r"[A-Za-z0-9_]{1,64}", cookie_name) is None:
+            raise ValueError("invalid cookie name")
         self.state_root = Path(state_root)
         self.path = self.state_root / "auth.json"
         self.pairing_ttl = pairing_ttl
         self.session_ttl = session_ttl
         self.max_devices = max_devices
+        self.cookie_name = cookie_name
         self._now = now
         self._lock = threading.RLock()
         self._storage = PrivateStateFile(self.path, lock_name=".auth.lock", repair_root=os.name == "nt")
@@ -188,7 +193,7 @@ class AuthManager:
                 csrf_token=self._csrf(credential, device_id, self._state["epoch"]),
                 created_at=created,
             )
-            return PairedDevice(device, credential, self.cookie_header(credential))
+            return PairedDevice(device, credential, self.cookie_header(credential, self.cookie_name))
 
     def authenticate(self, credential: str | None) -> AuthenticatedDevice:
         """Validate an opaque cookie credential using timing-safe comparison."""
@@ -208,7 +213,7 @@ class AuthManager:
             device = self._authenticate_current(credential)
             del self._state["devices"][device.device_id]
             self._write_state()
-        return self.clear_cookie_header()
+        return self.clear_cookie_header(self.cookie_name)
 
     def revoke_all(self, credential: str | None, csrf_token: str | None) -> str:
         """Invalidate every credential by rotating the installation epoch."""
@@ -221,15 +226,15 @@ class AuthManager:
             self._state["devices"] = {}
             self._state["pairing"] = None
             self._write_state()
-        return self.clear_cookie_header()
+        return self.clear_cookie_header(self.cookie_name)
 
     @staticmethod
-    def cookie_header(credential: str) -> str:
-        return f"{COOKIE_NAME}={credential}; {COOKIE_ATTRIBUTES}"
+    def cookie_header(credential: str, name: str = COOKIE_NAME) -> str:
+        return f"{name}={credential}; {COOKIE_ATTRIBUTES}"
 
     @staticmethod
-    def clear_cookie_header() -> str:
-        return f"{COOKIE_NAME}=; Max-Age=0; {COOKIE_ATTRIBUTES}"
+    def clear_cookie_header(name: str = COOKIE_NAME) -> str:
+        return f"{name}=; Max-Age=0; {COOKIE_ATTRIBUTES}"
 
     @staticmethod
     def _verifier(secret: str | None) -> str:

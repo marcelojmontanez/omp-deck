@@ -313,8 +313,12 @@ def serve(config=None):
 
 
 def main(argv=None):
+    from . import coordinator_cli, fleet_cli
+
     parser = argparse.ArgumentParser(prog="omp-deck")
     commands = parser.add_subparsers(dest="command", required=True)
+    coordinator_cli.add_parser(commands)
+    fleet_cli.add_parser(commands)
     setup_parser = commands.add_parser("setup", help="configure plugin and service")
     setup_parser.add_argument(
         "--tailscale",
@@ -348,6 +352,10 @@ def main(argv=None):
     plugin_actions.add_parser("remove")
 
     arguments = parser.parse_args(argv)
+    if arguments.command == "coordinator":
+        return coordinator_cli.run(arguments)
+    if arguments.command == "fleet":
+        return fleet_cli.run(arguments)
     if arguments.command == "migrate":
         _require_supported_migration()
     if arguments.command == "setup":

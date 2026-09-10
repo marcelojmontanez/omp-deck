@@ -6,6 +6,7 @@
 
 - Support native macOS with a per-user LaunchAgent, graphical-login startup, failure restarts, setup rollback, health diagnostics, and ownership-checked removal and purge. The service requires a logged-in desktop user and does not prevent Mac sleep.
 - Add a native macOS CI gate for LaunchAgent lifecycle, Python portability contracts, and the Unix-socket plugin.
+- Add an optional standalone multi-machine coordinator with explicit node enrollment, an authenticated shared dashboard, direct browser-to-node connections using 60-second Ed25519 bearer tickets, per-machine outage isolation, bounded revocation behavior, and documented backup and re-enrollment recovery.
 
 ### Changed
 

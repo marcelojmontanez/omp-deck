@@ -4,8 +4,8 @@ import secrets
 _TEMPORARY_ATTEMPTS = 16
 
 
-def replace_bytes(directory_fd: int, target_name: str, payload: bytes) -> None:
-    """Atomically replace one file below an already validated directory fd."""
+def replace_bytes(directory_fd: int, target_name: str, payload: bytes, *, overwrite: bool = True) -> None:
+    """Atomically publish one file below an already validated directory fd."""
     descriptor = -1
     temporary_name = None
     try:
@@ -29,12 +29,13 @@ def replace_bytes(directory_fd: int, target_name: str, payload: bytes) -> None:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(
-            temporary_name,
-            target_name,
-            src_dir_fd=directory_fd,
-            dst_dir_fd=directory_fd,
-        )
+        if overwrite:
+            os.replace(temporary_name, target_name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        else:
+            os.link(
+                temporary_name, target_name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd, follow_symlinks=False
+            )
+            os.unlink(temporary_name, dir_fd=directory_fd)
         temporary_name = None
         os.fsync(directory_fd)
     finally:

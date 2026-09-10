@@ -23,8 +23,11 @@ async function drainComposerQueue(queue, deliver, restore) {
 
 
 function safeAttachmentUrl(value) {
+  return typeof value === 'string' && value.startsWith('blob:') ? value : null;
+}
+
+function safeImagePath(value) {
   if (typeof value !== 'string') return null;
-  if (value.startsWith('blob:')) return value;
   let parsed;
   try {
     parsed = new URL(value, location.href);
@@ -32,8 +35,7 @@ function safeAttachmentUrl(value) {
     return null;
   }
   if (
-    parsed.origin !== location.origin
-    || parsed.username
+    parsed.username
     || parsed.password
     || parsed.search
     || parsed.hash
@@ -43,17 +45,22 @@ function safeAttachmentUrl(value) {
 }
 
 function eventAttachments(event) {
-  const images = (Array.isArray(event.attachments)
-    ? event.attachments.map(attachment => attachment.url)
-    : (event.images || []).map(image => image.url))
-    .map(safeAttachmentUrl)
-    .filter(Boolean);
-  if (images.length) {
-    return `<div class="message-attachments">${images.map(url =>
-      `<a href="${escapeHtml(url)}" data-view-image="${escapeHtml(url)}" aria-label="Enlarge attached image"><img src="${escapeHtml(url)}" alt="Attached image" loading="lazy"></a>`
-    ).join('')}</div>`;
-  }
-  if (event.attachments) {
+  const attachments = Array.isArray(event.attachments)
+    ? event.attachments
+    : Array.isArray(event.images) ? event.images : [];
+  const images = attachments.map(attachment => {
+    const value = typeof attachment === 'string' ? attachment : attachment?.url;
+    const localUrl = safeAttachmentUrl(value);
+    if (localUrl) {
+      return `<button class="message-image" type="button" data-view-image="${escapeHtml(localUrl)}" aria-label="Enlarge attached image"><img src="${escapeHtml(localUrl)}" alt="Attached image" loading="lazy"></button>`;
+    }
+    const path = safeImagePath(value);
+    const machineId = typeof attachment === 'object' ? attachment?.machineId : null;
+    if (!path || typeof machineId !== 'string' || !machineId) return '';
+    return `<button class="message-image image-loading" type="button" data-image-path="${escapeHtml(path)}" data-image-machine="${escapeHtml(machineId)}" aria-label="Enlarge attached image"><span>Loading image…</span></button>`;
+  }).filter(Boolean);
+  if (images.length) return `<div class="message-attachments">${images.join('')}</div>`;
+  if (event.attachments && !Array.isArray(event.attachments)) {
     return `<div class="attachment-count">▧ ${event.attachments} file${event.attachments === 1 ? '' : 's'}</div>`;
   }
   return '';

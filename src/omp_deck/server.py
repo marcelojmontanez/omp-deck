@@ -2,39 +2,21 @@
 import json
 import re
 import threading
-from http.server import SimpleHTTPRequestHandler
-from http.server import ThreadingHTTPServer as _ThreadingHTTPServer
-from pathlib import Path
-from socketserver import TCPServer
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
+from ._fleet_trust import FleetTrustStore
+from ._http_common import DeckHttpHandler
+from ._http_common import ThreadingHTTPServer as ThreadingHTTPServer
 from ._sse import send_stream
 from ._terminal_commands import TerminalCommandConflict
 from .attachments import detect_image_mime, read_blob
-from .auth import (
-    COOKIE_NAME as COOKIE_NAME,
-)
-from .auth import (
-    AuthenticationFailed,
-    AuthError,
-    AuthManager,
-    PairingFailed,
-    PairingRateLimited,
-)
+from .auth import COOKIE_NAME as COOKIE_NAME
+from .auth import AuthenticationFailed, AuthError, AuthManager
 from .fleet_model import FleetModel
+from .fleet_protocol import verify_ticket
 from .normalized_actions import NormalizedActionDispatcher
 from .projects import list_launchable_projects, resolve_project_path
 from .read_cursors import CursorStore
-from .request_parsing import (
-    cookie_credential,
-    read_json_request,
-)
-from .request_parsing import (
-    request_host as parse_request_host,
-)
-from .request_parsing import (
-    trusted_browser_request as parse_trusted_browser_request,
-)
 from .rpc_sessions import (
     RpcSessionManager,
     SessionCommandConflictError,
@@ -47,7 +29,6 @@ from .terminal_sessions import (
 )
 from .usage import UsageService
 
-ROOT = Path(__file__).parent
 SETTINGS = load_settings()
 HOST = SETTINGS.host
 PORT = SETTINGS.port
@@ -57,22 +38,13 @@ _auth_manager = None
 _auth_lock = threading.Lock()
 _cursor_store = None
 _cursor_store_lock = threading.Lock()
+_fleet_trust_store = None
+_fleet_trust_lock = threading.Lock()
 _fleet_model = FleetModel()
 _usage_service = UsageService(SETTINGS.omp_bin)
 _rpc_manager = None
 _rpc_manager_lock = threading.Lock()
 _terminal_manager = None
-
-
-class ThreadingHTTPServer(_ThreadingHTTPServer):
-    daemon_threads = True
-    block_on_close = False
-
-    def server_bind(self):
-        # HTTPServer's reverse-DNS lookup blocked macOS startup before listen().
-        # Deck authorizes Host separately and needs only the bound address here.
-        TCPServer.server_bind(self)
-        self.server_name, self.server_port = self.server_address[:2]
 
 
 _terminal_manager_lock = threading.Lock()
@@ -170,12 +142,14 @@ def auth_manager():
     return _auth_manager
 
 
-def request_host(headers):
-    return parse_request_host(headers, SETTINGS.allowed_hosts)
-
-
-def trusted_browser_request(headers):
-    return parse_trusted_browser_request(headers, SETTINGS.allowed_hosts)
+def fleet_trust():
+    global _fleet_trust_store
+    expected_path = SETTINGS.state_root / "fleet-node.json"
+    if _fleet_trust_store is None or _fleet_trust_store.path != expected_path:
+        with _fleet_trust_lock:
+            if _fleet_trust_store is None or _fleet_trust_store.path != expected_path:
+                _fleet_trust_store = FleetTrustStore(SETTINGS.state_root)
+    return _fleet_trust_store
 
 
 def action_dispatcher():
@@ -188,48 +162,128 @@ def action_dispatcher():
     )
 
 
-class Handler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=str(ROOT / "static"), **kwargs)
+class Handler(DeckHttpHandler):
+    def auth_backend(self):
+        return auth_manager()
 
-    def read_json(self, max_bytes=64 * 1024):
-        return read_json_request(self, max_bytes)
+    def allowed_hosts(self):
+        return SETTINGS.allowed_hosts
 
-    def log_message(self, format, *args):
-        print(f"{self.client_address[0]} {format % args}")
-
-    def end_headers(self):
-        request_path = urlparse(self.path).path
-        self.send_header(
-            "Content-Security-Policy",
-            "default-src 'self'; base-uri 'none'; connect-src 'self'; "
-            "font-src 'self'; form-action 'self'; frame-ancestors 'none'; "
-            "img-src 'self' blob: data:; object-src 'none'; script-src 'self'; style-src 'self'",
-        )
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header(
-            "Permissions-Policy",
-            "camera=(), geolocation=(), microphone=(), payment=(), usb=()",
-        )
-        self.send_header(
-            "Cache-Control",
-            "no-store" if request_path.startswith("/api/") else "no-cache",
-        )
-        super().end_headers()
-
-    def reply(self, status, payload, *, headers=()):
-        body = json.dumps(payload).encode()
+    def cors_origin(self):
         try:
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            for name, value in headers:
-                self.send_header(name, value)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+            enrollment = fleet_trust().load()
+        except (OSError, RuntimeError):
+            return None
+        if enrollment is not None and self._fleet_request_boundary(enrollment):
+            return enrollment["coordinatorOrigin"]
+        return None
+
+    def request_authenticated(self, *, csrf=False):
+        authorization = self.headers.get_all("Authorization", [])
+        if authorization:
+            if len(authorization) != 1:
+                raise AuthenticationFailed("invalid fleet authorization")
+            value = authorization[0]
+            if not isinstance(value, str) or not value.startswith("Bearer ") or value.count(" ") != 1:
+                raise AuthenticationFailed("invalid fleet authorization")
+            token = value[7:]
+            if not token or len(token.encode("utf-8")) > 4096:
+                raise AuthenticationFailed("invalid fleet authorization")
+            try:
+                enrollment = fleet_trust().load()
+            except (OSError, RuntimeError) as error:
+                raise AuthError("fleet trust state unavailable") from error
+            if enrollment is None or not self._fleet_request_boundary(enrollment):
+                raise AuthenticationFailed("fleet request boundary rejected")
+            return verify_ticket(token, enrollment)
+        return super().request_authenticated(csrf=csrf)
+
+    def _fleet_request_boundary(self, enrollment):
+        hosts = self.headers.get_all("Host", [])
+        origins = self.headers.get_all("Origin", [])
+        return (
+            len(hosts) == 1
+            and len(origins) == 1
+            and self.host_valid()
+            and hosts[0] == urlsplit(enrollment["machineOrigin"]).netloc
+            and origins[0] == enrollment["coordinatorOrigin"]
+        )
+
+    def _mutation_origin_valid(self):
+        if self.headers.get_all("Authorization", []):
+            try:
+                enrollment = fleet_trust().load()
+            except (OSError, RuntimeError):
+                return False
+            return enrollment is not None and self._fleet_request_boundary(enrollment)
+        return self.browser_origin_valid()
+
+    @staticmethod
+    def _preflight_route_known(path, method):
+        if method == "GET":
+            return (
+                path
+                in {
+                    "/api/client-config",
+                    "/api/events",
+                    "/api/projects",
+                    "/api/sessions",
+                    "/api/usage",
+                }
+                or re.fullmatch(r"/api/blob/[^/]+", path) is not None
+            )
+        if method != "POST":
+            return False
+        return (
+            path == "/api/terminal-sessions/collab"
+            or re.fullmatch(r"/api/projects/.+/sessions", path) is not None
+            or re.fullmatch(
+                r"/api/sessions/[^/]+/(messages|follow-ups|interrupt|shutdown|model|thinking|branch|switch|resume|compact|read|remove)",
+                path,
+            )
+            is not None
+            or re.fullmatch(r"/api/sessions/[^/]+/ui-requests/[^/]+/(respond|cancel)", path) is not None
+        )
+
+    def do_OPTIONS(self):
+        request_path = urlparse(self.path).path
+        methods = self.headers.get_all("Access-Control-Request-Method", [])
+        requested_header_values = self.headers.get_all("Access-Control-Request-Headers", [])
+        private_network_values = self.headers.get_all("Access-Control-Request-Private-Network", [])
+        requested_method = methods[0] if len(methods) == 1 else ""
+        requested_headers = requested_header_values[0] if len(requested_header_values) == 1 else ""
+        private_network = private_network_values[0] if len(private_network_values) == 1 else None
+        try:
+            enrollment = fleet_trust().load()
+        except (OSError, RuntimeError):
+            enrollment = None
+        header_names = {item.strip().lower() for item in requested_headers.split(",") if item.strip()}
+        if (
+            enrollment is None
+            or not self._fleet_request_boundary(enrollment)
+            or not self._preflight_route_known(request_path, requested_method)
+            or len(requested_header_values) > 1
+            or len(private_network_values) > 1
+            or not header_names.issubset({"authorization", "content-type", "last-event-id"})
+            or private_network not in {None, "true"}
+        ):
+            self.reply(403, {"error": "preflight request is not allowed"})
+            return
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Methods", requested_method)
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Authorization, Content-Type, Last-Event-ID",
+        )
+        if private_network == "true":
+            self.send_header("Access-Control-Allow-Private-Network", "true")
+        self.send_header(
+            "Vary",
+            "Access-Control-Request-Method, Access-Control-Request-Headers, Access-Control-Request-Private-Network",
+        )
+        self.send_header("Access-Control-Max-Age", "60")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def reply_blob(self, digest):
         blob = read_blob(digest)
@@ -237,21 +291,18 @@ class Handler(SimpleHTTPRequestHandler):
             self.reply(404, {"error": "image not found"})
             return
         _, body = blob
-        self.send_response(200)
-        self.send_header("Content-Type", detect_image_mime(body) or "application/octet-stream")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def authenticate_request(self, *, csrf=False):
-        credential = cookie_credential(self.headers)
-        if csrf:
-            return auth_manager().validate_csrf(credential, self.headers.get("X-OMP-Deck-CSRF"))
-        return auth_manager().authenticate(credential)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", detect_image_mime(body) or "application/octet-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def do_GET(self):
         request_path = urlparse(self.path).path
-        if request_host(self.headers) is None:
+        if not self.host_valid():
             self.reply(400, {"error": "invalid host"})
             return
         if request_path == "/healthz":
@@ -271,42 +322,29 @@ class Handler(SimpleHTTPRequestHandler):
                 },
             )
             return
+        if request_path == "/api/client-config":
+            self.reply(200, {"mode": "local"})
+            return
+        if request_path.startswith("/api/auth/") and self.headers.get_all("Authorization", []):
+            self.reply(403, {"error": "fleet authorization is not allowed for local authentication"})
+            return
         if request_path == "/api/auth/session":
-            try:
-                device = self.authenticate_request()
-            except AuthenticationFailed:
-                self.reply(200, {"authenticated": False})
-            except AuthError:
-                self.reply(503, {"error": "authentication state unavailable"})
-            else:
-                self.reply(
-                    200,
-                    {
-                        "authenticated": True,
-                        "deviceId": device.device_id,
-                        "csrfToken": device.csrf_token,
-                    },
-                )
+            self.handle_auth_get(request_path)
             return
         if request_path.startswith("/api/"):
             try:
-                self.authenticate_request()
+                self.request_authenticated()
             except AuthenticationFailed:
                 self.reply(401, {"error": "authentication required"})
                 return
             except AuthError:
                 self.reply(503, {"error": "authentication state unavailable"})
                 return
+        if request_path == "/api/events":
+            send_stream(self, _fleet_model, self.request_authenticated)
+            return
         if request_path.startswith("/api/blob/"):
             self.reply_blob(request_path.rsplit("/", 1)[-1])
-            return
-        if request_path == "/api/events":
-            send_stream(
-                self,
-                _fleet_model,
-                auth_manager().authenticate,
-                cookie_credential(self.headers),
-            )
             return
         if request_path == "/api/sessions":
             try:
@@ -332,54 +370,28 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         request_path = urlparse(self.path).path
-        if not trusted_browser_request(self.headers):
+        if request_path.startswith("/api/auth/"):
+            if self.headers.get_all("Authorization", []):
+                self.reply(403, {"error": "fleet authorization is not allowed for local authentication"})
+                return
+            if self.handle_auth_post(request_path):
+                return
+        if not self.host_valid():
+            self.reply(400, {"error": "invalid host"})
+            return
+        if not self._mutation_origin_valid():
             self.reply(403, {"error": "request origin is not allowed"})
             return
-        if request_path == "/api/auth/pair":
-            self._pair()
-            return
-        credential = cookie_credential(self.headers)
         if not self._authorize_mutation():
             return
         data = self._read_post_body(request_path)
         if data is None:
             return
-        if self._auth_action(request_path, credential):
-            return
         self._normalized_action(request_path, data)
-
-    def _pair(self):
-        try:
-            data = self.read_json(4096)
-            paired = auth_manager().pair(data.get("token"), source=str(self.client_address[0]))
-        except (TypeError, ValueError, json.JSONDecodeError) as error:
-            self.reply(400, {"error": str(error)})
-            return
-        except TimeoutError:
-            self.reply(408, {"error": "request body timed out"})
-            return
-        except PairingRateLimited:
-            self.reply(429, {"error": "pairing temporarily unavailable"})
-            return
-        except PairingFailed:
-            self.reply(401, {"error": "invalid or expired pairing code"})
-            return
-        except AuthError:
-            self.reply(503, {"error": "authentication state unavailable"})
-            return
-        self.reply(
-            200,
-            {
-                "authenticated": True,
-                "deviceId": paired.device.device_id,
-                "csrfToken": paired.device.csrf_token,
-            },
-            headers=(("Set-Cookie", paired.set_cookie),),
-        )
 
     def _authorize_mutation(self):
         try:
-            self.authenticate_request(csrf=True)
+            self.request_authenticated(csrf=True)
             return True
         except AuthenticationFailed:
             self.reply(403, {"error": "authentication and CSRF token required"})
@@ -398,16 +410,6 @@ class Handler(SimpleHTTPRequestHandler):
         except TimeoutError:
             self.reply(408, {"error": "request body timed out"})
         return None
-
-    def _auth_action(self, request_path, credential):
-        if request_path == "/api/auth/logout":
-            cookie = auth_manager().logout(credential)
-        elif request_path == "/api/auth/revoke-all":
-            cookie = auth_manager().revoke_all(credential, self.headers.get("X-OMP-Deck-CSRF"))
-        else:
-            return False
-        self.reply(200, {"ok": True}, headers=(("Set-Cookie", cookie),))
-        return True
 
     def _normalized_action(self, request_path, data):
         try:

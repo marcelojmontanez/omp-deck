@@ -125,6 +125,9 @@ class FakeClient:
     def set_thinking_level(self, *args):
         return self._call("set_thinking_level", *args)
 
+    def new_session(self):
+        return self._call("new_session")
+
     def branch(self, *args):
         return self._call("branch", *args)
 
@@ -204,6 +207,7 @@ class TestRpcAdapter(unittest.TestCase):
         adapter.interrupt()
         adapter.set_model("openai", "gpt")
         adapter.set_thinking("high")
+        adapter.new_session()
         adapter.branch("entry")
         adapter.switch("session.jsonl")
         adapter.resume("other.jsonl")
@@ -215,6 +219,7 @@ class TestRpcAdapter(unittest.TestCase):
                 "abort",
                 "set_model",
                 "set_thinking_level",
+                "new_session",
                 "branch",
                 "switch_session",
                 "switch_session",

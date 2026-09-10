@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+import json
 import tempfile
 import time
 import unittest
@@ -25,11 +26,11 @@ from omp_deck.settings import Settings
 
 @dataclasses.dataclass(frozen=True)
 class _OfficialState:
-    session_id: str = "omp-official-1"
-    session_file: str = "/sessions/omp-official-1.jsonl"
+    session_id: str = "omp-transient"
+    session_file: str = ""
     is_streaming: bool = False
     is_compacting: bool = False
-    message_count: int = 1
+    message_count: int = 0
     queued_message_count: int = 0
     thinking_level: str = "medium"
 
@@ -44,10 +45,17 @@ class _Correlation:
     outcome: _Outcome
 
 
+@dataclasses.dataclass(frozen=True)
+class _Cancellation:
+    cancelled: bool
+
+
 class FakeRpcClient:
     instances: list[FakeRpcClient] = []
     fail_start = False
     fail_stop = False
+    fail_new_session = False
+    cancel_new_session = False
 
     fail_get_state_once: BaseException | None = None
     prompt_entered: dict[str, Event] = {}
@@ -58,7 +66,13 @@ class FakeRpcClient:
         self.listeners = {kind: [] for kind in ("ready", "event", "ui", "protocol", "extension")}
         self.calls = []
         self.stopped = False
-        self.state = _OfficialState()
+        self.new_session_calls = 0
+        self.resumed_path: str | None = None
+        self.session_root = Path(kwargs["session_dir"])
+        self.instance_number = len(type(self).instances) + 1
+        self.state = _OfficialState(
+            session_file=str(self.session_root / f"lazy_omp-transient-{self.instance_number}.jsonl")
+        )
         type(self).instances.append(self)
         self.get_state_entered: Event | None = None
         self.get_state_release: Event | None = None
@@ -85,6 +99,16 @@ class FakeRpcClient:
     def start(self):
         if type(self).fail_start:
             raise RuntimeError("launch failed")
+        extra_args = self.kwargs.get("extra_args", ())
+        if extra_args:
+            session_file = Path(extra_args[1])
+            header = self._read_header(session_file)
+            self.state = dataclasses.replace(
+                self.state,
+                session_id=header["id"],
+                session_file=str(session_file.resolve()),
+            )
+            self.resumed_path = str(session_file.resolve())
         ready = ReadyEvent(protocol_version=1, supported_protocol_versions=(1, 2))
         for listener in tuple(self.listeners["ready"]):
             listener(ready)
@@ -107,6 +131,8 @@ class FakeRpcClient:
         return self.state
 
     def get_messages(self):
+        if self.state.message_count == 0:
+            return ()
         return ({"id": "message-1", "role": "assistant", "content": "ready"},)
 
     def get_todos(self):
@@ -140,19 +166,33 @@ class FakeRpcClient:
     def set_thinking_level(self, *args):
         return self._call("set_thinking_level", *args)
 
+    def new_session(self):
+        self.new_session_calls += 1
+        if type(self).fail_new_session:
+            raise RuntimeError("new session failed")
+        if type(self).cancel_new_session:
+            return _Cancellation(True)
+        session_id = f"omp-official-{self.instance_number}"
+        session_file = self.session_root / f"materialized_{session_id}.jsonl"
+        self._write_session(session_file, session_id)
+        self.state = dataclasses.replace(self.state, session_id=session_id, session_file=str(session_file.resolve()))
+        return _Cancellation(False)
+
     def branch(self, *args):
         self._call("branch", *args)
+        session_file = self.session_root / "omp-branched.jsonl"
+        self._write_session(session_file, "omp-branched")
         self.state = dataclasses.replace(
-            self.state, session_id="omp-branched", session_file="/sessions/omp-branched.jsonl"
+            self.state, session_id="omp-branched", session_file=str(session_file.resolve())
         )
         return _Correlation("omp-branched", _Outcome.COMPLETE)
 
-    def switch_session(self, *args):
-        self._call("switch_session", *args)
-        self.state = dataclasses.replace(
-            self.state, session_id="omp-switched", session_file="/sessions/omp-switched.jsonl"
-        )
-        return _Correlation("omp-switched", _Outcome.COMPLETE)
+    def switch_session(self, session_path):
+        self._call("switch_session", session_path)
+        resolved = Path(session_path).resolve()
+        header = self._read_header(resolved)
+        self.state = dataclasses.replace(self.state, session_id=header["id"], session_file=str(resolved))
+        return _Correlation(header["id"], _Outcome.COMPLETE)
 
     def compact(self, *args):
         self._call("compact", *args)
@@ -166,6 +206,18 @@ class FakeRpcClient:
 
     def cancel_ui_request(self, *args, **kwargs):
         return self._call("cancel_ui_request", *args, **kwargs)
+
+    @staticmethod
+    def _write_session(session_file, session_id):
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        header = {"type": "session", "version": 3, "id": session_id, "cwd": str(session_file.parent)}
+        session_file.write_text(json.dumps(header) + "\n", encoding="utf-8")
+
+    @staticmethod
+    def _read_header(session_file):
+        with session_file.open(encoding="utf-8") as source:
+            first = json.loads(source.readline())
+            return json.loads(source.readline()) if first.get("type") == "title" else first
 
     def emit_event(self, value):
         for listener in tuple(self.listeners["event"]):
@@ -198,6 +250,8 @@ class TestRpcSessionManager(unittest.TestCase):
         FakeRpcClient.instances.clear()
         FakeRpcClient.fail_start = False
         FakeRpcClient.fail_stop = False
+        FakeRpcClient.fail_new_session = False
+        FakeRpcClient.cancel_new_session = False
         FakeRpcClient.fail_get_state_once = None
         FakeRpcClient.prompt_entered.clear()
         FakeRpcClient.prompt_release.clear()
@@ -238,9 +292,34 @@ class TestRpcSessionManager(unittest.TestCase):
         self.assertEqual(session["ompSessionId"], "omp-official-1")
         self.assertEqual(record["id"], "deck-stable-id")
         self.assertEqual(record["ompSessionId"], "omp-official-1")
-        self.assertEqual(record["recoveryMetadata"], {"sessionFile": "/sessions/omp-official-1.jsonl"})
+        expected_file = self.settings.session_root / "materialized_omp-official-1.jsonl"
+        self.assertEqual(record["recoveryMetadata"], {"sessionFile": str(expected_file)})
+        self.assertTrue(expected_file.is_file())
+        self.assertEqual(FakeRpcClient.instances[-1].new_session_calls, 1)
         self.assertTrue(record["desiredRpcRunning"])
         self.assertEqual(session["transport"]["status"], "connected")
+
+    def test_cancelled_fresh_materialization_fails_launch_and_cleans_up(self):
+        FakeRpcClient.cancel_new_session = True
+
+        with self.assertRaisesRegex(RuntimeError, "cancelled fresh RPC session materialization"):
+            self.launch()
+
+        client = FakeRpcClient.instances[-1]
+        self.assertTrue(client.stopped)
+        self.assertFalse(Path(client.state.session_file).exists())
+        self.assertFalse(self.registry.load()[0]["desiredRpcRunning"])
+        self.assertIsNone(self.manager._runtime_or_none("deck-stable-id"))
+
+    def test_failed_fresh_materialization_fails_launch_and_cleans_up(self):
+        FakeRpcClient.fail_new_session = True
+
+        with self.assertRaisesRegex(AdapterError, "new session failed"):
+            self.launch()
+
+        self.assertTrue(FakeRpcClient.instances[-1].stopped)
+        self.assertFalse(self.registry.load()[0]["desiredRpcRunning"])
+        self.assertIsNone(self.manager._runtime_or_none("deck-stable-id"))
 
     def test_completed_launch_request_is_not_replayed_after_manager_restart(self):
         first = self.manager.launch_request("durable-launch", "project", title="RPC test")
@@ -295,6 +374,8 @@ class TestRpcSessionManager(unittest.TestCase):
     def test_commands_map_to_official_calls_and_plain_correlation_results(self):
         session_id = self.launch()["id"]
         client = FakeRpcClient.instances[-1]
+        switch_target = self.settings.session_root / "other.jsonl"
+        FakeRpcClient._write_session(switch_target, "omp-switched")
         commands = (
             ("sendMessage", {"message": "hello", "images": [{"data": "x"}], "streamingBehavior": "steer"}),
             ("followUp", {"message": "later", "images": []}),
@@ -302,7 +383,7 @@ class TestRpcSessionManager(unittest.TestCase):
             ("setModel", {"provider": "openai", "modelId": "gpt"}),
             ("setThinking", {"level": "high"}),
             ("branch", {"entryId": "entry-7"}),
-            ("switchSession", {"sessionPath": "/sessions/other.jsonl"}),
+            ("switchSession", {"sessionPath": str(switch_target)}),
             ("compact", {"customInstructions": "short"}),
         )
         results = {action: self.manager.command(session_id, action, payload) for action, payload in commands}
@@ -421,8 +502,14 @@ class TestRpcSessionManager(unittest.TestCase):
             worker.join(timeout=1)
         self.manager.close()
 
-    def test_startup_recovery_resumes_official_id_in_original_project(self):
+    def test_empty_launch_is_materialized_and_recovers_the_same_omp_session(self):
         original = self.launch()
+        record = self.registry.load()[0]
+        session_file = Path(record["recoveryMetadata"]["sessionFile"])
+        self.manager.command(original["id"], "setThinking", {"level": "high"})
+        self.assertEqual(FakeRpcClient.instances[-1].get_messages(), ())
+        self.assertTrue(session_file.is_file())
+        self.assertEqual(FakeRpcClient._read_header(session_file)["id"], record["ompSessionId"])
         self.manager.close()
         recovering_model = FleetModel()
         recovering = RpcSessionManager(self.settings, recovering_model, self.registry)
@@ -430,42 +517,108 @@ class TestRpcSessionManager(unittest.TestCase):
 
         self.assertEqual(recovering.recover_desired(), {})
         client = FakeRpcClient.instances[-1]
-        self.assertEqual(client.kwargs["extra_args"], ("--resume", "omp-official-1"))
+        self.assertEqual(client.resumed_path, str(session_file))
+        self.assertEqual(client.new_session_calls, 0)
+        self.assertEqual(client.state.session_id, record["ompSessionId"])
         self.assertEqual(client.kwargs["cwd"], str(self.project))
         self.assertEqual(recovering_model.get(original["id"])["id"], "deck-stable-id")
-        self.assertEqual(recovering_model.get(original["id"])["ompSessionId"], "omp-official-1")
+        self.assertEqual(recovering_model.get(original["id"])["ompSessionId"], record["ompSessionId"])
+
+    def test_recovery_refuses_a_missing_session_file_without_spawning_a_replacement(self):
+        session_id = self.launch()["id"]
+        record = self.registry.load()[0]
+        self.manager.close()
+        Path(record["recoveryMetadata"]["sessionFile"]).unlink()
+        recovering_model = FleetModel()
+        recovering = RpcSessionManager(self.settings, recovering_model, self.registry)
+        self.addCleanup(recovering.close)
+
+        failures = recovering.recover_desired()
+
+        self.assertIn("session file is missing or inaccessible", failures[session_id])
+        self.assertEqual(len(FakeRpcClient.instances), 1)
+        self.assertEqual(self.registry.load()[0]["ompSessionId"], record["ompSessionId"])
+        self.assertEqual(recovering_model.get(session_id)["transport"]["status"], "disconnected")
+
+    def test_recovery_refuses_a_session_file_outside_the_configured_root(self):
+        session_id = self.launch()["id"]
+        record = self.registry.load()[0]
+        outside = self.settings.project_root / "outside.jsonl"
+        FakeRpcClient._write_session(outside, record["ompSessionId"])
+        self.manager.close()
+        self.registry.update(session_id, recovery_metadata={"sessionFile": str(outside)})
+        recovering = RpcSessionManager(self.settings, FleetModel(), self.registry)
+        self.addCleanup(recovering.close)
+
+        failures = recovering.recover_desired()
+
+        self.assertIn("outside the configured session root", failures[session_id])
+        self.assertEqual(len(FakeRpcClient.instances), 1)
+
+    def test_recovery_refuses_a_symlinked_session_file(self):
+        session_id = self.launch()["id"]
+        record = self.registry.load()[0]
+        original = Path(record["recoveryMetadata"]["sessionFile"])
+        alias = original.with_name("alias.jsonl")
+        alias.symlink_to(original)
+        self.manager.close()
+        self.registry.update(session_id, recovery_metadata={"sessionFile": str(alias)})
+        recovering = RpcSessionManager(self.settings, FleetModel(), self.registry)
+        self.addCleanup(recovering.close)
+
+        failures = recovering.recover_desired()
+
+        self.assertIn("must not use filesystem aliases", failures[session_id])
+        self.assertEqual(len(FakeRpcClient.instances), 1)
+
+    def test_recovery_refuses_a_malformed_session_without_replacing_it(self):
+        session_id = self.launch()["id"]
+        record = self.registry.load()[0]
+        session_file = Path(record["recoveryMetadata"]["sessionFile"])
+        self.manager.close()
+        session_file.write_text("{not-json}\n", encoding="utf-8")
+        recovering = RpcSessionManager(self.settings, FleetModel(), self.registry)
+        self.addCleanup(recovering.close)
+
+        failures = recovering.recover_desired()
+
+        self.assertIn("missing or malformed header", failures[session_id])
+        self.assertEqual(len(FakeRpcClient.instances), 1)
+        self.assertEqual(self.registry.load()[0]["ompSessionId"], record["ompSessionId"])
 
     def test_branch_identity_is_persisted_and_recovered(self):
         session_id = self.launch()["id"]
         self.manager.command(session_id, "branch", {"entryId": "entry-7"})
         record = self.registry.load()[0]
         self.assertEqual(record["ompSessionId"], "omp-branched")
-        self.assertEqual(record["recoveryMetadata"], {"sessionFile": "/sessions/omp-branched.jsonl"})
+        self.assertEqual(
+            record["recoveryMetadata"],
+            {"sessionFile": str(self.settings.session_root / "omp-branched.jsonl")},
+        )
 
         self.manager.close()
         recovering = RpcSessionManager(self.settings, FleetModel(), self.registry)
         self.addCleanup(recovering.close)
         self.assertEqual(recovering.recover_desired(), {})
         self.assertEqual(
-            FakeRpcClient.instances[-1].kwargs["extra_args"],
-            ("--resume", "omp-branched"),
+            FakeRpcClient.instances[-1].resumed_path,
+            record["recoveryMetadata"]["sessionFile"],
         )
 
     def test_switch_identity_is_persisted_and_recovered(self):
         session_id = self.launch()["id"]
-        self.manager.command(session_id, "switchSession", {"sessionPath": "/sessions/other.jsonl"})
+        switch_target = self.settings.session_root / "other.jsonl"
+        FakeRpcClient._write_session(switch_target, "omp-switched")
+        self.manager.command(session_id, "switchSession", {"sessionPath": str(switch_target)})
         record = self.registry.load()[0]
         self.assertEqual(record["ompSessionId"], "omp-switched")
-        self.assertEqual(record["recoveryMetadata"], {"sessionFile": "/sessions/omp-switched.jsonl"})
+        self.assertEqual(record["recoveryMetadata"], {"sessionFile": str(switch_target)})
 
         self.manager.close()
         recovering = RpcSessionManager(self.settings, FleetModel(), self.registry)
         self.addCleanup(recovering.close)
         self.assertEqual(recovering.recover_desired(), {})
-        self.assertEqual(
-            FakeRpcClient.instances[-1].kwargs["extra_args"],
-            ("--resume", "omp-switched"),
-        )
+        self.assertEqual(FakeRpcClient.instances[-1].resumed_path, str(switch_target))
 
     def test_repeated_recovery_does_not_mutate_generation_or_spawn_again(self):
         session_id = self.launch()["id"]
@@ -507,7 +660,7 @@ class TestRpcSessionManager(unittest.TestCase):
         self.assertTrue(original.stopped)
         self.assertEqual(len(FakeRpcClient.instances), 2)
         replacement = FakeRpcClient.instances[-1]
-        self.assertEqual(replacement.kwargs["extra_args"], ("--resume", "omp-official-1"))
+        self.assertEqual(replacement.resumed_path, self.registry.load()[0]["recoveryMetadata"]["sessionFile"])
         self.assertEqual(self.model.get(session_id)["id"], session_id)
         self.assertEqual(
             self.model.get(session_id)["transport"]["status"],

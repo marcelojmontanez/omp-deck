@@ -12,6 +12,7 @@ from typing import Any
 from omp_rpc import RpcClient
 
 from . import _rpc_commands
+from ._rpc_recovery import recovery_session_file, validate_recovered_identity, validated_session_file
 from ._shutdown import close_rpc_manager
 from .fleet_model import FleetModel
 from .projects import resolve_project_path
@@ -79,7 +80,7 @@ class RpcSessionManager:
             if self._runtime_or_none(record["id"]) is not None:
                 continue
             try:
-                self._connect(record, resume=record.get("ompSessionId"))
+                self._connect(record)
             except Exception as error:
                 failures[record["id"]] = str(error)
                 current = self._record(record["id"])
@@ -102,7 +103,7 @@ class RpcSessionManager:
         )
         self.model.load_record(record)
         try:
-            self._connect(record, resume=None)
+            self._connect(record)
         except Exception as error:
             failed = self.registry.update(record["id"], desired_rpc_running=False)
             self.model.load_record(failed)
@@ -172,7 +173,7 @@ class RpcSessionManager:
         record = self._record(session_id)
         if record["adapterKind"] != "rpc" or not record["desiredRpcRunning"]:
             raise SessionNotConnectedError(session_id)
-        self._connect(record, resume=record.get("ompSessionId"))
+        self._connect(record)
         return self.model.get(session_id)
 
     def dispatch(
@@ -266,7 +267,7 @@ class RpcSessionManager:
             self._operation_lock,
         )
 
-    def _connect(self, record: Mapping[str, Any], *, resume: str | None) -> None:
+    def _connect(self, record: Mapping[str, Any]) -> None:
         runtime = _Runtime(
             session_id=record["id"],
             instance_id=uuid.uuid4().hex,
@@ -281,6 +282,7 @@ class RpcSessionManager:
         adapter = None
         try:
             project_path = self._validated_project(record)
+            resume_file = recovery_session_file(self.settings.session_root, record)
             updated = self.registry.update(record["id"], desired_rpc_running=True)
             runtime.generation = updated["generation"]
             self.model.set_transport(
@@ -293,7 +295,7 @@ class RpcSessionManager:
             self.model.load_record(updated)
 
             def client_factory() -> RpcClient:
-                extra_args = ("--resume", resume) if resume else ()
+                extra_args = ("--resume", resume_file) if resume_file else ()
                 options = {
                     "cwd": project_path,
                     "max_event_history": 512,
@@ -321,10 +323,18 @@ class RpcSessionManager:
             )
             runtime.adapter = adapter
             adapter.start()
+            # OMP exposes an ID/path before its lazy fresh transcript exists.
+            # Rotate before launch is published: new_session durably writes the empty header.
+            if resume_file is None:
+                materialized = adapter.new_session()
+                if getattr(materialized, "cancelled", False):
+                    raise RuntimeError("OMP cancelled fresh RPC session materialization")
             with self._lock:
                 if self._closed or self._runtimes.get(runtime.session_id) is not runtime:
                     raise RuntimeError("RPC session manager is closed")
             snapshot = adapter.snapshot()
+            if resume_file is not None:
+                validate_recovered_identity(self.settings.session_root, updated, snapshot.state, resume_file)
             final = self._persist_rpc_identity(updated, snapshot)
             runtime.generation = final["generation"]
             self.model.load_record(final)
@@ -350,19 +360,19 @@ class RpcSessionManager:
 
     def _persist_rpc_identity(self, record: Mapping[str, Any], snapshot: AdapterSnapshot) -> dict[str, Any]:
         state = snapshot.state
-        recovery: dict[str, Any] = {}
         session_file = state.get("session_file")
-        if isinstance(session_file, str) and session_file:
-            recovery["sessionFile"] = session_file
         omp_session_id = state.get("session_id")
-        if not isinstance(omp_session_id, str) or not omp_session_id:
-            omp_session_id = record.get("ompSessionId")
-        if record.get("ompSessionId") == omp_session_id and record.get("recoveryMetadata") == recovery:
+        recovery = record.get("recoveryMetadata")
+        if record.get("ompSessionId") == omp_session_id and recovery == {"sessionFile": session_file}:
+            return dict(record)
+        canonical_file = validated_session_file(self.settings.session_root, session_file, omp_session_id)
+        next_recovery = {"sessionFile": canonical_file}
+        if record.get("ompSessionId") == omp_session_id and recovery == next_recovery:
             return dict(record)
         return self.registry.update(
             record["id"],
             omp_session_id=omp_session_id,
-            recovery_metadata=recovery,
+            recovery_metadata=next_recovery,
         )
 
     def _validated_project(self, record: Mapping[str, Any]) -> str:
@@ -434,7 +444,7 @@ class RpcSessionManager:
                 if self._closed:
                     return
             try:
-                self._connect(record, resume=record.get("ompSessionId"))
+                self._connect(record)
             except Exception as reconnect_error:
                 current = self._record(session_id)
                 self.model.set_transport(

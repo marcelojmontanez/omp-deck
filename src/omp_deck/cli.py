@@ -238,7 +238,7 @@ def doctor():
         extension_check = _check(
             "Extension fallback",
             plugin_status(settings) if omp_available else False,
-            detail=f"expected omp-deck {PLUGIN_VERSION} for OMP 18.1.10",
+            detail=f"expected omp-deck {PLUGIN_VERSION} for OMP 18.1.10, 18.1.14, or 18.1.16",
         )
         checks.extend(
             (

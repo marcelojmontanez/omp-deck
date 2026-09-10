@@ -12,6 +12,7 @@
 
 - Shorten Unix extension endpoint names to fit macOS socket limits. After upgrading, rerun `omp-deck setup` and restart terminal-owned OMP sessions; older Unix endpoints are no longer discovered.
 - Reject legacy migration outside Linux. macOS and Windows use the normal setup commands.
+- Qualify managed RPC recovery and the extension lifecycle against stock OMP 18.1.14 on macOS and 18.1.16 on Linux, alongside 18.1.10.
 
 ### Fixed
 
@@ -19,6 +20,7 @@
 - Avoid concurrent private-state lock creation failures on APFS.
 - Refuse purging configured XDG roots reached through filesystem aliases.
 - Preserve the original setup error when plugin installation fails before creating a plugin.
+- Persist a fresh managed session before exposing it so an unused empty OMP session resumes after Deck restarts; missing or replaced session files now fail explicitly instead of creating a different conversation.
 
 ## 1.1.0 — 2026-09-09
 

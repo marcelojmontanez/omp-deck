@@ -8,11 +8,11 @@ Deck is not a Collab replacement. It does not expose rooms, invite links, partic
 
 - Linux with a systemd user session, macOS with a logged-in graphical user session, or native Windows 11 with Task Scheduler, for managed background service operation
 - Python 3.11 or 3.12
-- stock OMP 18.1.10 on `PATH` or in its official per-user install location
+- stock OMP 18.1.10, 18.1.14, or 18.1.16 on `PATH` or in its official per-user install location
 - Bun 1.3.14 or newer for Linux and macOS OMP extension installation and removal
 - Tailscale only for the optional supported phone-access path
 
-The official Python `omp-rpc` client and extension peer dependency are pinned to the OMP 18.1.10 source release. Other OMP versions are not claimed as supported until the RPC, extension, and Collab compatibility suites pass for them. Deck does not patch, fork, or replace OMP.
+The official Python `omp-rpc` client remains pinned to the OMP 18.1.10 source release. Managed RPC recovery and the extension lifecycle are qualified against the three stock OMP versions listed above; other versions are not claimed as supported until the same compatibility checks pass. Deck does not patch, fork, or replace OMP.
 
 Tmux is not required. Deck does not ship a tmux keystroke controller or interactive-TUI launcher; managed launches use RPC and terminal-owned sessions use Collab or the OMP extension.
 

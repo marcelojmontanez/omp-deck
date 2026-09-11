@@ -17,6 +17,10 @@
     const viewer = document.getElementById('image-viewer');
     const image = document.getElementById('image-viewer-image');
     if (image?.src !== url) return;
+    if (viewer?.open && typeof window.closeImageViewer === 'function') {
+      window.closeImageViewer();
+      return;
+    }
     image.removeAttribute('src');
     if (viewer?.open) viewer.close();
   }

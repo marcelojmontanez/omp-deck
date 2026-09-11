@@ -173,14 +173,13 @@ function createComposer({
     }
     if (
       generation !== dataGeneration
-      || targetSessionId !== sessionId
       || attachments.get(targetSessionId) !== current
     ) {
       loaded.forEach(revokeAttachment);
       return;
     }
     current.push(...loaded);
-    if (sessionId) renderAttachments();
+    if (sessionId === targetSessionId) renderAttachments();
   }
 
   function reconcile(agent) {

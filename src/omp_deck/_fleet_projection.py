@@ -7,6 +7,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
 
+from ._session_activity import completion_state
 from .rpc_adapter import AdapterSnapshot, PendingUiRequest
 
 CAPABILITIES: dict[str, dict[str, bool]] = {
@@ -15,6 +16,7 @@ CAPABILITIES: dict[str, dict[str, bool]] = {
         "followUp": True,
         "interrupt": True,
         "shutdown": True,
+        "remove": False,
         "setModel": True,
         "setThinking": True,
         "answerUiRequest": True,
@@ -32,12 +34,13 @@ CAPABILITIES: dict[str, dict[str, bool]] = {
         "followUp": False,
         "interrupt": True,
         "shutdown": False,
+        "remove": True,
         "setModel": False,
         "setThinking": False,
         "answerUiRequest": True,
         "cancelUiRequest": True,
         "subagents": True,
-        "todos": True,
+        "todos": False,
         "attachments": True,
         "branch": False,
         "switch": False,
@@ -49,6 +52,7 @@ CAPABILITIES: dict[str, dict[str, bool]] = {
         "followUp": True,
         "interrupt": True,
         "shutdown": True,
+        "remove": True,
         "setModel": False,
         "setThinking": False,
         "answerUiRequest": False,
@@ -127,6 +131,9 @@ def _message_content(message: Mapping[str, Any]) -> list[Any]:
                 result.append({"type": "image", "url": f"/api/blob/{digest}"})
             else:
                 result.append({"type": "image"})
+    error = message.get("errorMessage")
+    if isinstance(error, str) and error.strip():
+        result.append({"type": "text", "text": error})
     return result
 
 
@@ -159,6 +166,25 @@ def normalize_messages(values: Sequence[Mapping[str, Any]], session_id: str) -> 
 
 def bounded_collection(values: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return [strict_clone(value) for value in values[-MAX_COLLECTION_ITEMS:]]
+
+
+def normalize_todos(values: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    normalized = []
+    for value in values:
+        tasks = value.get("tasks")
+        if isinstance(tasks, Sequence) and not isinstance(tasks, (str, bytes)):
+            for task in tasks:
+                if isinstance(task, Mapping):
+                    row = strict_clone(task)
+                    row["phase"] = str(value.get("name") or "Tasks")
+                    normalized.append(row)
+                    if len(normalized) == MAX_COLLECTION_ITEMS:
+                        return normalized
+        else:
+            normalized.append(strict_clone(value))
+            if len(normalized) == MAX_COLLECTION_ITEMS:
+                return normalized
+    return normalized
 
 
 def pending_ui_projection(
@@ -275,11 +301,12 @@ def rpc_projection(
             if pending is not None
             else "working"
             if state.get("is_streaming") or state.get("is_compacting")
-            else "idle"
+            else completion_state(snapshot.messages)
         )
     )
     return {
         "ompSessionId": state.get("session_id") or session.get("ompSessionId"),
+        "title": state.get("session_name") or session["title"],
         "state": public_state,
         "transport": {
             "kind": "rpc",
@@ -289,10 +316,9 @@ def rpc_projection(
             "reason": snapshot.reason,
         },
         "messages": normalize_messages(snapshot.messages, session_id),
-        "todos": bounded_collection(snapshot.todos),
+        "todos": normalize_todos(snapshot.todos),
         "subagents": bounded_collection(snapshot.subagents),
         "pendingUiRequest": pending,
-        "updatedAt": now(),
         "workingOn": None if not state.get("is_streaming") else session.get("workingOn"),
         "model": _model_identity(state),
         "thinking": state.get("thinking_level"),
@@ -331,10 +357,17 @@ def collab_projection(
     public_state = (
         "disconnected"
         if snapshot.transport_status != "connected"
-        else ("needs_input" if pending is not None else "working" if state.get("isStreaming") else "idle")
+        else (
+            "needs_input"
+            if pending is not None
+            else "working"
+            if state.get("isStreaming")
+            else completion_state(entries)
+        )
     )
     return {
         "ompSessionId": snapshot.header.get("id") or session.get("ompSessionId"),
+        "title": state.get("sessionName") or session["title"],
         "state": public_state,
         "transport": {
             "kind": "collab",
@@ -345,9 +378,8 @@ def collab_projection(
         },
         "capabilities": capabilities,
         "messages": normalize_messages(entries, session_id),
-        "subagents": bounded_collection(snapshot.agents),
+        "subagents": bounded_collection([agent for agent in snapshot.agents if agent.get("kind") == "sub"]),
         "pendingUiRequest": pending,
-        "updatedAt": now(),
         "workingOn": session.get("workingOn") if state.get("isStreaming") else None,
         "model": _model_identity(state),
         "thinking": state.get("thinkingLevel"),
@@ -363,7 +395,7 @@ def extension_projection(
 ) -> dict[str, Any]:
     capabilities = platform_capabilities("extension")
     for capability in capabilities:
-        if capability in registration.capabilities:
+        if capability != "remove" and capability in registration.capabilities:
             capabilities[capability] = capabilities[capability] and bool(registration.capabilities[capability])
     async_jobs = snapshot.async_jobs
     if isinstance(async_jobs, Mapping):
@@ -371,8 +403,17 @@ def extension_projection(
     if not isinstance(async_jobs, Sequence) or isinstance(async_jobs, (str, bytes)):
         async_jobs = []
     subagents = [item for item in async_jobs if isinstance(item, Mapping)]
+    pending = None if snapshot.idle else session.get("pendingUiRequest")
     public_state = (
-        "disconnected" if snapshot.transport_status != "connected" else "idle" if snapshot.idle else "working"
+        "disconnected"
+        if snapshot.transport_status != "connected"
+        else "needs_input"
+        if pending is not None
+        else "failed"
+        if snapshot.idle and session.get("state") == "failed"
+        else "idle"
+        if snapshot.idle
+        else "working"
     )
     return {
         "ompSessionId": registration.session_id,
@@ -388,7 +429,8 @@ def extension_projection(
         },
         "capabilities": capabilities,
         "subagents": bounded_collection(subagents),
-        "updatedAt": now(),
+        "pendingUiRequest": pending,
+        "workingOn": None if snapshot.idle else session.get("workingOn"),
         "model": _model_identity({"model": snapshot.model}),
         "_generation": generation,
         "_adapterSequence": snapshot.sequence,

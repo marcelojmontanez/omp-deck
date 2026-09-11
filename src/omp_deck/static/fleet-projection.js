@@ -6,6 +6,16 @@ function normalizedStatus(value) {
   return String(value || 'idle').replaceAll('_', '-');
 }
 
+const idleSubagentStatuses = new Set(['completed', 'done', 'finished', 'parked', 'yielded']);
+const workSummaryStatuses = new Set(['attention', 'failed', 'working']);
+
+function normalizedSubagentStatus(value) {
+  const status = normalizedStatus(value);
+  if (status === 'running') return 'working';
+  if (idleSubagentStatuses.has(status)) return 'idle';
+  return status;
+}
+
 function contentText(content) {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
@@ -50,6 +60,11 @@ function projectSession(session, machine = null) {
       attachments: images,
     };
   });
+  const activitySummary = session.pendingUiRequest
+    ? 'Waiting for input'
+    : workSummaryStatuses.has(status) && session.workingOn
+      ? session.workingOn
+      : status.replaceAll('-', ' ');
   return {
     id: projectedId,
     localId,
@@ -64,16 +79,19 @@ function projectSession(session, machine = null) {
     executionState: status,
     inboxState: session.unread ? 'unread' : 'read',
     bridgeConnected: session.transport?.status === 'connected',
-    activitySummary: session.workingOn || (session.pendingUiRequest ? 'Waiting for input' : status.replace('-', ' ')),
+    activitySummary,
     capabilities: session.capabilities || {},
     transport: session.transport || {kind: 'unknown', status: 'disconnected', label: 'Disconnected'},
     pendingUiRequest: session.pendingUiRequest || null,
-    subagents: (session.subagents || []).map(item => ({
-      id: item.id,
-      label: item.label || item.displayName || item.name || item.id || 'Subagent',
-      executionState: normalizedStatus(item.executionState || item.status),
-      activitySummary: item.activitySummary || item.status || '',
-    })),
+    subagents: (session.subagents || []).map(item => {
+      const executionState = normalizedSubagentStatus(item.executionState || item.status);
+      return {
+        id: item.id,
+        label: item.label || item.displayName || item.name || item.id || 'Subagent',
+        executionState,
+        activitySummary: item.activitySummary || executionState,
+      };
+    }),
     session: {
       model: session.model ? [session.model.provider, session.model.id || session.model.name].filter(Boolean).join('/') : null,
       thinking: session.thinking,

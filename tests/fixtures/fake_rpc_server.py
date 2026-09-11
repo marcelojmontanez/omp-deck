@@ -25,6 +25,10 @@ def record(payload):
 
 
 def response(request, data=None):
+    if data is None and request["type"] == "set_subagent_subscription":
+        data = {"level": request["level"]}
+    elif data is None and request["type"] == "get_subagents":
+        data = {"subagents": []}
     emit({"type": "response", "id": request["id"], "command": request["type"], "success": True, "data": data or {}})
 
 
@@ -78,15 +82,42 @@ if SCENARIO == "startup_timeout":
     time.sleep(30)
     raise SystemExit
 
-ready(SCENARIO in {"contract", "ask_flow", "valid_chunk", "malformed_chunk", "oversized_chunk"})
-
-if SCENARIO not in {"v1", "eof", "timeout", "out_of_order", "cleanup"}:
+v2 = SCENARIO not in {"v1", "eof", "timeout", "out_of_order", "cleanup"}
+ready(v2)
+if v2:
     negotiate()
 
 if SCENARIO == "v1":
     request = read_request()
     response(request, {"sessionId": "v1-session"})
-elif SCENARIO == "contract":
+elif SCENARIO in {"contract", "bad_subagents"}:
+    progress = {
+        "index": 0,
+        "id": "worker-1",
+        "agent": "scout",
+        "agentSource": "bundled",
+        "status": "running",
+        "task": "Inspect browser regressions",
+        "description": "Inspect UI",
+        "lastIntent": "Reading browser controls",
+        "recentTools": [],
+        "recentOutput": [],
+        "toolCount": 0,
+        "requests": 0,
+        "tokens": 0,
+        "cost": 0,
+        "durationMs": 10,
+    }
+    subagent = {
+        "id": "worker-1",
+        "index": 0,
+        "agent": "scout",
+        "agentSource": "bundled",
+        "status": "running",
+        "description": "Inspect UI",
+        "lastUpdate": 1,
+        "progress": progress,
+    }
     emit(
         {
             "type": "extension_ui_request",
@@ -118,6 +149,34 @@ elif SCENARIO == "contract":
             response(
                 request, {"messages": [{"role": "user", "content": "hello"}], "totalMessages": 1, "nextCursor": None}
             )
+        elif kind == "set_subagent_subscription":
+            response(request)
+            emit(
+                {
+                    "type": "subagent_lifecycle",
+                    "payload": {
+                        "id": "worker-1",
+                        "agent": "scout",
+                        "agentSource": "bundled",
+                        "status": "started",
+                        "index": 0,
+                    },
+                }
+            )
+            emit(
+                {
+                    "type": "subagent_progress",
+                    "payload": {
+                        "index": 0,
+                        "agent": "scout",
+                        "agentSource": "bundled",
+                        "task": "Inspect browser regressions",
+                        "progress": progress,
+                    },
+                }
+            )
+        elif kind == "get_subagents":
+            response(request, {"subagents": subagent if SCENARIO == "bad_subagents" else [subagent]})
         else:
             response(request)
 elif SCENARIO == "ask_flow":

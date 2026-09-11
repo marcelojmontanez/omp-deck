@@ -75,11 +75,6 @@ class CoordinatorHandler(DeckHttpHandler):
         # picked up by an explicit document reload with the authenticated cookie.
         return self._document_access()[1]
 
-    def cache_control(self, request_path: str) -> str:
-        if request_path in {"/", "/index.html"} and self._document_access()[0]:
-            return "no-store"
-        return super().cache_control(request_path)
-
     def do_GET(self) -> None:
         path = urlparse(self.path).path
         if not self.host_valid():

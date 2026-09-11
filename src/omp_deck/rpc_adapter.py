@@ -22,9 +22,10 @@ from omp_rpc import (
 from ._rpc_projection import PendingUiRequest, project_ui_request
 from ._rpc_projection import objects as _project_objects
 from ._rpc_projection import plain as _plain
+from ._rpc_subagents import SubagentClient, SubagentProtocolError, snapshot_subagents, subscribe_subagents
 
 
-class RpcClientLike(Protocol):
+class RpcClientLike(SubagentClient, Protocol):
     def start(self) -> Any: ...
     def stop(self) -> None: ...
     def on_ready(self, listener: Callable[[ReadyEvent], None]) -> Callable[[], None]: ...
@@ -170,6 +171,7 @@ class SessionAdapter:
         try:
             client.start()
             self._check_compatibility()
+            self._unsubscribers.append(subscribe_subagents(client, self._emit))
         except BaseException as exc:
             self._detach_and_stop(client)
             raise self._translate(exc) from exc
@@ -237,8 +239,7 @@ class SessionAdapter:
                     raise AdapterError("RPC state is not an object", kind="protocol")
                 messages = _objects(client.get_messages())
                 todos = _objects(client.get_todos())
-                get_subagents = getattr(client, "get_subagents", None)
-                subagents = _objects(get_subagents()) if callable(get_subagents) else ()
+                subagents = snapshot_subagents(client)
                 pending = self.pending_ui_request()
             except BaseException as exc:
                 raise self._translate(exc) from exc
@@ -468,7 +469,7 @@ class SessionAdapter:
                 self._status = "disconnected"
                 self._reason = str(exc)
             return AdapterDisconnectedError(str(exc), kind="process_exit", cause=exc)
-        if isinstance(exc, (RpcProtocolError, RpcConcurrencyError)):
+        if isinstance(exc, (RpcProtocolError, RpcConcurrencyError, SubagentProtocolError)):
             return AdapterIncompatibleError(str(exc), kind="protocol", cause=exc)
         if isinstance(exc, RpcCommandError):
             text = str(exc)

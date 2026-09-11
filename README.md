@@ -23,7 +23,7 @@ Python normalizes all transports into one session model. The browser uses advert
 | Indicator | Ownership and behavior |
 | --- | --- |
 | Green, **RPC session** | Deck launches and supervises `omp --mode rpc`. Full managed controls, remote Ask responses, model/thinking controls, todos, subagents, and image prompts are available when advertised. |
-| Amber, **Terminal session via Collab** | A terminal-owned OMP session connected through an imported writable Collab link. Published pi-wire permissions and request settlement rules apply. The link remains server-side. |
+| Amber, **Terminal session via Collab** | A terminal-owned OMP session connected through an imported writable Collab link. Published pi-wire permissions and request settlement rules apply. The link remains server-side. Todo reporting is unavailable on this transport. |
 | Amber, **Terminal session via extension** | A terminal-owned session discovered through the bundled OMP plugin and a private Unix socket on Linux/macOS or same-user named pipe on Windows. Only extension-advertised controls are enabled. Ask is visible but must be answered in the terminal. |
 | Red, **Disconnected** | The transport is unavailable. Session state remains visible when persisted, but mutating controls are disabled. |
 
@@ -96,6 +96,10 @@ omp-deck serve
 - open **Connect terminal via Collab** and paste a writable link to connect a terminal-owned session;
 - use the session menu to compact, interrupt, shut down, or remove a terminal transport only when that capability is available;
 - answer pending RPC or Collab input requests in the request panel; extension-fallback requests remain terminal-only.
+
+Unread sessions appear first. Running subagents appear beneath their parent session, and supported todo lists retain their phase grouping. Completed runs that report an error remain marked as failed, with the error visible in the conversation.
+
+Drafts and selected images stay with their session when you switch conversations. Thinking changes are sent in order per session and reconcile to OMP's reported setting. Drafts and images remain memory-only: reloading, logging out, or clearing local data discards them.
 
 ## Multi-machine coordinator
 
@@ -270,6 +274,8 @@ Server state defaults to `~/.local/state/omp-deck` on Linux/macOS and `%LOCALAPP
 Sensitive files are atomic and bounded. Linux/macOS enforce owner-only mode `0600`; Windows enforces a protected current-user ACL and uses named mutexes for cross-process locking. OMP transcripts and blobs remain under OMP's own directories. The browser keeps drafts, optimistic sends, object URLs, and rendered state in memory only; it does not persist transcripts, paths, identifiers, usage, Collab links, or credentials in Web Storage. Object URLs are revoked when their owning draft or session is removed.
 
 Live browser state uses authenticated SSE with bounded replay. Low-frequency snapshot recovery replaces state when a cursor is stale. The compatibility JSONL reader is isolated and bounded; it is not a discovery mechanism, live event source, or control protocol.
+
+Dashboard assets are served without browser caching so an upgrade or rollback replaces the previous release's scripts and styles.
 
 ## Legacy migration and rollback
 

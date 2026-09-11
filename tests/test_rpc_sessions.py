@@ -63,7 +63,7 @@ class FakeRpcClient:
 
     def __init__(self, **kwargs):
         self.kwargs = kwargs
-        self.listeners = {kind: [] for kind in ("ready", "event", "ui", "protocol", "extension")}
+        self.listeners = {kind: [] for kind in ("ready", "event", "ui", "protocol", "extension", "unknown")}
         self.calls = []
         self.stopped = False
         self.new_session_calls = 0
@@ -95,6 +95,9 @@ class FakeRpcClient:
 
     def on_extension_error(self, listener):
         return self._on("extension", listener)
+
+    def on_unknown_notification(self, listener):
+        return self._on("unknown", listener)
 
     def start(self):
         if type(self).fail_start:
@@ -138,8 +141,12 @@ class FakeRpcClient:
     def get_todos(self):
         return ()
 
-    def get_subagents(self):
-        return ()
+    def request_raw(self, command_type, **payload):
+        if command_type == "set_subagent_subscription":
+            return {"level": payload["level"]}
+        if command_type == "get_subagents":
+            return {"subagents": []}
+        raise AssertionError(f"unexpected RPC command: {command_type}")
 
     def _call(self, name, *args, **kwargs):
         self.calls.append((name, args, kwargs))

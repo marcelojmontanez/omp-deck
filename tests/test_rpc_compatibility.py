@@ -14,6 +14,8 @@ from omp_rpc import (
     RpcTimeoutError,
 )
 
+from omp_deck.rpc_adapter import AdapterError, SessionAdapter
+
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_rpc_server.py"
 
 
@@ -31,6 +33,40 @@ class RpcCompatibilityTests(unittest.TestCase):
 
     def transcript(self, path):
         return [json.loads(line) for line in path.read_text().splitlines()]
+
+    def test_native_subagent_notifications_and_snapshot_use_the_official_raw_api(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "requests.jsonl"
+            observed = []
+            adapter = SessionAdapter(lambda: self.client("contract", transcript), on_event=observed.append)
+            try:
+                adapter.start()
+                snapshot = adapter.snapshot()
+            finally:
+                adapter.close()
+            self.assertEqual([(item["id"], item["status"]) for item in snapshot.subagents], [("worker-1", "running")])
+            self.assertEqual(snapshot.subagents[0]["label"], "Inspect UI")
+            self.assertEqual(snapshot.subagents[0]["activitySummary"], "Reading browser controls")
+            lifecycle = next(event for event in observed if event.type == "subagent_lifecycle")
+            progress = next(event for event in observed if event.type == "subagent_progress")
+            self.assertEqual((lifecycle.payload["id"], lifecycle.payload["status"]), ("worker-1", "started"))
+            self.assertEqual(progress.payload["progress"]["id"], "worker-1")
+            self.assertLess(lifecycle.sequence, progress.sequence)
+            self.assertGreaterEqual(snapshot.sequence, progress.sequence)
+            subscription = next(
+                value for value in self.transcript(transcript) if value["type"] == "set_subagent_subscription"
+            )
+            self.assertEqual(subscription["level"], "progress")
+
+    def test_malformed_native_subagent_snapshot_is_a_protocol_failure(self):
+        adapter = SessionAdapter(lambda: self.client("bad_subagents"))
+        try:
+            adapter.start()
+            with self.assertRaises(AdapterError) as caught:
+                adapter.snapshot()
+            self.assertEqual(caught.exception.kind, "protocol")
+        finally:
+            adapter.close()
 
     def test_ready_advertisement_negotiates_v2_with_exact_limits(self):
         with tempfile.TemporaryDirectory() as directory:

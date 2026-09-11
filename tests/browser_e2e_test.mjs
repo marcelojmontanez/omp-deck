@@ -150,28 +150,37 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       '| --- | --- |',
       '| one | two |',
     ].join('\n'));
-    state.agents = [{
+    const session = {
       id: 'session-1',
-      project: 'demo',
-      label: 'Demo session',
-      status: 'idle',
-      executionState: 'idle',
-      inboxState: 'unread',
-      bridgeConnected: true,
-      capabilities: {},
-      transport: {kind: 'rpc', status: 'connected', label: 'RPC'},
+      project: {name: 'demo', path: '/demo'},
+      title: 'Demo session',
+      state: 'idle',
+      unread: true,
+      capabilities: {remove: true},
+      transport: {kind: 'extension', status: 'connected'},
       subagents: [
-        {id: 'working-child', label: 'Worker', executionState: 'working', activitySummary: 'Testing'},
-        {id: 'idle-child', label: 'Sleeper', executionState: 'idle', activitySummary: 'Done'},
+        {id: 'working-child', label: 'Worker', status: 'running', activitySummary: 'Testing'},
+        {id: 'idle-child', label: 'Sleeper', status: 'completed', activitySummary: 'Done'},
       ],
-      session: {activity: [], todo: '', updatedMs: Date.now()},
-    }];
+      messages: [], todos: [],
+    };
+    state.agents = [
+      projectSession({...session, id: 'idle-session', unread: false, subagents: [], workingOn: 'Finished task'}),
+      projectSession(session),
+    ];
     renderSummary();
     renderList();
     showToast('Started OMP', 'success');
     const card = document.querySelector('[data-id=\"session-1\"]');
     const unreadCount = document.getElementById('unread-count').textContent;
+    const cardOrder = [...document.querySelectorAll('.agent-card')].map(element => element.dataset.id);
+    const idleSummary = document.querySelector('[data-id="idle-session"] .activity-summary').textContent;
     card.click();
+    const remove = document.querySelector('[data-session-action="remove"]');
+    const removeVisible = !remove.hidden && !remove.disabled;
+    selectedAgent().capabilities.remove = false;
+    touchRender();
+    renderDetail();
     return {
       tableHeaders: [...markdown.querySelectorAll('th')].map(node => node.textContent),
       tableCells: [...markdown.querySelectorAll('td')].map(node => node.textContent),
@@ -179,6 +188,11 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       unreadCount,
       cardText: card.textContent,
       selectedId: state.selectedId,
+      cardOrder,
+      idleSummary,
+      removeVisible,
+      removeDenied: remove.hidden,
+      metricOverflow: [...document.querySelectorAll('.metric')].some(element => element.scrollWidth > element.clientWidth),
     };
   });
   assert.deepEqual(rendering.tableHeaders, ['A', 'B']);
@@ -188,6 +202,11 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   assert.match(rendering.cardText, /Worker/);
   assert.doesNotMatch(rendering.cardText, /Sleeper/);
   assert.equal(rendering.selectedId, 'session-1');
+  assert.deepEqual(rendering.cardOrder, ['session-1', 'idle-session']);
+  assert.equal(rendering.idleSummary, 'idle');
+  assert.equal(rendering.removeVisible, true);
+  assert.equal(rendering.removeDenied, true);
+  assert.equal(rendering.metricOverflow, false);
   await page.waitForFunction(() => [...state.nodes.values()].every(node => !node.refreshPromise));
   const recovery = await page.evaluate(async () => {
     stopEventStreams();
@@ -631,11 +650,14 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
 
       choose(batch('first'));
       choose(batch('second'));
+      composer.select('other-attachment-session');
       for (const reader of readers) {
         reader.result = 'data:image/png;base64,aW1hZ2U=';
         reader.onload();
       }
       await new Promise(resolve => setTimeout(resolve, 0));
+      const otherRendered = document.getElementById('attachments').children.length;
+      composer.select('attachment-limit-session');
       const countReads = readers.length;
       const countRendered = document.getElementById('attachments').children.length;
 
@@ -656,6 +678,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       return {
         countReads,
         countRendered,
+        otherRendered,
         byteReads: readers.length,
         byteRendered: document.getElementById('attachments').children.length,
       };
@@ -668,10 +691,75 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   assert.deepEqual(concurrentAttachments, {
     countReads: 3,
     countRendered: 3,
+    otherRendered: 0,
     byteReads: 2,
     byteRendered: 2,
   });
 
+
+  const thinkingChanges = await page.evaluate(async () => {
+    const originalRequest = ompDeckApi.request;
+    const requests = [];
+    let authoritative = 'medium';
+    const rawSession = () => ({
+      id: 'thinking-session', title: 'Thinking session',
+      project: {name: 'demo', path: '/demo'}, state: 'idle', unread: false,
+      transport: {kind: 'rpc', status: 'connected'},
+      capabilities: {setThinking: true}, thinking: authoritative,
+      messages: [], todos: [], subagents: [], updatedAt: new Date().toISOString(),
+    });
+    const waitUntil = async predicate => {
+      const deadline = Date.now() + 1000;
+      while (!predicate()) {
+        if (Date.now() > deadline) throw new Error('Thinking queue did not settle');
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+    };
+    const cycleTwice = async secondSucceeds => {
+      const start = requests.length;
+      document.querySelector('[data-thinking-level]').click();
+      document.querySelector('[data-thinking-level]').click();
+      await new Promise(resolve => setTimeout(resolve, 0));
+      const simultaneous = requests.length - start;
+      requests[start].resolve({ok: false, status: 500});
+      await waitUntil(() => requests.length === start + 2);
+      if (secondSucceeds) authoritative = requests[start + 1].level;
+      requests[start + 1].resolve({ok: secondSucceeds, status: secondSucceeds ? 200 : 500});
+      await new Promise(resolve => setTimeout(resolve, 0));
+      return {simultaneous, display: document.querySelector('[data-thinking-level]').textContent};
+    };
+    try {
+      ompDeckApi.request = (path, options) => {
+        if (path.endsWith('/thinking')) {
+          return new Promise(resolve => requests.push({resolve, level: JSON.parse(options.body).level}));
+        }
+        if (path === '/api/sessions') {
+          return Promise.resolve({ok: true, json: async () => ({
+            snapshotGeneration: nodeState('local').snapshotGeneration + 1,
+            sessions: [rawSession()],
+          })});
+        }
+        return originalRequest(path, options);
+      };
+      await refresh('local');
+      selectAgent('thinking-session');
+      const accepted = await cycleTwice(true);
+      authoritative = 'max';
+      await refresh('local');
+      const external = document.querySelector('[data-thinking-level]').textContent;
+      authoritative = 'medium';
+      await refresh('local');
+      const failed = await cycleTwice(false);
+      return {accepted, external, failed};
+    } finally {
+      ompDeckApi.request = originalRequest;
+    }
+  });
+  assert.deepEqual(thinkingChanges, {
+    accepted: {simultaneous: 1, display: 'thinking: xhigh'},
+    external: 'thinking: max',
+    failed: {simultaneous: 1, display: 'thinking: medium'},
+  });
 
   const multiAsk = await page.evaluate(async () => {
     const originalRequest = ompDeckApi.request;

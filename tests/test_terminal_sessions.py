@@ -331,6 +331,34 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.assertEqual(self.model.get(session_id)["id"], session_id)
         self.assertEqual(manager.registry.load()[0]["title"], "Renamed")
 
+    def test_extension_failure_survives_agent_end_and_idle_refresh(self):
+        manager = self.manager()
+        session_id, _, adapter = self.connect_extension(manager)
+        adapter.callback(
+            {
+                "sequence": 2,
+                "kind": "message",
+                "data": {
+                    "phase": "end",
+                    "message": {
+                        "role": "assistant",
+                        "content": [],
+                        "stopReason": "error",
+                        "errorMessage": "Provider unavailable",
+                    },
+                },
+            }
+        )
+        adapter.callback({"sequence": 3, "kind": "lifecycle", "data": {"state": "agent_end"}})
+        adapter._snapshot = ExtensionSnapshot(True, False, None, (), 3, "connected", None)
+        manager.refresh_connected()
+
+        failed = self.model.get(session_id)
+        self.assertEqual((failed["state"], failed["workingOn"]), ("failed", None))
+        self.assertEqual(failed["messages"][-1]["content"], [{"type": "text", "text": "Provider unavailable"}])
+        adapter.callback({"sequence": 4, "kind": "lifecycle", "data": {"state": "agent_start"}})
+        self.assertEqual(self.model.get(session_id)["state"], "working")
+
     def test_extension_degraded_event_is_visible_in_fleet_state(self):
         manager = self.manager()
         session_id, _, adapter = self.connect_extension(manager)
@@ -684,7 +712,10 @@ class TerminalSessionManagerTests(unittest.TestCase):
                     }
                 ),
             ),
-            agents=(MappingProxyType({"id": "agent", "status": "running"}),),
+            agents=(
+                MappingProxyType({"id": "main", "kind": "main", "status": "running"}),
+                MappingProxyType({"id": "agent", "kind": "sub", "status": "running"}),
+            ),
             pending_ui_requests=(
                 MappingProxyType(
                     {
@@ -710,7 +741,9 @@ class TerminalSessionManagerTests(unittest.TestCase):
             public["messages"][1]["content"],
             [{"type": "text", "text": "optimistic prompt"}],
         )
-        self.assertEqual(public["subagents"], [{"id": "agent", "status": "running"}])
+        self.assertEqual([agent["id"] for agent in public["subagents"]], ["agent"])
+        self.assertFalse(public["capabilities"]["todos"])
+        self.assertTrue(public["capabilities"]["remove"])
         self.assertEqual(public["pendingUiRequest"]["id"], "12")
         self.assertTrue(public["pendingUiRequest"]["questions"][0]["multi"])
         self.assertEqual(

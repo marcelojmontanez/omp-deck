@@ -28,12 +28,15 @@ function renderProjectOptions(projects) {
   }
 }
 
+const activeLaunches = new Set();
+let launcherGeneration = 0;
 let projectLoadGeneration = 0;
 async function loadLaunchableProjects() {
   const generation = ++projectLoadGeneration;
   const machineId = state.selectedMachineId;
   const machine = ompDeckApi.machine(machineId);
   const select = el['project-select'];
+  el['project-new'].disabled = activeLaunches.has(machineId);
   select.disabled = true;
   select.replaceChildren(new Option(machine ? 'Loading project directories…' : 'No machine selected', ''));
   el['project-root-label'].textContent = machine
@@ -68,7 +71,7 @@ async function loadLaunchableProjects() {
     el['launch-state'].textContent = error.message;
   } finally {
     if (generation === projectLoadGeneration && machineId === state.selectedMachineId) {
-      select.disabled = false;
+      select.disabled = activeLaunches.has(machineId);
       syncProjectLauncher();
     }
   }
@@ -82,8 +85,10 @@ function selectedLaunchProject() {
 
 function syncProjectLauncher() {
   const creating = el['project-select'].value === '__new__';
+  const launching = activeLaunches.has(state.selectedMachineId);
   el['project-new'].hidden = !creating;
-  el['project-launch'].disabled = !state.selectedMachineId || !selectedLaunchProject();
+  el['project-new'].disabled = launching;
+  el['project-launch'].disabled = launching || !state.selectedMachineId || !selectedLaunchProject();
 }
 
 el['project-select'].addEventListener('change', () => {
@@ -99,7 +104,10 @@ el['project-launch'].addEventListener('click', async () => {
   const machine = ompDeckApi.machine(machineId);
   const creating = el['project-select'].value === '__new__';
   const project = selectedLaunchProject();
+  if (activeLaunches.has(machineId)) return;
   if (!machine || !project) return;
+  const generation = launcherGeneration;
+  activeLaunches.add(machineId);
   el['project-launch'].disabled = true;
   el['project-select'].disabled = true;
   el['project-new'].disabled = true;
@@ -117,7 +125,8 @@ el['project-launch'].addEventListener('click', async () => {
     });
     const payload = await response.json().catch(() => ({}));
     if (
-      !ompDeckApi.authenticated()
+      generation !== launcherGeneration
+      || !ompDeckApi.authenticated()
       || ompDeckApi.machine(machineId)?.origin !== machine.origin
     ) return;
     if (!response.ok || !payload.session) {
@@ -133,15 +142,19 @@ el['project-launch'].addEventListener('click', async () => {
     if (creating && machineId === state.selectedMachineId) await loadLaunchableProjects();
     selectAgent(ompDeckApi.sessionKey(machineId, payload.session.id));
   } catch (error) {
+    if (generation !== launcherGeneration) return;
     if (error.reuseRequestId === false) pendingLaunches.delete(machineId);
     if (error.projectCreated && machineId === state.selectedMachineId) await loadLaunchableProjects();
     if (machineId === state.selectedMachineId) el['launch-state'].textContent = error.message;
     else showToast(`${machine.name}: ${error.message}`, 'error');
   } finally {
-    if (machineId === state.selectedMachineId) {
-      el['project-select'].disabled = false;
-      el['project-new'].disabled = false;
-      syncProjectLauncher();
+    if (generation === launcherGeneration) {
+      activeLaunches.delete(machineId);
+      if (machineId === state.selectedMachineId) {
+        el['project-select'].disabled = false;
+        el['project-new'].disabled = false;
+        syncProjectLauncher();
+      }
     }
   }
 });
@@ -152,10 +165,14 @@ const collabState = document.getElementById('collab-state');
 const pendingCollab = new Map();
 function clearLauncherAttempts() {
   projectLoadGeneration += 1;
+  launcherGeneration += 1;
   pendingLaunches.clear();
+  activeLaunches.clear();
   pendingCollab.clear();
   el['project-new'].value = '';
   collabLink.value = '';
+  collabLink.disabled = false;
+  collabConnect.disabled = false;
   collabState.textContent = '';
 }
 
@@ -175,6 +192,7 @@ collabConnect.addEventListener('click', async () => {
     collabState.textContent = 'Paste a writable Collab link.';
     return;
   }
+  const generation = launcherGeneration;
   const previous = pendingCollab.get(machineId);
   const collabRequestId = previous?.link === link ? previous.requestId : requestId();
   pendingCollab.set(machineId, {link, requestId: collabRequestId});
@@ -190,7 +208,8 @@ collabConnect.addEventListener('click', async () => {
     });
     const payload = await response.json().catch(() => ({}));
     if (
-      !ompDeckApi.authenticated()
+      generation !== launcherGeneration
+      || !ompDeckApi.authenticated()
       || ompDeckApi.machine(machineId)?.origin !== machine.origin
     ) return;
     if (!response.ok || !payload.session) {
@@ -207,11 +226,14 @@ collabConnect.addEventListener('click', async () => {
     selectAgent(ompDeckApi.sessionKey(machineId, payload.session.id));
     showToast(`Terminal connected on ${machine.name} through Collab`, 'success');
   } catch (error) {
+    if (generation !== launcherGeneration) return;
     if (error.reuseRequestId === false) pendingCollab.delete(machineId);
     if (machineId === state.selectedMachineId) collabState.textContent = error.message;
     else showToast(`${machine.name}: ${error.message}`, 'error');
   } finally {
-    collabLink.disabled = false;
-    collabConnect.disabled = false;
+    if (generation === launcherGeneration) {
+      collabLink.disabled = false;
+      collabConnect.disabled = false;
+    }
   }
 });

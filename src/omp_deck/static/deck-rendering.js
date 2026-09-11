@@ -63,6 +63,25 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     if (state.filter === 'unread') return agent.inboxState === 'unread';
     return status === state.filter;
   }
+  const statusOrder = new Map([
+    ['needs-input', 0],
+    ['attention', 1],
+    ['failed', 1],
+    ['working', 2],
+    ['idle', 3],
+    ['unknown', 4],
+    ['degraded', 5],
+    ['disconnected', 6],
+  ]);
+  const agentLabelOrder = new Intl.Collator(undefined, {sensitivity: 'base'});
+  function compareAgents(left, right) {
+    const unread = Number(left.inboxState !== 'unread') - Number(right.inboxState !== 'unread');
+    if (unread) return unread;
+    const status = (statusOrder.get(displayStatus(left)) ?? 9) - (statusOrder.get(displayStatus(right)) ?? 9);
+    if (status) return status;
+    const label = agentLabelOrder.compare(String(left.label || ''), String(right.label || ''));
+    return label || String(left.id || '').localeCompare(String(right.id || ''));
+  }
   function renderSummary() {
     const statuses = state.agents.map(displayStatus);
     const working = statuses.filter(status => status === 'working').length;
@@ -77,7 +96,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
 
 
   function renderList() {
-    const visible = state.agents.filter(matchesFilter);
+    const visible = state.agents.filter(matchesFilter).sort(compareAgents);
     el['agent-list'].innerHTML = visible.length ? visible.map(agent => {
       const session = agent.session || {};
       const status = agent.nodeAvailable === false ? 'disconnected' : displayStatus(agent);
@@ -139,11 +158,9 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
       button.title = button.disabled ? `${action} is unavailable for this session` : '';
     }
     const removeButton = el['session-menu'].querySelector('[data-session-action="remove"]');
-    const removable = Boolean(
-      agent?.nodeAvailable !== false
-      && agent
-      && ['collab', 'extension'].includes(agent.transport.kind)
-    );
+    const removable = Boolean(agent?.nodeAvailable !== false && capabilities.remove);
+    removeButton.hidden = !removable;
+    removeButton.disabled = !removable;
     const transportConnected = Boolean(agent?.nodeAvailable !== false && agent?.bridgeConnected);
     const transportLabel = transportConnected
       ? agent.transport.kind === 'rpc'

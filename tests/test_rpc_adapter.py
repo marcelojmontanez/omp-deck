@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from dataclasses import dataclass
 
-from omp_rpc import ReadyEvent, RpcProcessExitError, RpcTimeoutError
+from omp_rpc import ReadyEvent, RpcProcessExitError, RpcTimeoutError, UnknownNotification
 
 from omp_deck.rpc_adapter import (
     AdapterDisconnectedError,
@@ -46,10 +46,11 @@ class FakeTodo:
 class FakeClient:
     def __init__(self, ready: ReadyEvent | None = None) -> None:
         self.ready = ready or ReadyEvent(protocol_version=1, supported_protocol_versions=(1, 2))
-        self.listeners: dict[str, list] = {"ready": [], "event": [], "ui": [], "protocol": [], "extension": []}
+        self.listeners: dict[str, list] = {
+            kind: [] for kind in ("ready", "event", "ui", "protocol", "extension", "unknown")
+        }
         self.calls: list[tuple] = []
         self.stopped = False
-        self.unsubscribed = 0
         self.state_reads = 0
         self.on_state_read = None
         self.state = FakeState(session_id="omp-1", is_streaming=False)
@@ -63,7 +64,6 @@ class FakeClient:
 
         def unsubscribe():
             self.listeners[kind].remove(listener)
-            self.unsubscribed += 1
 
         return unsubscribe
 
@@ -81,6 +81,9 @@ class FakeClient:
 
     def on_extension_error(self, listener):
         return self._on("extension", listener)
+
+    def on_unknown_notification(self, listener):
+        return self._on("unknown", listener)
 
     def start(self):
         for listener in tuple(self.listeners["ready"]):
@@ -102,8 +105,12 @@ class FakeClient:
     def get_todos(self):
         return self.todos
 
-    def get_subagents(self):
-        return self.subagents
+    def request_raw(self, command_type, **payload):
+        if command_type == "set_subagent_subscription":
+            return {"level": payload["level"]}
+        if command_type == "get_subagents":
+            return {"subagents": list(self.subagents)}
+        raise AssertionError(f"unexpected RPC command: {command_type}")
 
     def _call(self, name, *args, **kwargs):
         if self.failure:
@@ -156,23 +163,18 @@ def started(client=None, **kwargs):
 
 
 class TestRpcAdapter(unittest.TestCase):
-    def test_start_snapshot_and_close_use_injected_official_shape(self):
+    def test_closed_adapter_rejects_commands_and_ignores_late_notifications(self):
         observed = []
         adapter, client = started(on_event=observed.append)
-        snapshot = adapter.snapshot()
-        self.assertEqual(snapshot.transport_status, "connected")
-        self.assertEqual(snapshot.state["session_id"], "omp-1")
-        self.assertEqual(snapshot.messages[0]["id"], "m1")
-        self.assertEqual(snapshot.todos[0]["id"], "phase")
-        self.assertEqual(snapshot.subagents[0]["id"], "sub-1")
         adapter.close()
-        self.assertTrue(client.stopped)
-        self.assertEqual(adapter.transport_status, "disconnected")
-        self.assertEqual(client.unsubscribed, 5)
-        self.assertTrue(all(not listeners for listeners in client.listeners.values()))
         callback_count = len(observed)
+
         client.emit("event", {"type": "after_close"})
+        client.emit("unknown", UnknownNotification({"type": "subagent_progress", "payload": {"id": "child"}}))
+
         self.assertEqual(len(observed), callback_count)
+        with self.assertRaises(AdapterDisconnectedError):
+            adapter.snapshot()
 
     def test_snapshot_retries_when_event_crosses_capture_and_watermark_matches(self):
         adapter, client = started()
@@ -194,7 +196,6 @@ class TestRpcAdapter(unittest.TestCase):
         with self.assertRaises(AdapterIncompatibleError):
             adapter.start()
         self.assertTrue(client.stopped)
-        self.assertEqual(client.unsubscribed, 5)
         self.assertTrue(all(not listeners for listeners in client.listeners.values()))
 
     def test_bounded_event_ingestion_is_ordered_and_callbacks_are_outside_storage(self):

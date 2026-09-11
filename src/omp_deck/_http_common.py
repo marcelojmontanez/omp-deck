@@ -6,7 +6,6 @@ from http.server import SimpleHTTPRequestHandler
 from http.server import ThreadingHTTPServer as _ThreadingHTTPServer
 from pathlib import Path
 from socketserver import TCPServer
-from urllib.parse import urlparse
 
 from .auth import COOKIE_NAME, AuthenticationFailed, AuthError, AuthManager, PairingFailed, PairingRateLimited
 from .request_parsing import cookie_credential, read_json_request, request_host, trusted_browser_request
@@ -29,6 +28,12 @@ class DeckHttpHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(_STATIC_ROOT), **kwargs)
 
+    def send_head(self):
+        # A rollback can restore older package mtimes. They cannot validate
+        # cached assets from a different release of this unversioned app.
+        del self.headers["If-Modified-Since"]
+        return super().send_head()
+
     def auth_backend(self) -> AuthManager:
         raise NotImplementedError
 
@@ -40,9 +45,6 @@ class DeckHttpHandler(SimpleHTTPRequestHandler):
 
     def connect_origins(self) -> tuple[str, ...]:
         return ()
-
-    def cache_control(self, request_path: str) -> str:
-        return "no-store" if request_path.startswith("/api/") else "no-cache"
 
     def cors_origin(self) -> str | None:
         return None
@@ -169,7 +171,6 @@ class DeckHttpHandler(SimpleHTTPRequestHandler):
         print(f"{method} {status}", flush=True)
 
     def end_headers(self) -> None:
-        request_path = urlparse(self.path).path
         connect_sources = " ".join(("'self'", *self.connect_origins()))
         self.send_header(
             "Content-Security-Policy",
@@ -184,7 +185,7 @@ class DeckHttpHandler(SimpleHTTPRequestHandler):
             "Permissions-Policy",
             "camera=(), geolocation=(), microphone=(), payment=(), usb=()",
         )
-        self.send_header("Cache-Control", self.cache_control(request_path))
+        self.send_header("Cache-Control", "no-store")
         origin = self.cors_origin()
         if origin is not None:
             self.send_header("Access-Control-Allow-Origin", origin)

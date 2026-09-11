@@ -209,7 +209,6 @@ class CoordinatorHTTPTests(unittest.TestCase):
         status, headers, _ = self.request("GET", "/", parse_json=False)
         self.assertEqual(status, 200)
         self.assertNotIn("workstation.example", headers["Content-Security-Policy"])
-        self.assertEqual(headers["Cache-Control"], "no-cache")
 
         status, _, payload = self.request("GET", "/api/fleet")
         self.assertEqual((status, payload), (401, {"error": "authentication required"}))
@@ -233,7 +232,21 @@ class CoordinatorHTTPTests(unittest.TestCase):
         status, headers, _ = self.request("GET", "/app.js", headers={"Cookie": cookie}, parse_json=False)
         self.assertEqual(status, 200)
         self.assertNotIn("workstation.example", headers["Content-Security-Policy"])
-        self.assertEqual(headers["Cache-Control"], "no-cache")
+
+    def test_older_release_assets_replace_a_newer_cached_response(self):
+        status, _, current = self.request("GET", "/app.js", parse_json=False)
+        self.assertEqual(status, 200)
+
+        status, headers, delivered = self.request(
+            "GET",
+            "/app.js",
+            headers={"If-Modified-Since": "Thu, 31 Dec 2099 23:59:59 GMT"},
+            parse_json=False,
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(delivered, current)
+        self.assertEqual(headers["Cache-Control"], "no-store")
 
     def test_authenticated_roster_and_access_require_same_origin_csrf(self):
         cookie, csrf = self.pair()

@@ -16,6 +16,7 @@ from ._fleet_projection import (
     rpc_projection,
     strict_clone,
 )
+from ._session_activity import clear_activity, completion_state, update_tool_activity
 from .event_stream import EventJournal
 from .read_cursors import CursorStore
 from .rpc_adapter import AdapterEvent, AdapterSnapshot
@@ -92,6 +93,8 @@ class FleetModel:
                 "_adapterSequence": int(existing.get("_adapterSequence", 0)) if live else 0,
                 "_resyncRequired": bool(existing.get("_resyncRequired", False)) if live else False,
                 "_resyncWatermark": int(existing.get("_resyncWatermark", 0)) if live else 0,
+                "_activeTools": copy.deepcopy(existing.get("_activeTools", {})) if live else {},
+                "_toolActivityOverflow": bool(existing.get("_toolActivityOverflow", False)) if live else False,
             }
             self._sessions[session_id] = session
             self._changed_locked("session_registered", session_id, {"session": self._public_session(session)})
@@ -123,7 +126,7 @@ class FleetModel:
                 and snapshot.sequence < session["_resyncWatermark"]
             ):
                 return False
-            session.update(rpc_projection(session, snapshot, session_id, instance_id, generation))
+            self._apply_projection(session, rpc_projection(session, snapshot, session_id, instance_id, generation))
             self._sync_unread_locked(session)
             self._changed_locked("session_snapshot", session_id, {"session": self._public_session(session)})
             return True
@@ -140,7 +143,7 @@ class FleetModel:
             session = self._sessions.get(session_id)
             if session is None or not self._may_claim(session, instance_id, generation):
                 return False
-            session.update(collab_projection(session, snapshot, session_id, instance_id, generation))
+            self._apply_projection(session, collab_projection(session, snapshot, session_id, instance_id, generation))
             self._sync_unread_locked(session)
             self._changed_locked("session_snapshot", session_id, {"session": self._public_session(session)})
             return True
@@ -159,7 +162,9 @@ class FleetModel:
             if session is None or not self._may_claim(session, instance_id, generation):
                 return False
             session.pop("_extensionHistorySync", None)
-            session.update(extension_projection(session, registration, snapshot, instance_id, generation))
+            self._apply_projection(
+                session, extension_projection(session, registration, snapshot, instance_id, generation)
+            )
             self._changed_locked("session_snapshot", session_id, {"session": self._public_session(session)})
             return True
 
@@ -259,18 +264,27 @@ class FleetModel:
                 if isinstance(pending, Mapping) and pending.get("id") == event.payload.get("id"):
                     session["pendingUiRequest"] = None
                     session["state"] = "working"
-            elif event.type in {"agent_start", "turn_start", "message_start", "message_update"}:
+            elif event.type == "agent_start":
+                clear_activity(session)
                 session["state"] = "working"
-            elif event.type in {"agent_end", "turn_end"}:
-                session["state"] = "idle"
-                session["workingOn"] = None
+            elif event.type in {"turn_start", "message_start", "message_update"}:
+                if session.get("pendingUiRequest") is None:
+                    session["state"] = "working"
+            elif event.type == "agent_end" and event.payload.get("is_terminal") is not False:
+                session["state"] = completion_state(event.payload.get("messages", ()))
+                clear_activity(session)
                 session["unread"] = True
-            elif event.type in {"tool_execution_start", "tool_execution_update"}:
-                session["state"] = "working"
-                tool = event.payload.get("tool_name")
-                session["workingOn"] = str(tool) if tool else "Using a tool"
-            elif event.type == "tool_execution_end":
-                session["workingOn"] = None
+            elif event.type in {"tool_execution_start", "tool_execution_update", "tool_execution_end"}:
+                phase = event.type.removeprefix("tool_execution_")
+                update_tool_activity(
+                    session,
+                    phase,
+                    event.payload.get("tool_call_id"),
+                    event.payload.get("tool_name"),
+                    event.payload.get("intent"),
+                )
+                if phase != "end" and session.get("pendingUiRequest") is None:
+                    session["state"] = "working"
             self._snapshot_generation += 1
             self.journal.publish(
                 snapshot_generation=self._snapshot_generation,
@@ -377,6 +391,14 @@ class FleetModel:
             owner = session["transport"]["instanceId"]
             return owner is None or owner == instance_id
         return True
+
+    @staticmethod
+    def _apply_projection(session: dict[str, Any], projection: dict[str, Any]) -> None:
+        if any(session.get(key) != value for key, value in projection.items() if not key.startswith("_")):
+            session["updatedAt"] = now()
+        session.update(projection)
+        if session["state"] not in {"working", "needs_input"}:
+            clear_activity(session)
 
     @staticmethod
     def _public_session(session: Mapping[str, Any]) -> dict[str, Any]:

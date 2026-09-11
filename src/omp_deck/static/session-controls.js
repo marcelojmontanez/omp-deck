@@ -1,7 +1,9 @@
 
+let sessionActionGeneration = 0;
 const sessionActionAttempts = new Map();
 function clearSessionActionAttempts() {
   sessionActionAttempts.clear();
+  sessionActionGeneration += 1;
 }
 
 
@@ -41,13 +43,17 @@ el['session-menu'].addEventListener('click', async event => {
   }
   if (action === 'remove') {
     if (!confirm('Remove this terminal session from Deck?')) return;
+    const generation = sessionActionGeneration;
     try {
       const response = await ompDeckApi.request(`/api/sessions/${encodeURIComponent(agent.id)}/remove`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({}),
       });
-      if (!ompDeckApi.authenticated()) return;
+      if (
+        generation !== sessionActionGeneration
+        || !ompDeckApi.authenticated()
+      ) return;
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
         throw new Error(payload.error || `Removal failed (${response.status})`);
@@ -55,7 +61,10 @@ el['session-menu'].addEventListener('click', async event => {
       removeFleetSession(agent.localId, undefined, agent.machineId);
       showToast('Terminal session removed', 'success');
     } catch (error) {
-      if (ompDeckApi.authenticated()) showToast(error.message, 'error');
+      if (
+        generation === sessionActionGeneration
+        && ompDeckApi.authenticated()
+      ) showToast(error.message, 'error');
     }
     return;
   }
@@ -64,6 +73,7 @@ el['session-menu'].addEventListener('click', async event => {
   if (['clear', 'quit'].includes(action) && !confirm(
     action === 'clear' ? 'Compact this session context?' : 'Shut down this OMP session?'
   )) return;
+  const generation = sessionActionGeneration;
   const attemptKey = `${agent.id}:${route}`;
   const operationRequestId = sessionActionAttempts.get(attemptKey) || requestId();
   sessionActionAttempts.set(attemptKey, operationRequestId);
@@ -73,7 +83,11 @@ el['session-menu'].addEventListener('click', async event => {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({requestId: operationRequestId}),
     });
-    if (!ompDeckApi.authenticated()) return;
+    if (
+      generation !== sessionActionGeneration
+      || sessionActionAttempts.get(attemptKey) !== operationRequestId
+      || !ompDeckApi.authenticated()
+    ) return;
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
       const error = new Error(payload.error || `Action failed (${response.status})`);
@@ -83,6 +97,10 @@ el['session-menu'].addEventListener('click', async event => {
     sessionActionAttempts.delete(attemptKey);
     showToast(`${action[0].toUpperCase()}${action.slice(1)} requested`, 'success');
   } catch (error) {
+    if (
+      generation !== sessionActionGeneration
+      || sessionActionAttempts.get(attemptKey) !== operationRequestId
+    ) return;
     if (error.reuseRequestId === false) sessionActionAttempts.delete(attemptKey);
     if (ompDeckApi.authenticated()) showToast(error.message, 'error');
   }

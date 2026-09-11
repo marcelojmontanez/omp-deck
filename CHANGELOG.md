@@ -22,6 +22,13 @@
 - Preserve the original setup error when plugin installation fails before creating a plugin.
 - Persist a fresh managed session before exposing it so an unused empty OMP session resumes after Deck restarts; missing or replaced session files now fail explicitly instead of creating a different conversation.
 - Keep the terminal extension inactive in RPC, JSON, and print modes so a managed session cannot also appear as a duplicate terminal session.
+- Preserve images that finish loading after switching sessions, and serialize thinking changes so failed or older requests cannot undo a newer choice.
+- Restore unread-first session ordering, running subagent details, grouped native todos, live session names, and error reporting. Refreshing unchanged state no longer resets its activity age.
+- Keep project creation controls usable while another machine is launching a session, and discard stale action results after local data is cleared or a device is re-paired.
+- Restore capability-gated terminal-session removal and stop advertising unsupported Collab todo reporting.
+- Restore image-viewer focus cleanup and the selected conversation after re-pairing.
+- Keep mobile dashboard counters within their columns.
+- Replace cached dashboard assets after upgrades and rollbacks, including when the restored files have older modification times.
 
 ## 1.1.0 — 2026-09-09
 

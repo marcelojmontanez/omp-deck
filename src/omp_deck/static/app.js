@@ -1,5 +1,6 @@
 try { localStorage.clear(); } catch {}
 const thinkingOverrides = new Map();
+let thinkingUpdateTokens = new Map();
 const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'auto'];
 const initialSession = new URL(location.href).searchParams.get('session');
 const state = {
@@ -33,6 +34,7 @@ async function clearLocalData() {
   try { localStorage.clear(); } catch {}
   try { sessionStorage.clear(); } catch {}
   thinkingOverrides.clear();
+  thinkingUpdateTokens = new Map();
   composer?.clearLocalData();
   clearPendingRequestAttempts();
   clearSessionActionAttempts();
@@ -153,10 +155,14 @@ function removeMachinePresentation(machineId) {
   const removed = state.agents.filter(agent => agent.machineId === machineId).map(agent => agent.id);
   state.agents = state.agents.filter(agent => agent.machineId !== machineId);
   if (removed.includes(state.selectedId)) {
+    const preserveNavigation = !ompDeckApi.authenticated();
+    if (preserveNavigation) state.pendingSelection = state.selectedId;
     showMenu();
-    const url = new URL(location.href);
-    url.searchParams.delete('session');
-    history.replaceState({view: 'menu'}, '', url);
+    if (!preserveNavigation) {
+      const url = new URL(location.href);
+      url.searchParams.delete('session');
+      history.replaceState({view: 'menu'}, '', url);
+    }
   }
   touchRender();
 }
@@ -294,22 +300,40 @@ document.querySelector('.detail-header').addEventListener('click', async event =
   if (!button || agent?.nodeAvailable === false || !agent?.bridgeConnected || !agent.capabilities.setThinking) return;
   const current = thinkingLevel(agent);
   const next = THINKING_LEVELS[(THINKING_LEVELS.indexOf(current) + 1) % THINKING_LEVELS.length];
+  const updates = thinkingUpdateTokens;
+  const previous = updates.get(agent.id);
+  let settle;
+  const updateToken = {done: new Promise(resolve => { settle = resolve; })};
+  updates.set(agent.id, updateToken);
   thinkingOverrides.set(agent.id, next);
   touchRender();
   renderDetail();
   try {
+    await previous?.done;
+    if (updates !== thinkingUpdateTokens) return;
     const response = await ompDeckApi.request(`/api/sessions/${encodeURIComponent(agent.id)}/thinking`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({requestId: requestId(), level: next}),
     });
     if (!response.ok) throw new Error(`Thinking update failed (${response.status})`);
+    if (updates.get(agent.id) !== updateToken) return;
+    await refresh(agent.machineId);
+    if (updates !== thinkingUpdateTokens || updates.get(agent.id) !== updateToken) return;
+    updates.delete(agent.id);
+    thinkingOverrides.delete(agent.id);
+    touchRender();
+    renderDetail();
   } catch (error) {
-    if (!ompDeckApi.authenticated()) return;
-    thinkingOverrides.set(agent.id, current);
+    if (!ompDeckApi.authenticated() || updates !== thinkingUpdateTokens || updates.get(agent.id) !== updateToken) return;
+    updates.delete(agent.id);
+    thinkingOverrides.delete(agent.id);
     touchRender();
     renderDetail();
     showToast(error.message, 'error');
+    void refresh(agent.machineId);
+  } finally {
+    settle();
   }
 });
 el.activity.addEventListener('click', event => {
@@ -370,6 +394,14 @@ function showAuthentication({clearToken = false} = {}) {
   el['launch-state'].textContent = '';
   state.agents = [];
   state.selectedId = null;
+  state.pendingSelection = new URL(location.href).searchParams.get('session');
+  state.showArchive = false;
+  state.showTodo = false;
+  closeSessionMenu();
+  composer?.select(null);
+  el.app.classList.remove('chat-open');
+  document.body.classList.remove('chat-open');
+  el.workspace.classList.remove('chat-open');
   ompDeckImages.clear();
   appRoot.hidden = true;
   document.getElementById('pair-command').textContent = ompDeckApi.mode() === 'coordinator'
@@ -384,10 +416,14 @@ async function showApplication() {
   authScreen.hidden = true;
   appRoot.hidden = false;
   document.getElementById('dashboard-title').focus();
-  if (initialSession) {
-    history.replaceState({view: 'chat', session: initialSession}, '', location.href);
+  const requestedSession = new URL(location.href).searchParams.get('session');
+  state.pendingSelection = requestedSession;
+  if (requestedSession) {
+    history.replaceState({view: 'chat', session: requestedSession}, '', location.href);
   } else {
-    history.replaceState({view: 'menu'}, '', location.href);
+    const url = new URL(location.href);
+    url.searchParams.delete('session');
+    history.replaceState({view: 'menu'}, '', url);
   }
   try {
     await ompDeckApi.initializeFleet();

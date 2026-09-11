@@ -11,10 +11,17 @@ from typing import Any
 
 from . import _terminal_commands
 from ._collab_imports import CollabImportCoordinator
+from ._extension_activation import ExtensionEventActivation
 from ._shutdown import close_terminal_manager
 from ._terminal_discovery import discover_extension_candidates, removed_extension_connection
 from ._terminal_discovery import terminal_id as _terminal_id
-from ._terminal_runtime import TerminalSessionNotConnected, _registry_record, _Runtime, _RuntimeStore
+from ._terminal_runtime import (
+    TerminalSessionNotConnected,
+    _registry_record,
+    _Runtime,
+    _RuntimeStore,
+    _upsert_extension_record,
+)
 from .collab_adapter import CollabAdapter
 from .collab_store import CollabStore
 from .extension_adapter import ExtensionAdapter
@@ -309,38 +316,50 @@ class TerminalSessionManager:
     def _watch_extensions(self) -> None:
         while not self._stop.is_set():
             try:
-                options = {} if os.name == "nt" else {"open_file": os.open, "effective_uid": os.geteuid()}
-                candidates = discover_extension_candidates(
-                    self.settings.socket_root,
-                    **options,
-                )
+                options = {"all_candidates": True}
+                if os.name != "nt":
+                    options.update({"open_file": os.open, "effective_uid": os.geteuid()})
+                candidates = discover_extension_candidates(self.settings.socket_root, **options)
                 self._reconcile_extensions(candidates)
             except Exception:
                 pass
             self._stop.wait(self.discovery_interval)
 
-    def _reconcile_extensions(self, candidates: Mapping[str, tuple[Path, dict[str, Any]]]) -> None:
+    def _reconcile_extensions(self, candidates: Mapping[str, Any]) -> None:
         active_paths: set[Path] = set()
-        for omp_session_id, (socket_path, metadata) in candidates.items():
+        for omp_session_id, discovered in candidates.items():
+            if discovered and isinstance(discovered[0], Path):
+                options = (discovered,)
+            else:
+                options = discovered
+            active_paths.update(socket_path for socket_path, _metadata in options)
             session_id = _terminal_id(omp_session_id)
-            connection_id = metadata.get("connectionId")
-            with self._lock:
-                ignored = self._ignored_extensions.get(session_id)
+            runtime = self._runtimes.get(session_id)
+            connected = (
+                runtime is not None
+                and runtime.kind == "extension"
+                and runtime.adapter.snapshot() is not None
+                and runtime.adapter.snapshot().transport_status == "connected"
+            )
+            for socket_path, metadata in options:
+                connection_id = metadata.get("connectionId")
+                with self._lock:
+                    ignored = self._ignored_extensions.get(session_id)
                 if ignored == connection_id:
                     continue
-                if ignored is not None:
-                    self._ignored_extensions.pop(session_id, None)
-            active_paths.add(socket_path)
-            runtime = self._runtimes.get(session_id)
-            if runtime is not None and runtime.kind == "extension" and runtime.socket_path == socket_path:
-                snapshot = runtime.adapter.snapshot()
-                if snapshot is not None and snapshot.transport_status == "connected":
+                if connected and runtime.socket_path == socket_path:
+                    break
+                try:
+                    self._connect_extension(session_id, socket_path, metadata)
+                except Exception:
                     continue
+                runtime = self._runtimes.get(session_id)
+                connected = True
+                break
+            if not connected and runtime is not None and runtime.kind == "extension":
                 self._drop_runtime(runtime, "Extension heartbeat expired")
-            try:
-                self._connect_extension(session_id, socket_path, metadata)
-            except Exception:
-                continue
+            if connected and runtime is not None:
+                active_paths.add(runtime.socket_path)
         stale = [
             runtime
             for runtime in self._runtimes.values()
@@ -349,129 +368,108 @@ class TerminalSessionManager:
         for runtime in stale:
             self._drop_runtime(runtime, "Extension registration expired")
 
-    def _connect_extension(
-        self,
-        session_id: str,
-        socket_path: Path,
-        metadata: Mapping[str, Any],
-    ) -> None:
+    def _connect_extension(self, session_id: str, socket_path: Path, metadata: Mapping[str, Any]) -> None:
         with self._commands.lock(session_id):
             self._connect_extension_locked(session_id, socket_path, metadata)
 
-    def _connect_extension_locked(
-        self,
-        session_id: str,
-        socket_path: Path,
-        metadata: Mapping[str, Any],
-    ) -> None:
+    def _connect_extension_locked(self, session_id: str, socket_path: Path, metadata: Mapping[str, Any]) -> None:
         connection_id = metadata.get("connectionId")
         if not isinstance(connection_id, str):
             return
         with self._lock:
             if self._stop.is_set() or self._ignored_extensions.get(session_id) == connection_id:
                 return
-        title = (
-            metadata.get("title")
-            if isinstance(metadata.get("title"), str) and metadata.get("title")
-            else "Terminal session"
-        )
-        project_path = (
-            metadata.get("project") if isinstance(metadata.get("project"), str) else str(self.settings.project_root)
-        )
-        project_name = Path(project_path).name or "Terminal"
-        try:
-            record = _registry_record(self.registry, session_id)
-            record = self.registry.update(
-                session_id,
-                adapter_kind="extension",
-                omp_session_id=str(metadata["sessionId"]),
-                project_name=project_name,
-                project_path=project_path,
-                title=title,
-                recovery_metadata={"connectionId": connection_id},
-            )
-        except KeyError:
-            record = self.registry.create(
-                session_id=session_id,
-                adapter_kind="extension",
-                omp_session_id=str(metadata["sessionId"]),
-                project_name=project_name,
-                project_path=project_path,
-                title=title,
-                recovery_metadata={"connectionId": connection_id},
-            )
-        self.model.load_record(record)
-        generation = int(record["generation"])
+        runtime: _Runtime | None = None
+        previous: _Runtime | None = None
+        prior_runtime = self._runtimes.get(session_id)
 
-        def on_event(event: Mapping[str, Any]) -> None:
-            if event.get("kind") == "snapshot":
-                return
-            runtime = self._runtimes.get(session_id)
-            if runtime is not None and runtime.instance_id == connection_id:
-                self.model.apply_extension_event(
-                    session_id,
-                    instance_id=connection_id,
-                    generation=runtime.generation,
-                    event=event,
-                )
+        def apply_event(event: Mapping[str, Any]) -> None:
+            current = self._runtimes.get(session_id)
+            if current is not None and current.instance_id == connection_id:
+                try:
+                    self.model.apply_extension_event(
+                        session_id,
+                        instance_id=connection_id,
+                        generation=current.generation,
+                        event=event,
+                    )
+                except Exception as error:
+                    self.model.set_transport(
+                        session_id,
+                        instance_id=connection_id,
+                        generation=current.generation,
+                        status="degraded",
+                        reason=f"Extension projection failed: {error}",
+                    )
+                    raise
 
-        adapter_options = {"on_event": on_event}
+        activation = ExtensionEventActivation(apply_event)
+        adapter_options = {"on_event": activation.publish}
         if os.name == "nt":
             adapter_options["connection_token"] = metadata.get("authToken")
         adapter = ExtensionAdapter(str(socket_path), **adapter_options)
-        runtime = _Runtime(session_id, connection_id, generation, "extension", adapter, socket_path)
-        with self._lock:
-            if self._stop.is_set() or self._ignored_extensions.get(session_id) == connection_id:
-                return
-            previous = self._runtimes.install(runtime)
-        if previous is not None:
-            previous.adapter.close()
-        self.model.set_transport(
-            session_id,
-            instance_id=connection_id,
-            generation=generation,
-            status="connecting",
-            reason=None,
-        )
         try:
             registration = adapter.start()
-            with self._lock:
-                if (
-                    self._stop.is_set()
-                    or not self._runtimes.is_current(runtime)
-                    or self._ignored_extensions.get(session_id) == connection_id
-                ):
-                    raise TerminalSessionNotConnected(session_id)
             snapshot = adapter.snapshot()
-            if snapshot is None or not self.model.apply_extension_snapshot(
-                session_id,
-                instance_id=connection_id,
-                generation=generation,
-                registration=registration,
-                snapshot=snapshot,
-            ):
+            if snapshot is None:
                 raise TerminalSessionNotConnected(session_id)
             adapter.sync_history()
+            record = _upsert_extension_record(
+                self.registry,
+                session_id,
+                metadata,
+                self.settings.project_root,
+                connection_id,
+            )
+            generation = int(record["generation"])
+            if prior_runtime is not None:
+                self.model.set_transport(
+                    session_id, instance_id=connection_id, generation=generation, status="connecting", reason=None
+                )
+            self.model.load_record(record)
+            if prior_runtime is None:
+                self.model.set_transport(
+                    session_id, instance_id=connection_id, generation=generation, status="connecting", reason=None
+                )
+            runtime = _Runtime(session_id, connection_id, generation, "extension", adapter, socket_path)
+
+            def adopt() -> None:
+                nonlocal previous
+                with self._lock:
+                    if self._stop.is_set() or self._ignored_extensions.get(session_id) == connection_id:
+                        raise TerminalSessionNotConnected(session_id)
+                    previous = self._runtimes.install(runtime)
+                if not self.model.apply_extension_snapshot(
+                    session_id,
+                    instance_id=connection_id,
+                    generation=generation,
+                    registration=registration,
+                    snapshot=snapshot,
+                ):
+                    raise TerminalSessionNotConnected(session_id)
+
+            drain_events = getattr(adapter, "drain_events", lambda: ())
+            activation.activate(adopt, drain_events)
+            with self._lock:
+                if self._ignored_extensions.get(session_id) != connection_id:
+                    self._ignored_extensions.pop(session_id, None)
+            if previous is not None:
+                previous.adapter.close()
         except Exception as error:
             try:
                 adapter.close()
             except Exception as close_error:
-                self.model.set_transport(
-                    session_id,
-                    instance_id=connection_id,
-                    generation=generation,
-                    status="degraded",
-                    reason=f"Extension cleanup failed: {close_error}",
-                )
+                if runtime is not None:
+                    self.model.set_transport(
+                        session_id,
+                        instance_id=connection_id,
+                        generation=runtime.generation,
+                        status="degraded",
+                        reason=f"Extension cleanup failed: {close_error}",
+                    )
                 raise RuntimeError(f"{error}; Extension cleanup failed: {close_error}") from error
-            self._runtimes.remove_if_current(runtime)
-            self.model.set_transport(
-                session_id,
-                instance_id=None,
-                generation=generation,
-                status="disconnected",
-                reason="Extension connection unavailable",
-            )
+            if runtime is not None and self._runtimes.remove_if_current(runtime) and previous is not None:
+                self._runtimes.install(previous)
             raise
 
     def _drop_runtime(self, runtime: _Runtime, reason: str) -> None:

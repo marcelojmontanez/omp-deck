@@ -19,6 +19,7 @@ from omp_deck._terminal_commands import TerminalCommandConflict
 from omp_deck._terminal_discovery import discover_extension_candidates
 from omp_deck.collab_adapter import CollabAdapter, CollabSnapshot
 from omp_deck.collab_protocol import b64url_encode, open_frame, pack_envelope, seal_frame, unpack_envelope
+from omp_deck.extension_adapter import ExtensionAdapter as RealExtensionAdapter
 from omp_deck.extension_adapter import ExtensionRegistration, ExtensionSnapshot
 from omp_deck.fleet_model import FleetModel
 from omp_deck.registry_store import RegistryStore
@@ -38,6 +39,20 @@ def collab_link(write=True):
 
 def host(frame):
     return pack_envelope(7, seal_frame(KEY, frame))
+
+
+def extension_event(sequence, kind="snapshot", data=None):
+    if data is None:
+        data = {"idle": True, "pendingMessages": False, "model": None, "async": []}
+    return {"protocol": "omp-deck-fallback-v1", "type": "event", "sequence": sequence, "kind": kind, "data": data}
+
+
+def extension_response(request):
+    return {"protocol": "omp-deck-fallback-v1", "type": "response", "id": request["id"], "ok": True}
+
+
+def extension_line(value):
+    return json.dumps(value, separators=(",", ":")).encode() + b"\n"
 
 
 WELCOME = {
@@ -124,6 +139,7 @@ class FakeExtensionAdapter:
     instances = []
     fail_start = False
     fail_close = False
+    fail_sync = False
     capabilities = {
         "sendMessage": True,
         "followUp": True,
@@ -170,6 +186,8 @@ class FakeExtensionAdapter:
 
     def sync_history(self):
         self.calls.append(("sync_history",))
+        if type(self).fail_sync:
+            raise RuntimeError("sync failed")
 
     def send_message(self, message, behavior=None):
         self.calls.append(("send_message", message, behavior))
@@ -215,6 +233,7 @@ class TerminalSessionManagerTests(unittest.TestCase):
         FakeExtensionAdapter.instances.clear()
         FakeExtensionAdapter.fail_start = False
         FakeExtensionAdapter.fail_close = False
+        FakeExtensionAdapter.fail_sync = False
 
     def tearDown(self):
         for manager in reversed(self.managers):
@@ -428,6 +447,374 @@ class TerminalSessionManagerTests(unittest.TestCase):
             ["selected question", "selected answer"],
         )
 
+    @unittest.skipIf(os.name == "nt", "Unix socket transport regression")
+    def test_extension_live_message_and_image_survive_later_event_and_history(self):
+        manager = self.manager()
+        omp_session_id = "omp-real"
+        connection_id = "real-connection"
+        path = self.settings.socket_root / unix_endpoint_name(omp_session_id, connection_id)
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(path))
+        listener.listen()
+        self.addCleanup(listener.close)
+        metadata = {
+            "protocol": "omp-deck-fallback-v1",
+            "version": 1,
+            "type": "registration",
+            "sessionId": omp_session_id,
+            "connectionId": connection_id,
+            "project": "/work/project",
+            "title": "Real extension",
+        }
+        metadata_path = Path(str(path) + ".json")
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        metadata_path.chmod(0o600)
+        image = "a" * 64
+        send_live = threading.Event()
+        history_sent = threading.Event()
+        send_history = threading.Event()
+
+        def serve():
+            client, _ = listener.accept()
+            stream = client.makefile("rb")
+            registration_frame = {
+                "protocol": "omp-deck-fallback-v1",
+                "version": 1,
+                "type": "registration",
+                "ompVersion": "9.8.7",
+                "compatible": True,
+                "connectionId": connection_id,
+                "session": {"id": omp_session_id, "file": None, "title": "Real extension"},
+                "sessionId": omp_session_id,
+                "title": "Real extension",
+                "project": "/work/project",
+                "capabilities": {
+                    "sendMessage": True,
+                    "followUp": True,
+                    "interrupt": True,
+                    "shutdown": True,
+                    "todos": True,
+                    "subagents": True,
+                    "answerUiRequest": False,
+                    "answer_ui_request": False,
+                },
+            }
+            client.sendall(extension_line(registration_frame) + extension_line(extension_event(1)))
+            request = json.loads(stream.readline())
+            client.sendall(extension_line(extension_response(request)))
+            send_live.wait(1)
+            client.sendall(
+                extension_line(
+                    extension_event(
+                        2,
+                        "message",
+                        {
+                            "phase": "end",
+                            "message": {
+                                "id": "pictured",
+                                "role": "assistant",
+                                "content": [{"type": "image", "data": f"blob:sha256:{image}"}],
+                            },
+                        },
+                    )
+                )
+            )
+            client.sendall(
+                extension_line(
+                    extension_event(
+                        3,
+                        "message",
+                        {
+                            "phase": "end",
+                            "message": {"id": "later", "role": "assistant", "content": "Next message"},
+                        },
+                    )
+                )
+            )
+            send_history.wait(1)
+            client.sendall(
+                extension_line(
+                    extension_event(
+                        4,
+                        "history",
+                        {
+                            "syncId": "replacement",
+                            "offset": 0,
+                            "messages": [
+                                {
+                                    "id": "history-image",
+                                    "role": "assistant",
+                                    "content": [{"type": "image", "url": f"/api/blob/{image}"}],
+                                }
+                            ],
+                            "complete": True,
+                        },
+                    )
+                )
+            )
+            history_sent.set()
+            threading.Event().wait(0.05)
+            stream.close()
+            client.close()
+
+        server = threading.Thread(target=serve)
+        server.start()
+        self.addCleanup(server.join, 1)
+        manager._reconcile_extensions({omp_session_id: (path, metadata)})
+        session_id = _terminal_id(omp_session_id)
+        send_live.set()
+        for _ in range(200):
+            messages = self.model.get(session_id)["messages"]
+            if len(messages) == 2:
+                break
+            threading.Event().wait(0.005)
+        self.assertEqual([message["id"] for message in messages], ["pictured", "later"])
+        self.assertEqual(messages[0]["content"], [{"type": "image", "url": f"/api/blob/{image}"}])
+        send_history.set()
+        self.assertTrue(history_sent.wait(1))
+        for _ in range(200):
+            messages = self.model.get(session_id)["messages"]
+            if [message["id"] for message in messages] == ["history-image"]:
+                break
+            threading.Event().wait(0.005)
+        self.assertEqual([message["id"] for message in messages], ["history-image"])
+        self.assertEqual(messages[0]["content"], [{"type": "image", "url": f"/api/blob/{image}"}])
+
+    @unittest.skipIf(os.name == "nt", "Unix socket activation race regression")
+    def test_extension_activation_serializes_staged_history_with_live_reader_event(self):
+        manager = self.manager()
+        omp_session_id = "omp-activation-race"
+        connection_id = "activation-connection"
+        path = self.settings.socket_root / unix_endpoint_name(omp_session_id, connection_id)
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(path))
+        listener.listen()
+        self.addCleanup(listener.close)
+        metadata = {
+            "protocol": "omp-deck-fallback-v1",
+            "version": 1,
+            "type": "registration",
+            "sessionId": omp_session_id,
+            "connectionId": connection_id,
+            "project": "/work/project",
+            "title": "Activation race",
+        }
+        drained = threading.Event()
+        send_live = threading.Event()
+        callback_completed = threading.Event()
+        final_completed = threading.Event()
+        send_final = threading.Event()
+        finish_server = threading.Event()
+        callback_attempted = threading.Event()
+        release_drain = threading.Event()
+
+        def serve():
+            client, _ = listener.accept()
+            stream = client.makefile("rb")
+            registration = {
+                "protocol": "omp-deck-fallback-v1",
+                "version": 1,
+                "type": "registration",
+                "ompVersion": "9.8.7",
+                "compatible": True,
+                "connectionId": connection_id,
+                "session": {"id": omp_session_id, "file": None, "title": "Activation race"},
+                "sessionId": omp_session_id,
+                "title": "Activation race",
+                "project": "/work/project",
+                "capabilities": {
+                    "sendMessage": True,
+                    "followUp": True,
+                    "interrupt": True,
+                    "shutdown": True,
+                    "todos": True,
+                    "subagents": True,
+                    "answerUiRequest": False,
+                    "answer_ui_request": False,
+                },
+            }
+            client.sendall(extension_line(registration) + extension_line(extension_event(1)))
+            request = json.loads(stream.readline())
+            for sequence, role, text in ((2, "user", "question"), (3, "assistant", "answer")):
+                client.sendall(
+                    extension_line(
+                        extension_event(
+                            sequence,
+                            "history",
+                            {
+                                "syncId": "initial",
+                                "offset": sequence - 2,
+                                "messages": [{"id": str(sequence), "role": role, "content": text}],
+                                "complete": False,
+                            },
+                        )
+                    )
+                )
+            client.sendall(
+                extension_line(
+                    extension_event(
+                        4,
+                        "history",
+                        {"syncId": "initial", "offset": 2, "messages": [], "complete": True},
+                    )
+                )
+                + extension_line(extension_response(request))
+            )
+            send_live.wait(1)
+            client.sendall(
+                extension_line(
+                    extension_event(
+                        5,
+                        "message",
+                        {
+                            "phase": "end",
+                            "message": {"id": "5", "role": "assistant", "content": "later"},
+                        },
+                    )
+                )
+            )
+            send_final.wait(2)
+            client.sendall(
+                extension_line(
+                    extension_event(
+                        6,
+                        "message",
+                        {
+                            "phase": "end",
+                            "message": {"id": "6", "role": "assistant", "content": "final"},
+                        },
+                    )
+                )
+            )
+            finish_server.wait(2)
+            stream.close()
+            client.close()
+
+        server = threading.Thread(target=serve)
+        server.start()
+        self.addCleanup(server.join, 1)
+        for signal in (finish_server, send_final, send_live, release_drain):
+            self.addCleanup(signal.set)
+        original_drain = RealExtensionAdapter.drain_events
+
+        def observed_adapter(endpoint, **options):
+            publish = options["on_event"]
+
+            def on_event(event):
+                sequence = event.get("sequence")
+                if sequence == 5:
+                    callback_attempted.set()
+                publish(event)
+                if sequence == 5:
+                    callback_completed.set()
+                elif sequence == 6:
+                    final_completed.set()
+
+            options["on_event"] = on_event
+            return RealExtensionAdapter(endpoint, **options)
+
+        def paused_drain(adapter):
+            events = original_drain(adapter)
+            drained.set()
+            send_live.set()
+            self.assertTrue(callback_attempted.wait(1))
+            release_drain.wait(1)
+            return events
+
+        connect = threading.Thread(target=lambda: manager._reconcile_extensions({omp_session_id: (path, metadata)}))
+        with (
+            patch.object(RealExtensionAdapter, "drain_events", paused_drain),
+            patch("omp_deck.terminal_sessions.ExtensionAdapter", observed_adapter),
+        ):
+            connect.start()
+            self.assertTrue(drained.wait(1))
+            self.assertTrue(callback_attempted.wait(1))
+            release_drain.set()
+            connect.join(1)
+        self.assertFalse(connect.is_alive())
+        self.assertTrue(callback_completed.wait(1))
+        send_final.set()
+        self.assertTrue(final_completed.wait(1))
+        session = self.model.get(_terminal_id(omp_session_id))
+        self.assertEqual(
+            [message["content"][0]["text"] for message in session["messages"]],
+            ["question", "answer", "later", "final"],
+        )
+        self.assertEqual(session["transport"]["status"], "connected")
+
+    @unittest.skipIf(os.name == "nt", "Unix socket ordering regression")
+    def test_newer_dead_endpoint_falls_back_without_replacing_live_older_runtime(self):
+        manager = self.manager()
+        old_path, old_metadata_path, old_metadata = self.unix_registration(connection="old")
+        candidates = self.extension_candidates()
+        with patch("omp_deck.terminal_sessions.ExtensionAdapter", FakeExtensionAdapter):
+            manager._reconcile_extensions(candidates)
+        session_id = _terminal_id("omp-extension")
+        old_runtime = manager._runtimes.get(session_id)
+        self.assertIsNotNone(old_runtime)
+
+        dead_connection = "dead"
+        dead_path = self.settings.socket_root / unix_endpoint_name("omp-extension", dead_connection)
+        dead_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        dead_listener.bind(str(dead_path))
+        dead_listener.close()
+        dead_metadata = dict(old_metadata, connectionId=dead_connection)
+        dead_metadata_path = Path(str(dead_path) + ".json")
+        dead_metadata_path.write_text(json.dumps(dead_metadata), encoding="utf-8")
+        dead_metadata_path.chmod(0o600)
+        newer = old_metadata_path.stat().st_mtime_ns + 1_000_000
+        os.utime(dead_metadata_path, ns=(newer, newer))
+
+        attempted = threading.Event()
+
+        def adapter_for(endpoint, **options):
+            if endpoint == str(dead_path):
+                attempted.set()
+                return RealExtensionAdapter(endpoint, **options)
+            return FakeExtensionAdapter(endpoint, **options)
+
+        with patch("omp_deck.terminal_sessions.ExtensionAdapter", adapter_for):
+            manager.start()
+            self.assertTrue(attempted.wait(2), "discovery never tried the newer endpoint")
+            # The factory runs under the command lock. Acquire it only after
+            # construction begins, so assertions observe completed initialization.
+            with manager._commands.lock(session_id):
+                self.assertIs(manager._runtimes.get(session_id), old_runtime)
+        self.assertIs(manager._runtimes.get(session_id), old_runtime)
+        self.assertFalse(old_runtime.adapter.closed)
+
+    @unittest.skipIf(os.name == "nt", "Unix socket ordering regression")
+    def test_cold_discovery_falls_back_from_newer_dead_endpoint(self):
+        manager = self.manager(discovery_interval=0.01)
+        old_path, old_metadata_path, old_metadata = self.unix_registration(connection="old")
+        dead_path = self.settings.socket_root / unix_endpoint_name("omp-extension", "dead")
+        dead_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        dead_listener.bind(str(dead_path))
+        dead_listener.close()
+        dead_metadata = dict(old_metadata, connectionId="dead")
+        dead_metadata_path = Path(str(dead_path) + ".json")
+        dead_metadata_path.write_text(json.dumps(dead_metadata), encoding="utf-8")
+        dead_metadata_path.chmod(0o600)
+        newer = old_metadata_path.stat().st_mtime_ns + 1_000_000
+        os.utime(dead_metadata_path, ns=(newer, newer))
+
+        def adapter_for(endpoint, **options):
+            if endpoint == str(dead_path):
+                return RealExtensionAdapter(endpoint, **options)
+            return FakeExtensionAdapter(endpoint, **options)
+
+        session_id = _terminal_id("omp-extension")
+        with patch("omp_deck.terminal_sessions.ExtensionAdapter", adapter_for):
+            manager.start()
+            for _ in range(200):
+                runtime = manager._runtimes.get(session_id)
+                if runtime is not None:
+                    break
+                threading.Event().wait(0.005)
+        self.assertIsNotNone(runtime)
+        self.assertEqual(runtime.socket_path, old_path)
+        self.assertEqual(self.model.get(session_id)["transport"]["status"], "connected")
+
     def test_expired_socket_or_heartbeat_drops_runtime_but_persists_disconnected_session(self):
         manager = self.manager()
         session_id, path, adapter = self.connect_extension(manager)
@@ -451,14 +838,12 @@ class TerminalSessionManagerTests(unittest.TestCase):
     def test_removed_extension_stays_hidden_across_manager_restart(self):
         manager = self.manager()
         path, _, metadata = self.unix_registration(connection="failed")
-        FakeExtensionAdapter.fail_start = True
-
         with patch("omp_deck.terminal_sessions.ExtensionAdapter", FakeExtensionAdapter):
             manager._reconcile_extensions({"omp-extension": (path, metadata)})
 
         record = manager.registry.load()[0]
         session_id = record["id"]
-        self.assertIsNone(manager._runtimes.get(session_id))
+        self.assertIsNotNone(manager._runtimes.get(session_id))
         self.assertEqual(record["recoveryMetadata"], {"connectionId": "failed"})
         self.assertTrue(manager.remove(session_id))
 
@@ -471,7 +856,6 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.managers.remove(manager)
         restarted = self.manager()
 
-        FakeExtensionAdapter.fail_start = False
         with patch("omp_deck.terminal_sessions.ExtensionAdapter", FakeExtensionAdapter):
             restarted._reconcile_extensions({"omp-extension": (path, metadata)})
         self.assertIsNone(restarted._runtimes.get(session_id))
@@ -482,30 +866,53 @@ class TerminalSessionManagerTests(unittest.TestCase):
             restarted._reconcile_extensions({"omp-extension": (new_path, new_metadata)})
         current = restarted.registry.load()[0]
         self.assertEqual(current["id"], session_id)
-        self.assertEqual(
-            current["recoveryMetadata"],
-            {"connectionId": "new"},
-        )
+        self.assertEqual(current["recoveryMetadata"], {"connectionId": "new"})
         self.assertIsNotNone(restarted._runtimes.get(session_id))
 
-    def test_extension_failed_cleanup_retains_runtime_until_remove_succeeds(self):
+    def test_failed_replacement_history_sync_keeps_existing_runtime_operable(self):
         manager = self.manager()
+        session_id, _, existing = self.connect_extension(manager, connection="old")
         path, _, metadata = self.unix_registration(connection="failed")
-        FakeExtensionAdapter.fail_start = True
-        FakeExtensionAdapter.fail_close = True
+        FakeExtensionAdapter.fail_sync = True
 
         with patch("omp_deck.terminal_sessions.ExtensionAdapter", FakeExtensionAdapter):
             manager._reconcile_extensions({"omp-extension": (path, metadata)})
 
-        record = manager.registry.load()[0]
-        self.assertIsNotNone(manager._runtimes.get(record["id"]))
-        transport = self.model.get(record["id"])["transport"]
-        self.assertEqual(transport["status"], "degraded")
-        self.assertIn("cleanup failed", transport["reason"])
+        self.assertIs(manager._runtimes.get(session_id).adapter, existing)
+        self.assertFalse(existing.closed)
+        self.assertEqual(self.model.get(session_id)["transport"]["status"], "connected")
+        manager.command(session_id, "still-live", "shutdown", {})
+        self.assertIn(("shutdown_session",), existing.calls)
+        FakeExtensionAdapter.fail_sync = False
 
-        FakeExtensionAdapter.fail_close = False
-        self.assertTrue(manager.remove(record["id"]))
-        self.assertIsNone(manager._runtimes.get(record["id"]))
+    @unittest.skipIf(os.name == "nt", "Unix socket ordering regression")
+    def test_removed_connection_tombstone_survives_newer_dead_candidate_and_repeated_scans(self):
+        manager = self.manager(discovery_interval=0.01)
+        path, metadata_path, metadata = self.unix_registration(connection="removed")
+        with patch("omp_deck.terminal_sessions.ExtensionAdapter", FakeExtensionAdapter):
+            manager._reconcile_extensions({"omp-extension": (path, metadata)})
+        session_id = _terminal_id("omp-extension")
+        self.assertTrue(manager.remove(session_id))
+        tombstone = manager.registry.load()[0]
+        manager.close()
+        self.managers.remove(manager)
+
+        dead_path = self.settings.socket_root / unix_endpoint_name("omp-extension", "dead")
+        dead_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        dead_listener.bind(str(dead_path))
+        dead_listener.close()
+        dead_metadata = dict(metadata, connectionId="dead")
+        dead_metadata_path = Path(str(dead_path) + ".json")
+        dead_metadata_path.write_text(json.dumps(dead_metadata), encoding="utf-8")
+        dead_metadata_path.chmod(0o600)
+        newer = metadata_path.stat().st_mtime_ns + 1_000_000
+        os.utime(dead_metadata_path, ns=(newer, newer))
+
+        restarted = self.manager(discovery_interval=0.01)
+        restarted.start()
+        threading.Event().wait(0.06)
+        self.assertIsNone(restarted._runtimes.get(session_id))
+        self.assertEqual(restarted.registry.load(), [tombstone])
 
     def test_collab_credential_is_secret_commands_route_and_remove_forgets_everything(self):
         secret = collab_link()

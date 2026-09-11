@@ -3,6 +3,7 @@ import http.client
 import io
 import json
 import os
+import socket
 import stat
 import tempfile
 import threading
@@ -175,6 +176,42 @@ class CoordinatorHTTPTests(unittest.TestCase):
         self.addCleanup(self.httpd.server_close)
         self.addCleanup(self.httpd.shutdown)
         self.origin = "https://coordinator.example"
+
+    @unittest.skipUnless(socket.has_ipv6, "IPv6 is unavailable")
+    def test_ipv6_listener_serves_accepted_configuration(self):
+        with socket.socket(socket.AF_INET6) as probe:
+            try:
+                probe.bind(("::1", 0))
+            except OSError:
+                self.skipTest("IPv6 loopback is unavailable")
+        config = Path(self.temp.name) / "ipv6.json"
+        config.write_text(
+            json.dumps(
+                {
+                    "host": "::1",
+                    "port": 18799,
+                    "origin": "http://[::1]:18799",
+                    "state_root": str(Path(self.temp.name) / "ipv6-state"),
+                }
+            )
+        )
+        config.chmod(0o600)
+        context = CoordinatorContext.create(load_coordinator_settings(config))
+        httpd = CoordinatorHTTPServer((context.settings.host, 0), context)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection("::1", httpd.server_port, timeout=2)
+            try:
+                connection.request("GET", "/api/client-config", headers={"Host": "[::1]:18799"})
+                response = connection.getresponse()
+                self.assertEqual((response.status, json.loads(response.read())), (200, {"mode": "coordinator"}))
+            finally:
+                connection.close()
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(2)
 
     def request(self, method, path, body=None, headers=None, *, parse_json=True):
         connection = http.client.HTTPConnection("127.0.0.1", self.httpd.server_port, timeout=2)

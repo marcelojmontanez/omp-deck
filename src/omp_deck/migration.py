@@ -67,13 +67,12 @@ def apply_migration(settings) -> dict[str, int | bool]:
         imported += 1
 
     cursor_store = CursorStore(settings.cursor_path)
-    migrated_cursors = 0
-    for omp_session_id, event_id in cursors.items():
-        session_id = terminal_id(omp_session_id)
-        if session_id not in existing:
-            continue
-        cursor_store.mark_read(session_id, event_id)
-        migrated_cursors += 1
+    importable_cursors = {
+        terminal_id(omp_session_id): event_id
+        for omp_session_id, event_id in cursors.items()
+        if terminal_id(omp_session_id) in existing
+    }
+    migrated_cursors = cursor_store.import_missing(importable_cursors)
     _mark_state_root_owned(settings.state_root)
     return {
         "configurationReused": True,

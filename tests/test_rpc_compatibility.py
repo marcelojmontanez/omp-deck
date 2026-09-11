@@ -58,6 +58,47 @@ class RpcCompatibilityTests(unittest.TestCase):
             )
             self.assertEqual(subscription["level"], "progress")
 
+    def test_adapter_drains_official_ui_queue_including_passive_notifications(self):
+        client = self.client("contract")
+        observed = []
+        adapter = SessionAdapter(lambda: client, on_event=observed.append)
+        try:
+            adapter.start()
+            deadline = time.monotonic() + 1
+            while (
+                not any(event.type == "ui_request" and event.payload.get("id") == "ui-notify" for event in observed)
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            with self.assertRaises(RpcTimeoutError):
+                client.next_ui_request(timeout=0.05)
+            self.assertEqual(adapter.pending_ui_request().id, "ui-input")
+            self.assertTrue(
+                any(event.type == "ui_request" and event.payload.get("id") == "ui-notify" for event in observed)
+            )
+        finally:
+            adapter.close()
+
+    def test_real_rpc_command_can_receive_ui_response_while_waiting(self):
+        adapter = SessionAdapter(lambda: self.client("ui_during_command"))
+        result = []
+        try:
+            adapter.start()
+            command = threading.Thread(target=lambda: result.append(adapter.branch("entry-1")), daemon=True)
+            command.start()
+            deadline = time.monotonic() + 1
+            pending = adapter.pending_ui_request()
+            while pending is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+                pending = adapter.pending_ui_request()
+            self.assertIsNotNone(pending)
+            self.assertEqual(adapter.respond_ui("command-ui", "feature"), "accepted")
+            command.join(timeout=1)
+            self.assertFalse(command.is_alive())
+            self.assertEqual((result[0].text, result[0].cancelled), ("branched", False))
+        finally:
+            adapter.close()
+
     def test_malformed_native_subagent_snapshot_is_a_protocol_failure(self):
         adapter = SessionAdapter(lambda: self.client("bad_subagents"))
         try:

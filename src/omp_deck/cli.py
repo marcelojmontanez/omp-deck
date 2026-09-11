@@ -19,6 +19,7 @@ from .lifecycle import (
     install_service,
     plugin_installed,
     plugin_status,
+    preflight_service_install,
     purge_installation,
     remove_plugin,
     remove_service,
@@ -148,6 +149,7 @@ def setup(*, tailscale=False):
         raise RuntimeError("automatic service setup is unsupported on this platform")
     if shutil.which(settings.omp_bin) is None and not Path(settings.omp_bin).is_file():
         raise RuntimeError("stock OMP is not installed or not on PATH")
+    preflight_service_install(settings, path)
     plugin_preexisting = plugin_installed(settings)
     service_snapshot = capture_service_state(settings=settings, config_path=path)
     plugin_backup = None

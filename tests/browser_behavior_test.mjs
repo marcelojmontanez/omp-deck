@@ -6,6 +6,7 @@ import vm from 'node:vm';
 const source = await readFile(new URL('../src/omp_deck/static/fleet-projection.js', import.meta.url), 'utf8');
 const helperSource = await readFile(new URL('../src/omp_deck/static/ui-helpers.js', import.meta.url), 'utf8');
 
+const todoSource = await readFile(new URL('../src/omp_deck/static/todo-ui.js', import.meta.url), 'utf8');
 function loadProjection(overrides = {}) {
   const context = vm.createContext({
     Date,
@@ -32,6 +33,12 @@ function loadUiHelpers() {
     composerDeliveryRoute: vm.runInContext('composerDeliveryRoute', context),
     drainComposerQueue: vm.runInContext('drainComposerQueue', context),
   };
+}
+function loadTodoUi() {
+  const window = {};
+  const context = vm.createContext({window});
+  vm.runInContext(todoSource, context, {filename: 'todo-ui.js'});
+  return window.TodoUI;
 }
 
 function session(overrides = {}) {
@@ -179,6 +186,15 @@ test('formats todo phases and statuses as deterministic plain text', () => {
     '    - [ ] Deploy safely (blocked)\n' +
     '    - [X] Announce');
   assert.equal(projected.session.todo.includes('<'), false);
+});
+test('renders task completion as a semantic CSP-safe progress element', () => {
+  const html = loadTodoUi().render(
+    '  Build:\n    - [X] First\n    - [ ] Second\n    - [ ] Third\n    - [ ] Fourth',
+    value => value,
+  );
+
+  assert.match(html, /<progress class="todo-progress" max="4" value="1"[^>]*>25%<\/progress>/);
+  assert.equal(html.includes('style='), false);
 });
 
 test('uses parsed update timestamps and a deterministic clock fallback', () => {

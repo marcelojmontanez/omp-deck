@@ -128,7 +128,35 @@ def validate_manifest(paths):
     return InstallationPaths(**recorded)
 
 
+def validate_ownership_claim(root, allowed_existing=()):
+    if _is_link_like(root):
+        raise RuntimeError(f"refusing to mark symlink or reparse point as owned: {root}")
+    if not root.exists():
+        return
+    info = root.stat(follow_symlinks=False)
+    owned = owned_by_current_user(root) if os.name == "nt" else info.st_uid == os.geteuid()
+    if not stat.S_ISDIR(info.st_mode) or not owned:
+        raise RuntimeError(f"owned path is unsafe: {root}")
+    if has_ownership_marker(root):
+        return
+    entries = list(root.iterdir())
+    allowed = {Path(path).absolute() for path in allowed_existing}
+    unexpected = [path for path in entries if path.absolute() not in allowed]
+    unsupported = [
+        path
+        for path in entries
+        if _is_link_like(path)
+        or not (
+            path.is_file()
+            or (os.name == "nt" and path.is_dir() and owned_by_current_user(path) and is_private_path(path))
+        )
+    ]
+    if unexpected or unsupported:
+        raise RuntimeError(f"refusing to claim non-empty unowned path: {root}")
+
+
 def mark_owned(root, allowed_existing=(), *, mode=None):
+    validate_ownership_claim(root, allowed_existing)
     if _is_link_like(root):
         raise RuntimeError(f"refusing to mark symlink or reparse point as owned: {root}")
     created = False
@@ -185,7 +213,7 @@ def has_ownership_marker(root):
         return False
 
 
-def remove_owned_root(root, approved_roots):
+def validate_owned_root(root, approved_roots):
     root = root.expanduser()
     approved = {path.expanduser().absolute() for path in approved_roots}
     absolute = root.absolute()
@@ -204,11 +232,17 @@ def remove_owned_root(root, approved_roots):
     try:
         resolved = root.resolve(strict=True)
     except FileNotFoundError:
-        return
+        return None
     if resolved in forbidden or len(resolved.parts) < 4:
         raise RuntimeError(f"refusing to purge unsafe path: {root}")
     if os.name == "nt" and (not owned_by_current_user(resolved) or not is_private_path(resolved)):
         raise RuntimeError(f"refusing to purge unsafe path: {root}")
     if not resolved.is_dir() or not has_ownership_marker(resolved):
         raise RuntimeError(f"refusing to purge unowned path: {root}")
-    shutil.rmtree(resolved)
+    return resolved
+
+
+def remove_owned_root(root, approved_roots):
+    resolved = validate_owned_root(root, approved_roots)
+    if resolved is not None:
+        shutil.rmtree(resolved)

@@ -514,6 +514,97 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     queueBehavior.failedRequests[0].body.requestId,
   );
 
+  const echoReconciliation = await page.evaluate(async () => {
+    const originalRequest = ompDeckApi.request;
+    const previousAgents = state.agents;
+    const previousSelectedId = state.selectedId;
+    const agent = {
+      id: 'echo-session', project: 'demo', label: 'Echo session',
+      status: 'idle', executionState: 'idle', inboxState: 'read',
+      bridgeConnected: true, capabilities: {sendMessage: true},
+      transport: {kind: 'rpc', status: 'connected', label: 'RPC'},
+      pendingUiRequest: null, subagents: [],
+      session: {
+        activity: [{
+          id: 'old-identical', kind: 'user', detail: 'duplicate',
+          time: '2099-01-01T00:00:00Z',
+        }],
+        todo: '', updatedMs: Date.now(),
+      },
+    };
+    state.agents = [agent];
+    state.selectedId = agent.id;
+    composer.select(agent.id);
+    const submit = message => {
+      el.message.value = message;
+      el.composer.requestSubmit();
+    };
+    try {
+      ompDeckApi.request = async () => (
+        {ok: true, status: 202, json: async () => ({})}
+      );
+      submit('duplicate');
+      submit('duplicate');
+      await new Promise(resolve => setTimeout(resolve, 0));
+      composer.reconcile(agent);
+      const afterOld = composer.pendingFor(agent.id).length;
+      agent.session.activity.push({
+        id: 'new-one', kind: 'user', detail: 'duplicate',
+        time: '1999-01-01T00:00:00Z',
+      });
+      composer.reconcile(agent);
+      const afterOne = composer.pendingFor(agent.id).length;
+      composer.reconcile(agent);
+      const afterRepeatedSnapshot = composer.pendingFor(agent.id).length;
+      agent.session.activity.push({
+        id: 'new-two', kind: 'user', detail: 'duplicate',
+        time: '1998-01-01T00:00:00Z',
+      });
+      composer.reconcile(agent);
+      const afterTwo = composer.pendingFor(agent.id).length;
+
+      submit('lost after truncation');
+      await new Promise(resolve => setTimeout(resolve, 0));
+      agent.session.activity = Array.from({length: 500}, (_, index) => ({
+        id: index === 0 ? 'old-identical' : `replacement-${index}`,
+        kind: 'user',
+        detail: index === 0 ? 'lost after truncation' : `post-submit-${index}`,
+        time: '1997-01-01T00:00:00Z',
+      }));
+      composer.reconcile(agent);
+      const afterTruncationWithoutEcho = composer.pendingFor(agent.id).length;
+      agent.session.activity.shift();
+      agent.session.activity.push({
+        id: 'delivered-after-truncation',
+        kind: 'user',
+        detail: 'lost after truncation',
+        time: '1996-01-01T00:00:00Z',
+      });
+      composer.reconcile(agent);
+      return {
+        afterOld,
+        afterOne,
+        afterRepeatedSnapshot,
+        afterTwo,
+        afterTruncationWithoutEcho,
+        afterDeliveredEcho: composer.pendingFor(agent.id).length,
+      };
+    } finally {
+      ompDeckApi.request = originalRequest;
+      state.agents = previousAgents;
+      state.selectedId = previousSelectedId;
+      composer.select(previousSelectedId);
+    }
+  });
+  assert.deepEqual(echoReconciliation, {
+    afterOld: 2,
+    afterOne: 1,
+    afterRepeatedSnapshot: 1,
+    afterTwo: 0,
+    afterTruncationWithoutEcho: 1,
+    afterDeliveredEcho: 0,
+  });
+
   const clearedQueue = await page.evaluate(async () => {
     const originalRequest = ompDeckApi.request;
     const agent = state.agents.find(item => item.id === 'queue-session');
@@ -815,6 +906,83 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   assert.equal(multiAsk.disconnectedHasForm, false);
   assert.deepEqual(multiAsk.inputTypes, ['checkbox', 'checkbox']);
   assert.deepEqual(multiAsk.value, ['first', 'second']);
+
+  const staleAsk = await page.evaluate(async () => {
+    const originalRequest = ompDeckApi.request;
+    const makePending = (id, label) => ({
+      id, kind: 'select', title: label, questionIndex: 0,
+      questions: [{prompt: label, options: [{label, value: id}]}],
+    });
+    const agent = {
+      id: 'stale-ask-session', bridgeConnected: true,
+      capabilities: {answerUiRequest: true},
+      pendingUiRequest: makePending('ask-a', 'Question A'),
+    };
+    state.agents = [agent];
+    state.selectedId = agent.id;
+    renderPendingRequest(agent);
+    el['pending-request'].querySelector('[name="pending-choice"]').checked = true;
+    agent.pendingUiRequest = makePending('ask-b', 'Question B');
+    const calls = [];
+    try {
+      ompDeckApi.request = async (path, options) => {
+        calls.push({path, body: JSON.parse(options.body)});
+        return {ok: true, status: 202, json: async () => ({})};
+      };
+      await settlePendingRequest();
+      renderPendingRequest(agent);
+      return {
+        calls,
+        heading: el['pending-request'].querySelector('strong')?.textContent,
+      };
+    } finally {
+      ompDeckApi.request = originalRequest;
+    }
+  });
+  assert.deepEqual(staleAsk.calls, []);
+  assert.equal(staleAsk.heading, 'Question B');
+
+  const cspProgress = await page.evaluate(() => {
+    const host = document.createElement('div');
+    host.innerHTML = TodoUI.render(
+      '  Build:\n    - [X] First\n    - [ ] Second\n    - [ ] Third\n    - [ ] Fourth',
+      escapeHtml,
+    );
+    document.body.append(host);
+    renderUsage({reports: [{
+      provider: 'test',
+      limits: [{label: 'Window', amount: {usedFraction: 0.25}}],
+    }]});
+    const todo = host.querySelector('progress');
+    const usage = document.querySelector('#usage-list progress');
+    const result = {
+      todo: {value: todo.value, max: todo.max, style: todo.getAttribute('style')},
+      usage: {value: usage.value, max: usage.max, style: usage.getAttribute('style')},
+    };
+    host.remove();
+    return result;
+  });
+
+  const disconnectedShutdown = await page.evaluate(() => {
+    const agent = {
+      id: 'disconnected-rpc-shutdown', project: 'demo', label: 'Stopped RPC',
+      bridgeConnected: false, nodeAvailable: true, executionState: 'disconnected',
+      inboxState: 'read', capabilities: {shutdown: true},
+      transport: {kind: 'rpc', status: 'disconnected', label: 'Disconnected'},
+      pendingUiRequest: null, subagents: [],
+      session: {activity: [], archiveActivity: [], updatedMs: Date.now()},
+    };
+    state.agents = [agent];
+    state.selectedId = agent.id;
+    renderDetail({selectionChanged: true});
+    const quit = el['session-menu'].querySelector('[data-session-action="quit"]');
+    return {disabled: quit.disabled, title: quit.title};
+  });
+  assert.deepEqual(disconnectedShutdown, {disabled: false, title: ''});
+  assert.deepEqual(cspProgress, {
+    todo: {value: 1, max: 4, style: null},
+    usage: {value: 25, max: 100, style: null},
+  });
 
   const askRetryIds = await page.evaluate(async () => {
     const originalRequest = ompDeckApi.request;

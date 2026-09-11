@@ -16,6 +16,7 @@ function createComposer({
   const retryBatches = new Map();
   const revokedAttachmentUrls = new Set();
   const queueTokens = new Map();
+  const reconciledMessageIds = new Map();
   const attachmentReaders = new Set();
   const attachmentReservations = new Map();
   let sessionId = null;
@@ -24,6 +25,11 @@ function createComposer({
   function queueToken(id) {
     if (!queueTokens.has(id)) queueTokens.set(id, {});
     return queueTokens.get(id);
+  }
+
+  function reconciledIdsFor(id) {
+    if (!reconciledMessageIds.has(id)) reconciledMessageIds.set(id, new Set());
+    return reconciledMessageIds.get(id);
   }
 
   function saveDraft(id, value) {
@@ -53,6 +59,7 @@ function createComposer({
     outboundQueues.clear();
     retryBatches.clear();
     queueTokens.clear();
+    reconciledMessageIds.clear();
     elements.message.value = '';
     elements['send-state'].textContent = '';
     renderAttachments();
@@ -185,20 +192,32 @@ function createComposer({
   function reconcile(agent) {
     const pending = pendingMessages.get(agent.id);
     if (!pending?.length) return;
-    const available = (agent.session?.activity || []).filter(event => event.kind === 'user');
+    const users = (agent.session?.activity || []).filter(event => event.kind === 'user');
+    const reconciledIds = reconciledIdsFor(agent.id);
     const delivered = [];
     const remaining = [];
-    for (const item of pending) {
-      const index = available.findIndex(event =>
+    for (let pendingIndex = 0; pendingIndex < pending.length; pendingIndex += 1) {
+      const item = pending[pendingIndex];
+      const baselineIndex = item.baselineMessageId
+        ? users.findIndex(event => event.id === item.baselineMessageId)
+        : -1;
+      const available = item.baselineMessageId && baselineIndex >= 0
+        ? users.slice(baselineIndex + 1)
+        : users;
+      const echo = available.find(event =>
         !item.knownMessageIds.has(event.id)
+        && !reconciledIds.has(event.id)
         && event.detail === item.text
-        && Date.parse(event.time || 0) >= item.createdAt - 5000
       );
-      if (index < 0) remaining.push(item);
-      else {
-        available.splice(index, 1);
-        delivered.push(item);
+      if (!echo) {
+        remaining.push(...pending.slice(pendingIndex));
+        break;
       }
+      reconciledIds.add(echo.id);
+      if (reconciledIds.size > 1000) {
+        reconciledIds.delete(reconciledIds.values().next().value);
+      }
+      delivered.push(item);
     }
     if (delivered.length) {
       delivered.flatMap(item => item.attachments).forEach(revokeAttachment);
@@ -346,6 +365,9 @@ function createComposer({
       knownMessageIds: new Set(
         (agent.session?.activity || []).filter(event => event.kind === 'user').map(event => event.id)
       ),
+      baselineMessageId: [...(agent.session?.activity || [])]
+        .reverse()
+        .find(event => event.kind === 'user')?.id || null,
     };
     pendingFor(id).push(pending);
     saveDraft(id, '');
@@ -410,9 +432,11 @@ function createComposer({
     const valid = new Set(validIds);
     for (const id of new Set([
       ...drafts.keys(), ...attachments.keys(), ...pendingMessages.keys(), ...outboundQueues.keys(),
+      ...reconciledMessageIds.keys(),
     ])) {
       if (valid.has(id)) continue;
       queueTokens.delete(id);
+      reconciledMessageIds.delete(id);
       (attachments.get(id) || []).forEach(revokeAttachment);
       (pendingMessages.get(id) || []).flatMap(item => item.attachments || []).forEach(revokeAttachment);
       (outboundQueues.get(id) || []).flatMap(job => job.outgoingAttachments || []).forEach(revokeAttachment);

@@ -24,7 +24,7 @@ function renderUsage(payload) {
     const reset = limit.window?.resetsAt ? ` · ${usageResetTime(limit.window.resetsAt)}` : '';
     return `<div class="usage-item">
       <div class="usage-label"><strong>${escapeHtml(limit.label)}</strong><span>${used}%${reset}</span></div>
-      <div class="usage-bar"><div class="usage-fill" style="width:${Math.min(100, Math.max(0, used))}%"></div></div>
+      <progress class="usage-bar" max="100" value="${Math.min(100, Math.max(0, used))}" aria-label="${escapeHtml(limit.label)} usage: ${used}%">${used}%</progress>
     </div>`;
   }).join('');
 }

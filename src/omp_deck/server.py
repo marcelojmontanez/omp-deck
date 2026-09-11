@@ -7,6 +7,7 @@ from urllib.parse import urlparse, urlsplit
 from ._fleet_trust import FleetTrustStore
 from ._http_common import DeckHttpHandler
 from ._http_common import ThreadingHTTPServer as ThreadingHTTPServer
+from ._rpc_dispatch import SessionCommandConflictError, SessionNotConnectedError
 from ._sse import send_stream
 from ._terminal_commands import TerminalCommandConflict
 from .attachments import detect_image_mime, read_blob
@@ -17,11 +18,7 @@ from .fleet_protocol import verify_ticket
 from .normalized_actions import NormalizedActionDispatcher
 from .projects import list_launchable_projects, resolve_project_path
 from .read_cursors import CursorStore
-from .rpc_sessions import (
-    RpcSessionManager,
-    SessionCommandConflictError,
-    SessionNotConnectedError,
-)
+from .rpc_sessions import RpcSessionManager
 from .settings import load_settings
 from .terminal_sessions import (
     TerminalSessionManager,

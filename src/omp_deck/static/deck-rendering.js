@@ -153,7 +153,11 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     const menuCapabilities = {clear: 'compact', interrupt: 'interrupt', quit: 'shutdown'};
     for (const [action, capability] of Object.entries(menuCapabilities)) {
       const button = el['session-menu'].querySelector(`[data-session-action="${action}"]`);
-      const available = Boolean(agent?.nodeAvailable !== false && agent?.bridgeConnected && capabilities[capability]);
+      const available = Boolean(
+        agent?.nodeAvailable !== false
+        && capabilities[capability]
+        && (action === 'quit' || agent?.bridgeConnected)
+      );
       button.disabled = !available || (action === 'interrupt' && executionState !== 'working');
       button.title = button.disabled ? `${action} is unavailable for this session` : '';
     }
@@ -278,11 +282,17 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
   function renderFleet() {
     state.agents.forEach(getComposer().reconcile);
     getComposer().prune(state.agents.map(agent => agent.id));
+    renderPendingRequest(selectedAgent());
     if (state.pendingSelection) {
       const requested = state.agents.find(agent => agent.id === state.pendingSelection);
       if (requested) {
         selectAgent(requested.id, {pushHistory: false});
-      } else if (ompDeckApi.machines().every(machine => ['live', 'offline', 'unavailable'].includes(machine.status))) {
+      } else if (
+        ompDeckApi.machines().every(machine =>
+          ['offline', 'unavailable'].includes(machine.status)
+          || nodeState(machine.id).hasSnapshot
+        )
+      ) {
         state.pendingSelection = null;
         const url = new URL(location.href);
         url.searchParams.delete('session');
@@ -328,6 +338,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     const machine = ompDeckApi.machine(machineId);
     if (!machine) return;
     noteSnapshotGeneration(machineId, payload.snapshotGeneration);
+    node.hasSnapshot = true;
     const projected = (payload.sessions || []).map(session => projectSession(session, machine));
     const projectedIds = new Set(projected.map(agent => agent.id));
     for (const agent of state.agents) {

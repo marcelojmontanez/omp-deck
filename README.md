@@ -25,7 +25,7 @@ Python normalizes all transports into one session model. The browser uses advert
 | Green, **RPC session** | Deck launches and supervises `omp --mode rpc`. Full managed controls, remote Ask responses, model/thinking controls, todos, subagents, and image prompts are available when advertised. |
 | Amber, **Terminal session via Collab** | A terminal-owned OMP session connected through an imported writable Collab link. Published pi-wire permissions and request settlement rules apply. The link remains server-side. Todo reporting is unavailable on this transport. |
 | Amber, **Terminal session via extension** | A terminal-owned session discovered through the bundled OMP plugin and a private Unix socket on Linux/macOS or same-user named pipe on Windows. Only extension-advertised controls are enabled. Ask is visible but must be answered in the terminal. |
-| Red, **Disconnected** | The transport is unavailable. Session state remains visible when persisted, but mutating controls are disabled. |
+| Red, **Disconnected** | The transport is unavailable. Persisted state remains visible. Managed-session shutdown can still cancel automatic recovery; other controls require their advertised availability. |
 
 Capabilities can differ by transport, authorization, connection state, platform, and protocol version. Unavailable controls are disabled rather than silently emulated. Extension disconnects never abort the terminal session. Collab failures affect only the imported Collab session.
 
@@ -243,6 +243,8 @@ Project names are resolved beneath `project_root`; traversal, symlink escapes, b
 
 Restart Deck after a configuration change with `omp-deck service restart`.
 
+On Linux/macOS, generated services preserve the configured XDG directories, `PI_CODING_AGENT_DIR`, and the `OMP_PROFILE`/`PI_PROFILE` selectors. After changing these environment variables, rerun `omp-deck setup`; restarting alone retains the installed environment. Image blobs follow OMP's active profile and existing XDG data layout, so OMP and Deck must use matching profile settings. A configured `omp_bin` beginning with `~` expands to your home directory; a bare command name is resolved through `PATH`.
+
 On Linux/macOS, the extension and Deck must share the same `XDG_STATE_HOME`; the extension publishes under `omp-deck/sockets` within that directory. A custom `socket_root` must point there. The complete Unix socket pathname must fit within 103 UTF-8 bytes on macOS or 107 on Linux. An oversized path leaves the extension unavailable with an explicit warning; use a shorter shared state directory.
 
 When upgrading from Deck 1.1.x, rerun `omp-deck setup` and restart terminal-owned OMP sessions to load the new plugin. Older Unix endpoint names are no longer discovered.
@@ -353,11 +355,28 @@ uv tool install --force 'git+https://github.com/marcelojmontanez/omp-deck.git@PR
 
 `service remove` removes only Deck's generated user service. `purge` removes the service, official plugin registration, configuration, and state only after strict ownership and path checks:
 
+Setup rejects unsafe existing installation files before attempting replacement or rollback. Purge stops on a failed service shutdown or an unreadable plugin inventory rather than deleting state. An optional plugin that is confirmed absent does not prevent purge.
+
 ```bash
 omp-deck purge
 uv tool uninstall omp-deck
 # or: pipx uninstall omp-deck
 ```
+
+## Regression verification
+
+Run the Python/JavaScript repository gate, actual Chromium scenarios, and extension socket tests separately:
+
+```bash
+python3 tools/check.py
+npm ci
+npx puppeteer browsers install chrome
+npm run test:browser
+npm --prefix src/omp_deck/plugin ci
+npm --prefix src/omp_deck/plugin run check
+```
+
+Browser and extension scenarios use temporary state and local listeners. Native Windows tests exercise process containment and named pipes; native macOS LaunchAgent lifecycle tests require a graphical login and `OMP_DECK_MACOS_LAUNCHD_SMOKE=1`. Run native gates on their actual operating systems; skipped native tests do not establish portability.
 
 ## Architecture and limitations
 

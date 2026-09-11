@@ -116,5 +116,62 @@ class BlobReaderTests(unittest.TestCase):
         self.assertIsNone(attachments.detect_image_mime(b"not-an-image"))
 
 
+class BlobDirectoryResolutionTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.payload = b"\x89PNG\r\n\x1a\nprofile image"
+        self.digest = hashlib.sha256(self.payload).hexdigest()
+
+    def _write_blob(self, root):
+        root.mkdir(parents=True, mode=0o700)
+        root.chmod(0o700)
+        candidate = root / f"{self.digest}.png"
+        candidate.write_bytes(self.payload)
+        candidate.chmod(0o600)
+
+    def test_reads_blob_from_official_named_profile_directory(self):
+        blobs = self.root / ".omp" / "profiles" / "work" / "agent" / "blobs"
+        self._write_blob(blobs)
+        with (
+            patch.object(attachments, "BLOB_ROOT", None),
+            patch.object(attachments.Path, "home", return_value=self.root),
+            patch.dict(os.environ, {"OMP_PROFILE": "work"}, clear=True),
+        ):
+            self.assertEqual(
+                attachments.read_blob(self.digest),
+                (f"{self.digest}.png", self.payload),
+            )
+
+    def test_reads_blob_from_existing_official_xdg_root(self):
+        data_home = self.root / "data"
+        blobs = data_home / "omp" / "blobs"
+        self._write_blob(blobs)
+        with (
+            patch.object(attachments, "BLOB_ROOT", None),
+            patch.object(attachments.Path, "home", return_value=self.root),
+            patch.dict(os.environ, {"XDG_DATA_HOME": str(data_home)}, clear=True),
+        ):
+            self.assertEqual(
+                attachments.read_blob(self.digest),
+                (f"{self.digest}.png", self.payload),
+            )
+
+    @unittest.skipIf(os.name == "nt", "POSIX symlink confinement")
+    def test_rejects_symlinked_official_blob_root(self):
+        outside = self.root / "outside"
+        self._write_blob(outside)
+        agent = self.root / ".omp" / "agent"
+        agent.mkdir(parents=True)
+        (agent / "blobs").symlink_to(outside, target_is_directory=True)
+        with (
+            patch.object(attachments, "BLOB_ROOT", None),
+            patch.object(attachments.Path, "home", return_value=self.root),
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            self.assertIsNone(attachments.read_blob(self.digest))
+
+
 if __name__ == "__main__":
     unittest.main()

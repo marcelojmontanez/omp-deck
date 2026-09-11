@@ -36,31 +36,38 @@ def discover_extension_candidates(
     *,
     open_file: _OpenFile = os.open,
     effective_uid: int | None = None,
-) -> dict[str, tuple[Path, dict[str, Any]]]:
-    """Return the newest securely validated registration for each OMP session."""
+    all_candidates: bool = False,
+) -> dict[str, Any]:
+    """Return securely validated registrations, newest first when requested."""
     if os.name == "nt":
-        return _discover_windows_candidates(root)
+        return _discover_windows_candidates(root, all_candidates=all_candidates)
     uid = os.geteuid() if effective_uid is None else effective_uid
     if not _safe_discovery_root(root, uid):
         return {}
-    candidates: dict[str, tuple[Path, dict[str, Any], int]] = {}
+    candidates: dict[str, list[tuple[Path, dict[str, Any], int]]] = {}
     for metadata_path in root.glob("*.sock.json"):
         candidate = _validated_candidate(metadata_path, open_file, uid)
         if candidate is None:
             continue
         session_id, socket_path, metadata, modified_ns = candidate
-        prior = candidates.get(session_id)
-        if prior is None or modified_ns > prior[2]:
-            candidates[session_id] = (socket_path, metadata, modified_ns)
-    return {session_id: (socket_path, metadata) for session_id, (socket_path, metadata, _) in candidates.items()}
+        candidates.setdefault(session_id, []).append((socket_path, metadata, modified_ns))
+    ordered = {
+        session_id: sorted(values, key=lambda item: item[2], reverse=True) for session_id, values in candidates.items()
+    }
+    if all_candidates:
+        return {
+            session_id: tuple((socket_path, metadata) for socket_path, metadata, _ in values)
+            for session_id, values in ordered.items()
+        }
+    return {session_id: (values[0][0], values[0][1]) for session_id, values in ordered.items()}
 
 
-def _discover_windows_candidates(root: Path) -> dict[str, tuple[Path, dict[str, Any]]]:
+def _discover_windows_candidates(root: Path, *, all_candidates: bool = False) -> dict[str, Any]:
     from ._windows_security import is_private_path, owned_by_current_user
 
     if not is_private_path(root):
         return {}
-    candidates: dict[str, tuple[Path, dict[str, Any], int]] = {}
+    candidates: dict[str, list[tuple[Path, dict[str, Any], int]]] = {}
     for metadata_path in root.glob("*.pipe.json"):
         try:
             info = metadata_path.lstat()
@@ -99,12 +106,18 @@ def _discover_windows_candidates(root: Path) -> dict[str, tuple[Path, dict[str, 
             expected_endpoint = rf"\\.\pipe\{expected_name[:-5]}"
             if metadata_path.name != expected_name or endpoint != expected_endpoint:
                 continue
-            prior = candidates.get(session_id)
-            if prior is None or info.st_mtime_ns > prior[2]:
-                candidates[session_id] = (Path(endpoint), metadata, info.st_mtime_ns)
+            candidates.setdefault(session_id, []).append((Path(endpoint), metadata, info.st_mtime_ns))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
             continue
-    return {session_id: (endpoint, metadata) for session_id, (endpoint, metadata, _modified) in candidates.items()}
+    ordered = {
+        session_id: sorted(values, key=lambda item: item[2], reverse=True) for session_id, values in candidates.items()
+    }
+    if all_candidates:
+        return {
+            session_id: tuple((endpoint, metadata) for endpoint, metadata, _ in values)
+            for session_id, values in ordered.items()
+        }
+    return {session_id: (values[0][0], values[0][1]) for session_id, values in ordered.items()}
 
 
 def _safe_discovery_root(root: Path, uid: int) -> bool:

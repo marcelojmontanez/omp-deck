@@ -126,7 +126,7 @@ def _optional_title(data):
     title = data.get("title")
     if title is None:
         return None
-    return bounded_text(title.strip(), "title", 200)
+    return bounded_text(title.strip() if isinstance(title, str) else title, "title", 200)
 
 
 def _failed(request_id, error_code):

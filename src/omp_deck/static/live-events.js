@@ -10,6 +10,7 @@ function nodeState(machineId) {
     state.nodes.set(machineId, {
       presentationRevision: 0,
       snapshotGeneration: 0,
+      hasSnapshot: false,
       refreshPromise: null,
       refreshPending: false,
       stream: null,

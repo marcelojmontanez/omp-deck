@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .collab_adapter import CollabAdapter
 from .extension_adapter import ExtensionAdapter
@@ -73,3 +75,41 @@ def _registry_record(registry: RegistryStore, session_id: str) -> dict[str, obje
         if record["id"] == session_id:
             return record
     raise KeyError(session_id)
+
+
+def _upsert_extension_record(
+    registry: RegistryStore,
+    session_id: str,
+    metadata: Mapping[str, Any],
+    project_root: Path,
+    connection_id: str,
+) -> dict[str, object]:
+    raw_title = metadata.get("title")
+    title = raw_title if isinstance(raw_title, str) and raw_title else "Terminal session"
+    raw_project = metadata.get("project")
+    project_path = raw_project if isinstance(raw_project, str) else str(project_root)
+    adapter_kind = "extension"
+    omp_session_id = str(metadata["sessionId"])
+    project_name = Path(project_path).name or "Terminal"
+    recovery_metadata = {"connectionId": connection_id}
+    try:
+        _registry_record(registry, session_id)
+    except KeyError:
+        return registry.create(
+            session_id=session_id,
+            adapter_kind=adapter_kind,
+            omp_session_id=omp_session_id,
+            project_name=project_name,
+            project_path=project_path,
+            title=title,
+            recovery_metadata=recovery_metadata,
+        )
+    return registry.update(
+        session_id,
+        adapter_kind=adapter_kind,
+        omp_session_id=omp_session_id,
+        project_name=project_name,
+        project_path=project_path,
+        title=title,
+        recovery_metadata=recovery_metadata,
+    )

@@ -33,6 +33,7 @@ class RpcClientLike(SubagentClient, Protocol):
     def on_ui_request(self, listener: Callable[[ExtensionUiRequest], None]) -> Callable[[], None]: ...
     def on_protocol_error(self, listener: Callable[[RpcProtocolError], None]) -> Callable[[], None]: ...
     def on_extension_error(self, listener: Callable[[ExtensionError], None]) -> Callable[[], None]: ...
+    def next_ui_request(self, timeout: float | None = None) -> ExtensionUiRequest: ...
     def get_state(self) -> Any: ...
     def get_messages(self) -> Sequence[Any]: ...
     def get_todos(self) -> Sequence[Any]: ...
@@ -419,6 +420,18 @@ class SessionAdapter:
         self._emit("extension_error", payload if isinstance(payload, dict) else {"error": str(error)})
 
     def _ingest_ui_request(self, request: ExtensionUiRequest) -> None:
+        # SDK queues notifications before callbacks; drain here so retained UI state has one bounded owner.
+        next_request = getattr(self._client, "next_ui_request", None)
+        if callable(next_request):
+            try:
+                queued = next_request(timeout=0)
+            except RpcTimeoutError:
+                queued = None
+            if queued is not None and queued.id != request.id:
+                self._emit(
+                    "protocol_error",
+                    {"error": "RPC UI callback and queue delivery were inconsistent"},
+                )
         if request.method == "cancel":
             target = request.target_id or request.id
             with self._lock:

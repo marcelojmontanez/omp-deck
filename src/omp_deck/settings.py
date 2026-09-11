@@ -35,6 +35,14 @@ def expanded(value):
     return Path(os.path.abspath(Path(value).expanduser()))
 
 
+def executable(value):
+    value = str(value)
+    expanded_value = str(Path(value).expanduser())
+    if expanded_value == value:
+        return value
+    return os.path.abspath(expanded_value)
+
+
 def allowed_hosts(values, host):
     configured = values.get("allowed_hosts", [])
     if not isinstance(configured, list) or any(
@@ -113,6 +121,6 @@ def load_settings(path=None):
         state_root=expanded(values.get("state_root", state_root)),
         project_root=expanded(values.get("project_root", home / "dev")),
         project_discovery_depth=project_discovery_depth,
-        omp_bin=str(values.get("omp_bin", shutil.which("omp") or default_omp_path())),
+        omp_bin=executable(values.get("omp_bin", shutil.which("omp") or default_omp_path())),
         allowed_hosts=allowed_hosts(values, str(values.get("host", "127.0.0.1"))),
     )

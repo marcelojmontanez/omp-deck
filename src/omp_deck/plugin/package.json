@@ -19,10 +19,13 @@
   },
   "files": [
     "omp-deck.ts",
-    "named-pipe-auth.ts"
+    "named-pipe-auth.ts",
+    "bounded-writer.ts",
+    "bounded-event-queue.ts",
+    "history-sync.ts"
   ],
   "scripts": {
-    "check": "tsc --noEmit && node --test --experimental-strip-types ../../../tests/plugin_behavior_test.mjs",
+    "check": "tsc --noEmit && node --test --experimental-strip-types ../../../tests/plugin_behavior_test.mjs ../../../tests/plugin_backpressure_test.mjs",
     "typecheck": "tsc --noEmit",
     "validate": "tsc --noEmit"
   },

@@ -112,8 +112,8 @@ def _model_identity(state: Mapping[str, Any]) -> dict[str, Any] | None:
 def _message_content(message: Mapping[str, Any]) -> list[Any]:
     content = message.get("content")
     if isinstance(content, str):
-        values: list[Any] = [{"type": "text", "text": content}]
-    elif isinstance(content, list):
+        values: Sequence[Any] = [{"type": "text", "text": content}]
+    elif isinstance(content, Sequence) and not isinstance(content, (str, bytes, bytearray)):
         values = content
     else:
         text = message.get("output") or message.get("summary") or message.get("command")
@@ -127,6 +127,14 @@ def _message_content(message: Mapping[str, Any]) -> list[Any]:
         elif value.get("type") == "image":
             data = value.get("data")
             digest = data.removeprefix("blob:sha256:") if isinstance(data, str) else ""
+            url = value.get("url")
+            if (
+                not digest
+                and isinstance(url, str)
+                and url.startswith("/api/blob/")
+                and len(url) == len("/api/blob/") + 64
+            ):
+                digest = url.removeprefix("/api/blob/")
             if len(digest) == 64 and all(character in "0123456789abcdef" for character in digest):
                 result.append({"type": "image", "url": f"/api/blob/{digest}"})
             else:
@@ -142,7 +150,10 @@ def normalize_messages(values: Sequence[Mapping[str, Any]], session_id: str) -> 
     retained_bytes = 0
     start = max(0, len(values) - MAX_MESSAGES)
     for index, raw in enumerate(values[start:], start=start):
-        canonical = json.dumps(raw, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        canonical_raw = plain_json(raw)
+        canonical = json.dumps(
+            canonical_raw, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+        )
         raw_id = raw.get("id")
         message_id = (
             raw_id

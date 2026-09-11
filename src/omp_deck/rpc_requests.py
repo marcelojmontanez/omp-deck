@@ -35,6 +35,7 @@ class RpcRequestCoordinator:
         self._lock = threading.Lock()
         self._launch_locks: dict[str, threading.Lock] = {}
         self._command_locks: dict[str, threading.Lock] = {}
+        self._priority_command_locks: dict[str, threading.Lock] = {}
 
     def launch(
         self,
@@ -105,10 +106,12 @@ class RpcRequestCoordinator:
         *,
         prepare: Callable[[], Any] | None = None,
         execute: Callable[[Any, str, Mapping[str, Any]], dict[str, Any]],
+        priority: bool = False,
     ) -> dict[str, Any]:
         fingerprint = _fingerprint({"action": action, "payload": payload})
         with self._lock:
-            command_lock = self._command_locks.setdefault(session_id, threading.Lock())
+            locks = self._priority_command_locks if priority else self._command_locks
+            command_lock = locks.setdefault(session_id, threading.Lock())
         with command_lock:
             scope = f"rpc-command:{session_id}"
             persisted = self.ledger.lookup(scope, request_id, fingerprint)

@@ -251,6 +251,20 @@ class ExtensionAdapterTests(unittest.TestCase):
                 adapter.close()
                 peer.close()
 
+    def test_callback_projection_failure_degrades_and_disconnects(self):
+        peer = self.make_peer()
+
+        def fail_projection(_event):
+            raise TypeError("not JSON serializable")
+
+        adapter = self.make_adapter(peer, on_event=fail_projection)
+        with self.assertRaisesRegex(ExtensionProtocolError, "event callback failed"):
+            adapter.start()
+        snapshot = adapter.snapshot()
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot.transport_status, "degraded")
+        self.assertEqual(snapshot.reason, "startup failed")
+
     def test_frame_bound_checked_and_sequence_gap_is_explicit(self):
         peer = self.make_peer()
         adapter = self.make_adapter(peer, frame_limit=1024)
@@ -332,15 +346,10 @@ class ExtensionAdapterTests(unittest.TestCase):
         adapter.close()
         peer.close()
 
-    def test_callback_errors_are_contained_and_values_deeply_immutable(self):
+    def test_callback_values_are_deeply_immutable(self):
         peer = self.make_peer()
         seen = []
-
-        def callback(value):
-            seen.append(value)
-            raise RuntimeError("boom")
-
-        adapter = self.make_adapter(peer, on_event=callback)
+        adapter = self.make_adapter(peer, on_event=seen.append)
         adapter.start()
         peer.send(event(2, "message", {"nested": [{"secret": "value"}]}))
         deadline = time.monotonic() + 1

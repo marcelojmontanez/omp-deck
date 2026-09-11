@@ -11,9 +11,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from omp_deck import server
+from omp_deck._rpc_dispatch import SessionCommandConflictError
 from omp_deck._terminal_commands import TerminalCommandConflict
 from omp_deck.fleet_model import FleetModel
-from omp_deck.rpc_sessions import SessionCommandConflictError
 
 
 class _Manager:
@@ -163,6 +163,18 @@ class NormalizedHttpTests(unittest.TestCase):
         self.assertEqual(projects["rootLabel"], "projects-private-root/")
         self.assertEqual(projects["discoveryDepth"], 2)
         self.assertNotIn(str(self.project_root), json.dumps(projects))
+
+    def test_invalid_titles_return_validation_errors_without_dispatch(self):
+        for route in ("/api/projects/demo/sessions", "/api/terminal-sessions/collab"):
+            for title in (7, True, [], {}, " \t "):
+                with self.subTest(route=route, title=title):
+                    status, _, payload = self.post(
+                        route, {"requestId": "invalid-title", "link": "omp://collab/test", "title": title}
+                    )
+                    self.assertEqual(status, 400)
+                    self.assertIn("error", payload)
+        self.assertEqual(self.terminal.imports, [])
+        self.assertFalse((self.project_root / "demo").exists())
 
     def test_listed_nested_project_can_be_launched_through_encoded_route(self):
         nested = self.project_root / "team/service"

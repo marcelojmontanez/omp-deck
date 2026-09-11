@@ -5,7 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from omp_deck import cli
+from omp_deck import cli, lifecycle
+from omp_deck.installation_paths import installation_paths
 from omp_deck.settings import load_settings
 
 
@@ -106,6 +107,7 @@ class CommandTests(unittest.TestCase):
             patch.object(cli, "load_settings", return_value=settings),
             patch.object(cli, "config_path", return_value=Path("/tmp/config.json")),
             patch.object(cli.shutil, "which", return_value="/usr/bin/tool"),
+            patch.object(cli, "preflight_service_install"),
             patch.object(cli, "plugin_installed", return_value=False),
             patch.object(cli, "capture_service_state", return_value=service_snapshot),
             patch.object(cli, "backup_plugin", return_value=None),
@@ -146,6 +148,7 @@ class CommandTests(unittest.TestCase):
             patch.object(cli, "load_settings", return_value=settings),
             patch.object(cli, "config_path", return_value=Path("/tmp/config.json")),
             patch.object(cli.shutil, "which", return_value="/usr/bin/tool"),
+            patch.object(cli, "preflight_service_install"),
             patch.object(cli, "plugin_installed", return_value=False),
             patch.object(cli, "capture_service_state", return_value=service_snapshot),
             patch.object(cli, "AuthManager", return_value=manager),
@@ -161,6 +164,57 @@ class CommandTests(unittest.TestCase):
         restore_service.assert_called_once_with(service_snapshot)
         restore_plugin.assert_not_called()
         install_plugin.assert_not_called()
+
+    def test_setup_rejects_invalid_existing_installation_without_stopping_or_mutating_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            environment = {
+                "HOME": str(home),
+                "XDG_DATA_HOME": str(home / "data"),
+                "XDG_CONFIG_HOME": str(home / "config"),
+                "XDG_STATE_HOME": str(home / "state"),
+                "OMP_DECK_BIN_DIR": str(home / "bin"),
+            }
+            config = home / "config/omp-deck/config.json"
+            state = home / "foreign-state"
+            state.mkdir()
+            sentinel = state / "keep.txt"
+            sentinel.write_text("foreign\n")
+            settings = SimpleNamespace(omp_bin="/usr/bin/omp", state_root=state)
+            with patch.dict(cli.os.environ, environment, clear=False):
+                paths = installation_paths(config_file=config, state_root=state)
+                paths.unit_path.parent.mkdir(parents=True)
+                paths.install_root.mkdir(parents=True)
+                paths.unit_path.write_text("foreign service\n")
+                paths.manifest_path.write_text("{}")
+                commands = []
+
+                def subprocess_boundary(command, **_kwargs):
+                    commands.append(command)
+                    if command[-3:] == ["plugin", "list", "--json"]:
+                        return SimpleNamespace(returncode=0, stdout=json.dumps({"npm": []}))
+                    if command[:3] == ["systemctl", "--user", "is-enabled"]:
+                        return SimpleNamespace(returncode=0, stdout="enabled\n")
+                    if command[:3] == ["systemctl", "--user", "is-active"]:
+                        return SimpleNamespace(returncode=0, stdout="active\n")
+                    return SimpleNamespace(returncode=0, stdout="")
+
+                with (
+                    patch.object(cli, "load_settings", return_value=settings),
+                    patch.object(cli, "config_path", return_value=config),
+                    patch.object(cli.shutil, "which", return_value="/usr/bin/tool"),
+                    patch.object(lifecycle.subprocess, "run", side_effect=subprocess_boundary),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "invalid"):
+                        cli.setup()
+
+            self.assertNotIn(
+                ["systemctl", "--user", "stop", "omp-deck.service"],
+                commands,
+            )
+            self.assertEqual(paths.unit_path.read_text(), "foreign service\n")
+            self.assertEqual(paths.manifest_path.read_text(), "{}")
+            self.assertEqual(sentinel.read_text(), "foreign\n")
 
     def test_setup_keeps_restored_plugin_backup_after_late_failure(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -180,6 +234,7 @@ class CommandTests(unittest.TestCase):
                 patch.object(cli, "load_settings", return_value=settings),
                 patch.object(cli, "config_path", return_value=root / "config.json"),
                 patch.object(cli.shutil, "which", return_value="/usr/bin/tool"),
+                patch.object(cli, "preflight_service_install"),
                 patch.object(cli, "plugin_installed", return_value=True),
                 patch.object(cli, "capture_service_state", return_value=service_snapshot),
                 patch.object(cli, "backup_plugin", return_value=plugin_backup),
@@ -205,6 +260,7 @@ class CommandTests(unittest.TestCase):
             patch.object(cli, "load_settings", return_value=settings),
             patch.object(cli, "config_path", return_value=Path("/tmp/config.json")),
             patch.object(cli.shutil, "which", return_value="/usr/bin/tool"),
+            patch.object(cli, "preflight_service_install"),
             patch.object(cli, "plugin_installed", return_value=True),
             patch.object(cli, "capture_service_state", return_value=object()),
             patch.object(cli, "backup_plugin", return_value=None),
@@ -226,6 +282,7 @@ class CommandTests(unittest.TestCase):
             patch.object(cli, "load_settings", return_value=settings),
             patch.object(cli, "config_path", return_value=Path("/tmp/config.json")),
             patch.object(cli.shutil, "which", return_value="/usr/bin/tool"),
+            patch.object(cli, "preflight_service_install"),
             patch.object(cli, "plugin_installed", return_value=False),
             patch.object(cli, "capture_service_state", return_value=object()),
             patch.object(cli, "AuthManager", return_value=manager),
@@ -245,6 +302,7 @@ class CommandTests(unittest.TestCase):
             patch.object(cli, "load_settings", return_value=settings),
             patch.object(cli, "config_path", return_value=Path("/tmp/config.json")),
             patch.object(cli.shutil, "which", return_value="/usr/bin/tool"),
+            patch.object(cli, "preflight_service_install"),
             patch.object(cli, "plugin_installed", return_value=False),
             patch.object(cli, "capture_service_state", return_value=object()),
             patch.object(cli, "backup_plugin", return_value=None),

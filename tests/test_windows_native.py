@@ -89,13 +89,81 @@ class WindowsPlatformTests(unittest.TestCase):
         self.assertTrue(platform_capabilities("rpc")["attachments"])
         self.assertTrue(platform_capabilities("collab")["attachments"])
 
-    def test_job_wrapper_terminates_descendant_processes(self):
+    def test_job_wrapper_does_not_run_child_before_job_assignment(self):
+        from omp_deck import _windows_job
+
         with tempfile.TemporaryDirectory() as temporary:
-            marker = Path(temporary) / "descendant.pid"
+            marker = Path(temporary) / "ran-before-assignment"
+            assignment_entered = threading.Event()
+            release_assignment = threading.Event()
+            failure: list[BaseException] = []
+            assign = _windows_job._assign
+
+            def paused_assign(job, process):
+                assignment_entered.set()
+                if not release_assignment.wait(5):
+                    raise TimeoutError("test did not release job assignment")
+                return assign(job, process)
+
+            def supervise():
+                try:
+                    _windows_job.main(
+                        [
+                            sys.executable,
+                            "-c",
+                            "from pathlib import Path; import sys; Path(sys.argv[1]).touch()",
+                            str(marker),
+                        ]
+                    )
+                except BaseException as error:
+                    failure.append(error)
+
+            with patch.object(_windows_job, "_assign", side_effect=paused_assign):
+                supervisor = threading.Thread(target=supervise)
+                supervisor.start()
+                try:
+                    self.assertTrue(assignment_entered.wait(5), "supervisor never attempted assignment")
+                    time.sleep(0.5)
+                    self.assertFalse(marker.exists(), "child executed while job assignment was paused")
+                finally:
+                    release_assignment.set()
+                    supervisor.join(5)
+
+            self.assertFalse(supervisor.is_alive(), "supervisor did not finish")
+            self.assertEqual(failure, [])
+            self.assertTrue(marker.exists(), "child was not resumed after job assignment")
+
+    def test_job_wrapper_preserves_standard_streams(self):
+        payload = b'RPC request with spaces and "quotes"\\n'
+        wrapper = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "omp_deck._windows_job",
+                sys.executable,
+                "-c",
+                "import sys; data=sys.stdin.buffer.read(); "
+                "sys.stdout.buffer.write(data.upper()); "
+                "sys.stderr.buffer.write(b'error-channel')",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        stdout, stderr = wrapper.communicate(payload, timeout=10)
+        self.assertEqual(wrapper.returncode, 0)
+        self.assertEqual(stdout, payload.upper())
+        self.assertEqual(stderr, b"error-channel")
+
+    def test_job_wrapper_terminates_immediate_child_and_grandchild(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            marker = Path(temporary) / "descendants.json"
+            grandchild_code = "import time; time.sleep(60)"
             child_code = (
-                "import subprocess,sys,time; from pathlib import Path; "
-                "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
-                "Path(sys.argv[1]).write_text(str(child.pid)); time.sleep(60)"
+                "import json,subprocess,sys,time; from pathlib import Path; "
+                "grandchild=subprocess.Popen([sys.executable,'-c',sys.argv[2]]); "
+                "Path(sys.argv[1]).write_text(json.dumps([__import__('os').getpid(),grandchild.pid])); "
+                "time.sleep(60)"
             )
             wrapper = subprocess.Popen(
                 [
@@ -106,6 +174,7 @@ class WindowsPlatformTests(unittest.TestCase):
                     "-c",
                     child_code,
                     str(marker),
+                    grandchild_code,
                 ]
             )
             self.addCleanup(lambda: wrapper.poll() is None and wrapper.kill())
@@ -113,13 +182,38 @@ class WindowsPlatformTests(unittest.TestCase):
             while not marker.exists() and time.monotonic() < deadline:
                 time.sleep(0.05)
             self.assertTrue(marker.exists(), "supervised child did not start")
-            descendant_id = int(marker.read_text())
+            descendant_ids = json.loads(marker.read_text())
             wrapper.terminate()
             wrapper.wait(timeout=5)
-            self.assertTrue(
-                _wait_for_process_exit(descendant_id, 5000),
-                "terminating the RPC supervisor left a descendant running",
-            )
+            for descendant_id in descendant_ids:
+                self.assertTrue(
+                    _wait_for_process_exit(descendant_id, 5000),
+                    f"terminating the RPC supervisor left descendant {descendant_id} running",
+                )
+
+    def test_job_wrapper_reaps_process_when_resume_fails(self):
+        from omp_deck import _windows_job
+
+        created_process_id: list[int] = []
+        create_suspended = _windows_job._create_suspended
+
+        def capture_process(command):
+            process = create_suspended(command)
+            created_process_id.append(process.process_id)
+            return process
+
+        with (
+            patch.object(_windows_job, "_create_suspended", side_effect=capture_process),
+            patch.object(_windows_job, "_resume", side_effect=OSError("forced resume failure")),
+        ):
+            with self.assertRaisesRegex(OSError, "forced resume failure"):
+                _windows_job.main([sys.executable, "-c", "import time; time.sleep(60)"])
+
+        self.assertEqual(len(created_process_id), 1)
+        self.assertTrue(
+            _wait_for_process_exit(created_process_id[0], 5000),
+            "failed setup left the suspended process running",
+        )
 
     def test_extension_adapter_uses_native_named_pipe(self):
         from omp_deck.extension_adapter import ExtensionAdapter, ExtensionAdapterError

@@ -40,7 +40,7 @@ window.TodoUI = (() => {
         <div><strong>Session tasks</strong><span>${complete} of ${tasks.length} complete</span></div>
         <span class="todo-percent">${progress}%</span>
       </div>
-      <div class="todo-progress" aria-hidden="true"><i style="width:${progress}%"></i></div>
+      <progress class="todo-progress" max="${tasks.length}" value="${complete}" aria-label="${progress}% of session tasks complete">${progress}%</progress>
       <div class="todo-phases">${phases.map(phase => `<section class="todo-phase">
         <h3>${escapeHtml(phase.name)}</h3>
         <ul>${phase.tasks.map(task => `<li class="${task.done ? 'done' : ''} ${task.status === 'in progress' ? 'current' : ''}">

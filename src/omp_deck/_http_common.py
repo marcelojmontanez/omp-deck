@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import socket
+import threading
 from http.server import SimpleHTTPRequestHandler
 from http.server import ThreadingHTTPServer as _ThreadingHTTPServer
 from pathlib import Path
@@ -16,6 +18,37 @@ _STATIC_ROOT = Path(__file__).parent / "static"
 class ThreadingHTTPServer(_ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
+    max_connections = 64
+    header_timeout = 10.0
+
+    def __init__(self, server_address, handler, bind_and_activate=True):
+        self._connections = threading.BoundedSemaphore(self.max_connections)
+        if ":" in server_address[0]:
+            self.address_family = socket.AF_INET6
+        super().__init__(server_address, handler, bind_and_activate)
+
+    def get_request(self):
+        connection, address = super().get_request()
+        connection.settimeout(self.header_timeout)
+        return connection, address
+
+    def process_request(self, request, client_address):
+        # Admission never blocks accept(): slow unauthenticated peers cannot
+        # allocate unbounded threads or keep the listener from rejecting excess.
+        if not self._connections.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._connections.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connections.release()
 
     def server_bind(self) -> None:
         # HTTPServer's reverse-DNS lookup can block before listen(). Host is
@@ -27,6 +60,29 @@ class ThreadingHTTPServer(_ThreadingHTTPServer):
 class DeckHttpHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(_STATIC_ROOT), **kwargs)
+
+    def handle_one_request(self):
+        # A socket idle timeout alone lets a trickling header hold a worker
+        # forever. End this absolute deadline before dispatching SSE or actions.
+        self._header_timer = threading.Timer(self.server.header_timeout, self._expire_headers)
+        self._header_timer.daemon = True
+        self._header_timer.start()
+        try:
+            super().handle_one_request()
+        finally:
+            self._header_timer.cancel()
+
+    def parse_request(self):
+        try:
+            return super().parse_request()
+        finally:
+            self._header_timer.cancel()
+
+    def _expire_headers(self):
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
 
     def send_head(self):
         # A rollback can restore older package mtimes. They cannot validate

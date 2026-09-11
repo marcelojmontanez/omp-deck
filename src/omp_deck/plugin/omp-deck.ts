@@ -5,24 +5,22 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { authenticateNamedPipe } from "./named-pipe-auth.ts";
-
+import { BoundedSocketWriter } from "./bounded-writer.ts";
+import { BoundedEventQueue } from "./bounded-event-queue.ts";
+import { captureHistory, streamHistory } from "./history-sync.ts";
 const PROTOCOL = "omp-deck-fallback-v1";
 const MAX_LINE_BYTES = 1024 * 1024;
 const HEARTBEAT_MS = 15_000;
 const MAX_MISSED_HEARTBEATS = 3;
 const MAX_QUEUED_REQUESTS = 64;
+const MAX_QUEUED_EVENTS = 256;
 const MAX_PENDING_WRITE_BYTES = 4 * MAX_LINE_BYTES;
-const MAX_HISTORY_MESSAGES = 500;
-const MAX_HISTORY_CHUNK_MESSAGES = 64;
 const WINDOWS = process.platform === "win32";
 const UNIX_SOCKET_PATH_BYTES = process.platform === "linux" ? 108 : 104;
 const SOCKET_DIR = WINDOWS
   ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "OMP Deck", "state", "sockets")
   : path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "omp-deck", "sockets");
-
-type JsonObject = Record<string, unknown>;
-type ManagedTimer = Parameters<ExtensionContext["clearTimer"]>[0];
-
+type JsonObject = Record<string, unknown>; type ManagedTimer = Parameters<ExtensionContext["clearTimer"]>[0];
 interface Peer {
   socket: net.Socket;
   input: Buffer;
@@ -30,16 +28,16 @@ interface Peer {
   queuedRequests: number;
   dispatchTail: Promise<void>;
   sequence: number;
+  writer: BoundedSocketWriter;
+  events: BoundedEventQueue;
 }
-
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
-
-
 export default function ompDeck(pi: ExtensionAPI) {
   const connectionId = randomUUID();
   const peers = new Set<Peer>();
+  const pendingAuthentication = new Set<net.Socket>();
   let ctx: ExtensionContext | undefined;
   const windowsToken = randomBytes(32).toString("hex");
   let server: net.Server | undefined;
@@ -55,13 +53,11 @@ export default function ompDeck(pi: ExtensionAPI) {
   let lifecycleGeneration = 0;
   let lifecycleTail = Promise.resolve();
   let historyGeneration = 0;
-
   const sessionIdentity = (context: ExtensionContext): { id: string; file: string | null; title: string | null } => ({
     id: context.sessionManager.getSessionId(),
     file: context.sessionManager.getSessionFile() || null,
     title: context.sessionManager.getSessionName() || null,
   });
-
   const registration = (context: ExtensionContext): JsonObject => {
     const session = sessionIdentity(context);
     return {
@@ -87,7 +83,6 @@ export default function ompDeck(pi: ExtensionAPI) {
       },
     };
   };
-
   function encoded(payload: JsonObject): string | undefined {
     try {
       const line = `${JSON.stringify(payload)}\n`;
@@ -96,31 +91,10 @@ export default function ompDeck(pi: ExtensionAPI) {
       return undefined;
     }
   }
-
-  function writeLine(peer: Peer, line: string): boolean {
-    if (peer.socket.destroyed) return false;
-    const bytes = Buffer.byteLength(line);
-    if (peer.socket.writableLength + bytes > MAX_PENDING_WRITE_BYTES) {
-      peer.socket.destroy(new Error("outbound queue limit exceeded"));
-      return false;
-    }
-    try {
-      // Node queues a false-returning write until "drain"; writableLength is
-      // bounded above, so producers may continue without unbounded buffering.
-      peer.socket.write(line);
-      return true;
-    } catch (error) {
-      pi.logger.warn("OMP Deck fallback write failed", { error: errorText(error) });
-      peer.socket.destroy();
-      return false;
-    }
-  }
-
-  function send(peer: Peer, payload: JsonObject): boolean {
+  function send(peer: Peer, payload: JsonObject): Promise<boolean> {
     const line = encoded(payload);
-    return line !== undefined && writeLine(peer, line);
+    return line === undefined ? Promise.resolve(false) : peer.writer.write(line);
   }
-
   function eventLine(peer: Peer, kind: string, data: unknown): string | undefined {
     return encoded({
       protocol: PROTOCOL,
@@ -130,8 +104,7 @@ export default function ompDeck(pi: ExtensionAPI) {
       data,
     });
   }
-
-  function sendEvent(peer: Peer, kind: string, data: unknown = {}): boolean {
+  async function sendEventNow(peer: Peer, kind: string, data: unknown = {}): Promise<boolean> {
     const sequence = peer.sequence + 1;
     let wireKind = kind;
     let wireData = data;
@@ -140,9 +113,7 @@ export default function ompDeck(pi: ExtensionAPI) {
     if (!line) {
       degraded = true;
       if (kind === "snapshot") {
-        const snapshot = data && typeof data === "object"
-          ? data as JsonObject
-          : {};
+        const snapshot = data && typeof data === "object" ? data as JsonObject : {};
         wireData = {
           idle: snapshot.idle === true,
           pendingMessages: snapshot.pendingMessages === true,
@@ -155,62 +126,77 @@ export default function ompDeck(pi: ExtensionAPI) {
       }
       line = eventLine(peer, wireKind, wireData);
     }
-    if (!line || !writeLine(peer, line)) return false;
+    if (!line) return false;
     peer.sequence = sequence;
+    if (!await peer.writer.write(line)) return false;
     if (degraded && kind === "snapshot") {
-      sendEvent(peer, "degraded", {
+      await sendEventNow(peer, "degraded", {
         droppedKind: kind,
         reason: "snapshot collections exceed wire limit",
       });
     }
     return true;
   }
-
-  function emit(kind: string, data: unknown = {}): void {
-    for (const peer of peers) sendEvent(peer, kind, data);
-  }
-
-  function activeHistory(context: ExtensionContext): unknown[] {
-    const messages: unknown[] = [];
-    for (const entry of context.sessionManager.getBranch()) {
-      if (entry.type === "message") messages.push(entry.message);
-    }
-    return messages.slice(-MAX_HISTORY_MESSAGES);
-  }
-
-  function sendHistory(peer: Peer, context: ExtensionContext): void {
-    const syncId = `${connectionId}:${++historyGeneration}`;
-    const messages = activeHistory(context);
-    if (messages.length === 0) {
-      sendEvent(peer, "history", { syncId, offset: 0, messages: [], complete: true });
-      return;
-    }
-    let offset = 0;
-    while (offset < messages.length) {
-      let chunk: unknown[] = [];
-      while (offset + chunk.length < messages.length && chunk.length < MAX_HISTORY_CHUNK_MESSAGES) {
-        const candidate = [...chunk, messages[offset + chunk.length]];
-        const complete = offset + candidate.length === messages.length;
-        if (!eventLine(peer, "history", { syncId, offset, messages: candidate, complete })) break;
-        chunk = candidate;
+  function sendEvent(peer: Peer, kind: string, data: unknown = {}): Promise<boolean> {
+    let queuedKind = kind;
+    let queuedData = data;
+    let line = eventLine(peer, queuedKind, queuedData);
+    let snapshotDegraded = false;
+    if (!line) {
+      if (kind === "snapshot") {
+        const snapshot = data && typeof data === "object" ? data as JsonObject : {};
+        queuedData = {
+          idle: snapshot.idle === true,
+          pendingMessages: snapshot.pendingMessages === true,
+          model: null,
+          async: [],
+        };
+        snapshotDegraded = true;
+      } else {
+        queuedKind = "degraded";
+        queuedData = { droppedKind: kind, reason: "event exceeds wire limit" };
       }
-      if (chunk.length === 0) {
-        sendEvent(peer, "degraded", {
+      line = eventLine(peer, queuedKind, queuedData);
+    }
+    if (!line) return Promise.resolve(false);
+    const bytes = Buffer.byteLength(line);
+    return peer.events.enqueue(bytes, async () => {
+      const sent = await sendEventNow(peer, queuedKind, queuedData);
+      if (sent && snapshotDegraded) {
+        await sendEventNow(peer, "degraded", {
+          droppedKind: kind,
+          reason: "snapshot collections exceed wire limit",
+        });
+      }
+      return sent;
+    });
+  }
+  function emit(kind: string, data: unknown = {}): void {
+    for (const peer of peers) void sendEvent(peer, kind, data);
+  }
+  function sendHistory(peer: Peer, messages: readonly unknown[]): Promise<boolean> {
+    return peer.events.enqueue(0, async () => {
+      const syncId = `${connectionId}:${++historyGeneration}`;
+      const completed = await streamHistory(
+        messages,
+        syncId,
+        () => peer.socket.destroyed,
+        (data) => eventLine(peer, "history", data) !== undefined,
+        (data) => sendEventNow(peer, "history", data),
+      );
+      if (!completed && !peer.socket.destroyed) {
+        await sendEventNow(peer, "degraded", {
           droppedKind: "history",
           reason: "history message exceeds wire limit",
         });
-        return;
       }
-      const complete = offset + chunk.length === messages.length;
-      if (!sendEvent(peer, "history", { syncId, offset, messages: chunk, complete })) return;
-      offset += chunk.length;
-    }
+      return completed;
+    });
   }
-
   function emitHistory(context: ExtensionContext): void {
-    for (const peer of peers) sendHistory(peer, context);
+    const messages = captureHistory(context);
+    for (const peer of peers) void sendHistory(peer, messages);
   }
-
   function snapshots(context: ExtensionContext): JsonObject {
     return {
       idle: context.isIdle(),
@@ -219,7 +205,6 @@ export default function ompDeck(pi: ExtensionAPI) {
       async: context.getAsyncJobSnapshot(),
     };
   }
-
   async function dispatch(peer: Peer, request: JsonObject): Promise<void> {
     const id = request.id;
     if ((typeof id !== "string" && typeof id !== "number") || request.type !== "request" || request.protocol !== PROTOCOL) {
@@ -255,8 +240,8 @@ export default function ompDeck(pi: ExtensionAPI) {
             ok: true,
             result: { ...snapshots(active), eventSequence: peer.sequence },
           };
-          if (!send(peer, response)) {
-            send(peer, {
+          if (!await send(peer, response)) {
+            await send(peer, {
               protocol: PROTOCOL,
               type: "response",
               id,
@@ -267,7 +252,7 @@ export default function ompDeck(pi: ExtensionAPI) {
           return;
         }
         case "syncHistory":
-          sendHistory(peer, active);
+          await sendHistory(peer, captureHistory(active));
           break;
         case "pong":
           peer.lastPong = Date.now();
@@ -275,12 +260,11 @@ export default function ompDeck(pi: ExtensionAPI) {
         default:
           throw new Error("unsupported action");
       }
-      send(peer, { protocol: PROTOCOL, type: "response", id, ok: true });
+      await send(peer, { protocol: PROTOCOL, type: "response", id, ok: true });
     } catch (error) {
-      send(peer, { protocol: PROTOCOL, type: "response", id, ok: false, error: errorText(error) });
+      await send(peer, { protocol: PROTOCOL, type: "response", id, ok: false, error: errorText(error) });
     }
   }
-
   function attach(socket: net.Socket, context: ExtensionContext): void {
     const peer: Peer = {
       socket,
@@ -289,13 +273,24 @@ export default function ompDeck(pi: ExtensionAPI) {
       queuedRequests: 0,
       dispatchTail: Promise.resolve(),
       sequence: 0,
+      writer: new BoundedSocketWriter(socket, MAX_PENDING_WRITE_BYTES, (error) => {
+        pi.logger.warn("OMP Deck fallback write failed", { error: errorText(error) });
+      }),
+      events: new BoundedEventQueue(
+        MAX_QUEUED_EVENTS,
+        MAX_PENDING_WRITE_BYTES,
+        () => socket.destroyed,
+        () => socket.destroy(new Error("event queue limit exceeded")),
+      ),
     };
     peers.add(peer);
-    if (!send(peer, registration(context))) {
+    const registrationLine = encoded(registration(context));
+    if (!registrationLine) {
       peers.delete(peer);
       socket.destroy(new Error("registration exceeds wire limit"));
       return;
     }
+    void peer.writer.write(registrationLine);
     sendEvent(peer, "snapshot", snapshots(context));
     socket.on("data", (chunk: Buffer) => {
       if (peer.input.length + chunk.length > MAX_LINE_BYTES) {
@@ -312,16 +307,23 @@ export default function ompDeck(pi: ExtensionAPI) {
           try {
             const parsed: unknown = JSON.parse(line.toString("utf8"));
             if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("request must be an object");
-            if (peer.queuedRequests >= MAX_QUEUED_REQUESTS) {
-              send(peer, { protocol: PROTOCOL, type: "response", id: null, ok: false, error: "request queue limit exceeded" });
-              socket.destroy();
-              return;
+            const request = parsed as JsonObject;
+            if (request.action === "pong" || request.action === "interrupt" || request.action === "shutdown") {
+              void dispatch(peer, request).catch((error) => {
+                pi.logger.warn("OMP Deck fallback priority request failed", { error: errorText(error) });
+              });
+            } else {
+              if (peer.queuedRequests >= MAX_QUEUED_REQUESTS) {
+                send(peer, { protocol: PROTOCOL, type: "response", id: null, ok: false, error: "request queue limit exceeded" });
+                socket.destroy();
+                return;
+              }
+              peer.queuedRequests++;
+              peer.dispatchTail = peer.dispatchTail
+                .then(() => dispatch(peer, request))
+                .catch((error) => pi.logger.warn("OMP Deck fallback request failed", { error: errorText(error) }))
+                .finally(() => { peer.queuedRequests--; });
             }
-            peer.queuedRequests++;
-            peer.dispatchTail = peer.dispatchTail
-              .then(() => dispatch(peer, parsed as JsonObject))
-              .catch((error) => pi.logger.warn("OMP Deck fallback request failed", { error: errorText(error) }))
-              .finally(() => { peer.queuedRequests--; });
           } catch (error) {
             send(peer, { protocol: PROTOCOL, type: "response", id: null, ok: false, error: `invalid JSON: ${errorText(error)}` });
           }
@@ -337,14 +339,16 @@ export default function ompDeck(pi: ExtensionAPI) {
       attach(socket, context);
       return;
     }
+    pendingAuthentication.add(socket);
+    const authenticationEnded = (): void => { pendingAuthentication.delete(socket); };
+    socket.once("close", authenticationEnded);
     authenticateNamedPipe(socket, context, windowsToken, (remainder) => {
+      pendingAuthentication.delete(socket);
+      socket.off("close", authenticationEnded);
       attach(socket, context);
       if (remainder.length) socket.emit("data", remainder);
     });
   }
-
-
-
   async function removeFiles(): Promise<void> {
     const files = WINDOWS ? [metadataPath] : [metadataPath, socketPath];
     for (const file of files) {
@@ -355,16 +359,16 @@ export default function ompDeck(pi: ExtensionAPI) {
     metadataPath = undefined;
     socketPath = undefined;
   }
-
   async function closeServer(): Promise<void> {
     const active = server;
     server = undefined;
     for (const peer of peers) peer.socket.destroy();
     peers.clear();
+    for (const socket of pendingAuthentication) socket.destroy();
+    pendingAuthentication.clear();
     if (active) await new Promise<void>((resolve) => active.close(() => resolve()));
     await removeFiles();
   }
-
   function scheduleReconnect(context: ExtensionContext): void {
     if (stopping || retryTimer) return;
     const delay = Math.min(30_000, 250 * (2 ** Math.min(reconnectAttempt++, 7)));
@@ -373,7 +377,6 @@ export default function ompDeck(pi: ExtensionAPI) {
       queueRestart(context);
     }, delay);
   }
-
   async function start(context: ExtensionContext, generation: number): Promise<void> {
     if (stopping || generation !== lifecycleGeneration) return;
     let listener: net.Server | undefined;
@@ -427,7 +430,6 @@ export default function ompDeck(pi: ExtensionAPI) {
       if (generation === lifecycleGeneration) scheduleReconnect(context);
     }
   }
-
   function queueRestart(context: ExtensionContext): Promise<void> {
     // RPC owns its structured transport; only terminal hosts need this fallback.
     if (context.mode !== "tui") return lifecycleTail;
@@ -437,7 +439,6 @@ export default function ompDeck(pi: ExtensionAPI) {
     });
     return lifecycleTail;
   }
-
   function startHeartbeat(context: ExtensionContext): void {
     if (context.mode !== "tui" || heartbeatTimer) return;
     heartbeatTimer = context.setInterval(() => {
@@ -448,7 +449,6 @@ export default function ompDeck(pi: ExtensionAPI) {
       }
     }, HEARTBEAT_MS);
   }
-
   // Handlers are deliberately registered synchronously during factory load.
   pi.on("session_start", async (_event, context) => {
     ctx = context;
@@ -479,14 +479,14 @@ export default function ompDeck(pi: ExtensionAPI) {
     stopping = true;
     lifecycleGeneration++;
     emit("lifecycle", { state: "session_shutdown" });
-    if (ctx && retryTimer) ctx.clearTimer(retryTimer);
-    if (ctx && heartbeatTimer) ctx.clearTimer(heartbeatTimer);
-    retryTimer = undefined;
-    heartbeatTimer = undefined;
     lifecycleTail = lifecycleTail.then(() => closeServer()).catch((error) => {
       pi.logger.warn("OMP Deck fallback shutdown failed", { error: errorText(error) });
     });
     await lifecycleTail;
+    if (ctx && retryTimer) ctx.clearTimer(retryTimer);
+    if (ctx && heartbeatTimer) ctx.clearTimer(heartbeatTimer);
+    retryTimer = undefined;
+    heartbeatTimer = undefined;
     ctx = undefined;
   });
 }

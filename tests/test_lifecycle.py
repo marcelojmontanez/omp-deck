@@ -36,6 +36,8 @@ class LifecycleTests(unittest.TestCase):
             "XDG_STATE_HOME": str(home / "state"),
             "OMP_DECK_BIN_DIR": str(home / "bin"),
             "PI_CODING_AGENT_DIR": str(home / "omp-agent"),
+            "OMP_PROFILE": "work/profile",
+            "PI_PROFILE": "legacy profile",
         }
 
     def settings(self, state_root):
@@ -57,6 +59,13 @@ class LifecycleTests(unittest.TestCase):
 
             unit = paths.unit_path.read_text()
             self.assertIn(f'Environment="OMP_DECK_CONFIG={config}"', unit)
+            self.assertIn(f'Environment="HOME={home}"', unit)
+            self.assertIn(f'Environment="XDG_CONFIG_HOME={home / "config"}"', unit)
+            self.assertIn(f'Environment="XDG_STATE_HOME={home / "state"}"', unit)
+            self.assertIn(f'Environment="PI_CODING_AGENT_DIR={home / "omp-agent"}"', unit)
+            self.assertIn('Environment="OMP_PROFILE=work/profile"', unit)
+            self.assertIn('Environment="PI_PROFILE=legacy profile"', unit)
+            self.assertNotIn(str(home / "work/profile"), unit)
             self.assertIn(f'ExecStart="{os.sys.executable}" -m omp_deck serve', unit)
             self.assertNotIn("WorkingDirectory", unit)
             self.assertEqual(
@@ -158,6 +167,79 @@ class LifecycleTests(unittest.TestCase):
                 ["systemctl", "--user", "disable", "--now", "omp-deck.service"],
             )
 
+    def test_purge_does_not_delete_state_when_service_stop_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with patch.dict(os.environ, self.environment(home), clear=False):
+                paths = installation_paths()
+                for root in (paths.install_root, paths.config_root, paths.state_root):
+                    mark_owned(root)
+                paths.manifest_path.write_text(manifest_content(paths))
+                paths.unit_path.parent.mkdir(parents=True, exist_ok=True)
+                paths.unit_path.write_text("owned unit")
+                sentinel = paths.state_root / "state.json"
+                sentinel.write_text("preserved")
+
+                def runner(command, *, check=True, capture_output=False):
+                    if command[:3] == ["systemctl", "--user", "disable"]:
+                        return SimpleNamespace(returncode=1, stdout="stop failed")
+                    return SimpleNamespace(returncode=0, stdout='{"npm":[]}')
+
+                with self.assertRaises(RuntimeError):
+                    lifecycle.purge_installation(runner=runner)
+
+            self.assertEqual(sentinel.read_text(), "preserved")
+            self.assertTrue(paths.unit_path.exists())
+
+    def test_repeat_purge_skips_absent_optional_plugin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with patch.dict(os.environ, self.environment(home), clear=False):
+                paths = installation_paths()
+                for root in (paths.install_root, paths.config_root, paths.state_root):
+                    mark_owned(root)
+                paths.manifest_path.write_text(manifest_content(paths))
+                paths.unit_path.parent.mkdir(parents=True, exist_ok=True)
+                paths.unit_path.write_text("owned unit")
+                runner = FakeRunner(
+                    [
+                        SimpleNamespace(returncode=0, stdout=json.dumps({"npm": []})),
+                        SimpleNamespace(returncode=0, stdout=""),
+                        SimpleNamespace(returncode=0, stdout=""),
+                    ]
+                )
+                lifecycle.purge_installation("/usr/bin/omp", runner=runner)
+
+            self.assertFalse(paths.state_root.exists())
+            self.assertNotIn(
+                ["/usr/bin/omp", "plugin", "uninstall", "omp-deck"],
+                [call[0] for call in runner.calls],
+            )
+
+    def test_malformed_plugin_inventory_cannot_authorize_purge(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with patch.dict(os.environ, self.environment(home), clear=False):
+                paths = installation_paths()
+                for root in (paths.install_root, paths.config_root, paths.state_root):
+                    mark_owned(root)
+                paths.manifest_path.write_text(manifest_content(paths))
+                paths.unit_path.parent.mkdir(parents=True, exist_ok=True)
+                paths.unit_path.write_text("owned unit")
+                sentinel = paths.state_root / "state.json"
+                sentinel.write_text("preserved")
+                runner = FakeRunner([SimpleNamespace(returncode=0, stdout=json.dumps([]))])
+
+                with self.assertRaisesRegex(RuntimeError, "inventory"):
+                    lifecycle.purge_installation("/usr/bin/omp", runner=runner)
+
+            self.assertEqual(sentinel.read_text(), "preserved")
+            self.assertEqual(paths.unit_path.read_text(), "owned unit")
+            self.assertEqual(
+                [call[0] for call in runner.calls],
+                [["/usr/bin/omp", "plugin", "list", "--json"]],
+            )
+
     def test_plugin_install_ignores_unrelated_doctor_warnings_and_uses_official_manager(self):
         runner = FakeRunner(
             [
@@ -185,6 +267,10 @@ class LifecycleTests(unittest.TestCase):
                         }
                     ),
                 ),
+                SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps({"npm": [{"name": "omp-deck"}]}),
+                ),
                 SimpleNamespace(returncode=0, stdout=""),
             ]
         )
@@ -207,6 +293,10 @@ class LifecycleTests(unittest.TestCase):
         )
         self.assertEqual(
             runner.calls[3][0],
+            ["/usr/bin/omp", "plugin", "list", "--json"],
+        )
+        self.assertEqual(
+            runner.calls[4][0],
             ["/usr/bin/omp", "plugin", "uninstall", "omp-deck"],
         )
 
@@ -243,6 +333,29 @@ class LifecycleTests(unittest.TestCase):
                     )
 
             self.assertEqual(paths.unit_path.read_text(), "unrelated")
+
+    def test_setup_rejects_symlink_unit_without_stopping_or_deleting_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            target = home / "preexisting.service"
+            target.write_text("unrelated")
+            settings = self.settings(home / "state/omp-deck")
+            with patch.dict(os.environ, self.environment(home), clear=False):
+                paths = installation_paths(
+                    config_file=home / "config/omp-deck/config.json",
+                    state_root=settings.state_root,
+                )
+                paths.unit_path.parent.mkdir(parents=True)
+                paths.unit_path.symlink_to(target)
+                with self.assertRaisesRegex(RuntimeError, "unsafe"):
+                    lifecycle.capture_service_state(
+                        settings=settings,
+                        config_path=paths.config_path,
+                        runner=FakeRunner(),
+                    )
+
+            self.assertTrue(paths.unit_path.is_symlink())
+            self.assertEqual(target.read_text(), "unrelated")
 
     def test_service_snapshot_restores_files_before_restarting_previous_service(self):
         with tempfile.TemporaryDirectory() as directory:

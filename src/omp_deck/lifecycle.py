@@ -10,6 +10,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from ._linux_service import service_unit
+from ._plugin_inventory import plugin_record
 from .installation_paths import (
     InstallationPaths,
     has_ownership_marker,
@@ -18,6 +20,8 @@ from .installation_paths import (
     mark_owned,
     remove_owned_root,
     validate_manifest,
+    validate_owned_root,
+    validate_ownership_claim,
 )
 
 PLUGIN_VERSION = "1.2.0"
@@ -66,6 +70,13 @@ def _file_snapshot(path):
     return path.read_bytes(), path.stat().st_mode & 0o777
 
 
+def _required_file_snapshot(path):
+    content, mode = _file_snapshot(path)
+    if (path.exists() or path.is_symlink()) and content is None:
+        raise RuntimeError(f"cannot snapshot unsafe installation file: {path}")
+    return content, mode
+
+
 def capture_service_state(*, settings=None, config_path=None, runner=None):
     adapter = _service_adapter()
     if adapter is not None:
@@ -80,9 +91,9 @@ def capture_service_state(*, settings=None, config_path=None, runner=None):
         if settings is not None and config_path is not None
         else installation_paths()
     )
-    unit, unit_mode = _file_snapshot(paths.unit_path)
-    manifest, manifest_mode = _file_snapshot(paths.manifest_path)
-    config, config_mode = _file_snapshot(paths.config_path)
+    unit, unit_mode = _required_file_snapshot(paths.unit_path)
+    manifest, manifest_mode = _required_file_snapshot(paths.manifest_path)
+    config, config_mode = _required_file_snapshot(paths.config_path)
     enabled = (
         runner(
             ["systemctl", "--user", "is-enabled", "omp-deck.service"],
@@ -204,28 +215,12 @@ def _restore_service_files(snapshot, paths):
             write_atomic(path, content, mode)
 
 
-def _plugin_record(settings, *, runner=None):
-    runner = runner or run
-    result = runner(
-        [settings.omp_bin, "plugin", "list", "--json"],
-        check=False,
-        capture_output=True,
-    )
-    if result.returncode:
-        raise RuntimeError("cannot inspect installed OMP plugins")
-    try:
-        records = json.loads(result.stdout).get("npm", [])
-        return next(item for item in records if isinstance(item, dict) and item.get("name") == PLUGIN_NAME)
-    except (AttributeError, StopIteration, TypeError, json.JSONDecodeError):
-        return None
-
-
 def plugin_installed(settings, *, runner=None):
-    return _plugin_record(settings, runner=runner) is not None
+    return plugin_record(settings.omp_bin, PLUGIN_NAME, runner=runner or run) is not None
 
 
 def backup_plugin(settings, *, runner=None):
-    record = _plugin_record(settings, runner=runner)
+    record = plugin_record(settings.omp_bin, PLUGIN_NAME, runner=runner or run)
     try:
         source = Path(record["path"]).resolve(strict=True)
     except (KeyError, TypeError, ValueError, OSError):
@@ -303,52 +298,41 @@ def write_atomic(path, content, mode=None):
         temporary.unlink(missing_ok=True)
 
 
-def systemd_quote(value):
-    value = str(value)
-    if "\0" in value or "\n" in value or "\r" in value:
-        raise ValueError("systemd values cannot contain control characters")
-    return '"' + value.replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"') + '"'
-
-
-def service_unit(config_path, executable=sys.executable):
-    return "\n".join(
-        (
-            "[Unit]",
-            "Description=OMP Deck",
-            "After=default.target",
-            "",
-            "[Service]",
-            "Type=simple",
-            f"Environment={systemd_quote(f'OMP_DECK_CONFIG={config_path}')}",
-            f"ExecStart={systemd_quote(executable)} -m omp_deck serve",
-            "Restart=on-failure",
-            "RestartSec=2",
-            "",
-            "[Install]",
-            "WantedBy=default.target",
-            "",
-        )
-    )
-
-
 def prepare_installation(settings, config_path):
     if os.name == "nt":
         from ._windows_lifecycle import prepare_installation as prepare_windows_installation
 
         return prepare_windows_installation(settings, config_path)
     paths = installation_paths(config_file=config_path, state_root=settings.state_root)
+    allowed_config = (paths.config_path,)
+    allowed_state = (paths.state_root / "auth.json", paths.state_root / ".auth.lock")
+    validate_ownership_claim(paths.install_root)
+    validate_ownership_claim(paths.config_root, allowed_config)
+    validate_ownership_claim(paths.state_root, allowed_state)
     mark_owned(paths.install_root)
-    mark_owned(paths.config_root, allowed_existing=(paths.config_path,), mode=0o700)
-    mark_owned(
-        paths.state_root,
-        allowed_existing=(paths.state_root / "auth.json", paths.state_root / ".auth.lock"),
-        mode=0o700,
-    )
+    mark_owned(paths.config_root, allowed_existing=allowed_config, mode=0o700)
+    mark_owned(paths.state_root, allowed_existing=allowed_state, mode=0o700)
     if not paths.config_path.exists():
         write_atomic(paths.config_path, "{}\n", 0o600)
     else:
         paths.config_path.chmod(0o600)
     write_atomic(paths.manifest_path, manifest_content(paths), 0o600)
+    return paths
+
+
+def preflight_service_install(settings, config_path):
+    base_paths = installation_paths()
+    if base_paths.unit_path.exists() or base_paths.unit_path.is_symlink():
+        validate_manifest(base_paths)
+        _required_file_snapshot(base_paths.unit_path)
+    paths = installation_paths(config_file=config_path, state_root=settings.state_root)
+    validate_ownership_claim(paths.install_root)
+    validate_ownership_claim(paths.config_root, (paths.config_path,))
+    if os.name != "nt":
+        validate_ownership_claim(
+            paths.state_root,
+            (paths.state_root / "auth.json", paths.state_root / ".auth.lock"),
+        )
     return paths
 
 
@@ -387,6 +371,8 @@ def install_plugin(settings, *, runner=run):
 
 
 def remove_plugin(omp_bin="omp", *, runner=run):
+    if plugin_record(omp_bin, PLUGIN_NAME, runner=runner) is None:
+        return None
     return runner([omp_bin, "plugin", "uninstall", PLUGIN_NAME])
 
 
@@ -399,9 +385,7 @@ def install_service(settings, config_path, *, runner=run, start=True):
             runner=runner,
             start=start,
         )
-    base_paths = installation_paths()
-    if base_paths.unit_path.exists():
-        validate_manifest(base_paths)
+    preflight_service_install(settings, config_path)
     paths = prepare_installation(settings, config_path)
     write_atomic(paths.unit_path, service_unit(paths.config_path), 0o644)
     runner(["systemctl", "--user", "daemon-reload"])
@@ -433,19 +417,31 @@ def remove_service(*, runner=run):
     if adapter is not None:
         return adapter.remove_service(runner=runner)
     paths = validate_manifest(installation_paths())
-    runner(
+    _required_file_snapshot(paths.unit_path)
+    result = runner(
         ["systemctl", "--user", "disable", "--now", "omp-deck.service"],
         check=False,
+        capture_output=True,
     )
+    if result.returncode:
+        raise RuntimeError("cannot stop and disable the OMP Deck service")
     paths.unit_path.unlink(missing_ok=True)
-    runner(["systemctl", "--user", "daemon-reload"], check=False)
+    runner(["systemctl", "--user", "daemon-reload"])
     return paths
 
 
 def purge_installation(omp_bin="omp", *, runner=run):
-    paths = remove_service(runner=runner)
-    remove_plugin(omp_bin, runner=runner)
+    paths = validate_manifest(installation_paths())
     approved = (paths.config_root, paths.state_root)
+    validate_owned_root(paths.config_root, approved)
+    _required_file_snapshot(paths.unit_path)
+    if paths.state_root != paths.config_root:
+        validate_owned_root(paths.state_root, approved)
+    validate_owned_root(paths.install_root, (paths.install_root,))
+    plugin_present = plugin_record(omp_bin, PLUGIN_NAME, runner=runner) is not None
+    paths = remove_service(runner=runner)
+    if plugin_present:
+        runner([omp_bin, "plugin", "uninstall", PLUGIN_NAME])
     remove_owned_root(paths.config_root, approved)
     if paths.state_root != paths.config_root:
         remove_owned_root(paths.state_root, approved)
@@ -488,7 +484,7 @@ def check_health(settings, *, timeout=5.0):
 
 
 def plugin_status(settings, *, runner=run):
-    record = _plugin_record(settings, runner=runner)
+    record = plugin_record(settings.omp_bin, PLUGIN_NAME, runner=runner)
     return bool(
         record
         and record.get("version") == PLUGIN_VERSION

@@ -90,6 +90,31 @@ if v2:
 if SCENARIO == "v1":
     request = read_request()
     response(request, {"sessionId": "v1-session"})
+elif SCENARIO == "ui_during_command":
+    while True:
+        try:
+            request = read_request()
+        except EOFError:
+            break
+        if request["type"] == "set_subagent_subscription":
+            response(request)
+        elif request["type"] == "get_subagents":
+            response(request, {"subagents": []})
+        elif request["type"] == "branch":
+            emit(
+                {
+                    "type": "extension_ui_request",
+                    "id": "command-ui",
+                    "method": "input",
+                    "title": "Branch name",
+                }
+            )
+            ui_response = read_request()
+            if ui_response != {"type": "extension_ui_response", "id": "command-ui", "value": "feature"}:
+                raise RuntimeError(f"unexpected UI response: {ui_response!r}")
+            response(request, {"text": "branched", "cancelled": False})
+        else:
+            response(request)
 elif SCENARIO in {"contract", "bad_subagents"}:
     progress = {
         "index": 0,
@@ -128,6 +153,7 @@ elif SCENARIO in {"contract", "bad_subagents"}:
         }
     )
     emit({"type": "extension_ui_request", "id": "ui-confirm", "method": "confirm", "message": "Proceed?"})
+    emit({"type": "extension_ui_request", "id": "ui-notify", "method": "notify", "message": "Working"})
     while True:
         try:
             request = read_request()

@@ -36,6 +36,8 @@ class MacLifecycleDefinitionTests(unittest.TestCase):
                 "XDG_CONFIG_HOME": str(root / "config"),
                 "XDG_STATE_HOME": str(root / "state-home"),
                 "PI_CODING_AGENT_DIR": str(root / "omp-profile"),
+                "OMP_PROFILE": "work/profile",
+                "PI_PROFILE": "legacy profile",
             }
             with patch.dict(os.environ, environment, clear=False):
                 definition = plistlib.loads(
@@ -57,6 +59,13 @@ class MacLifecycleDefinitionTests(unittest.TestCase):
                 "--config",
                 str(config),
             ],
+        )
+        service_environment = definition["EnvironmentVariables"]
+        self.assertEqual(service_environment["OMP_PROFILE"], "work/profile")
+        self.assertEqual(service_environment["PI_PROFILE"], "legacy profile")
+        self.assertEqual(
+            service_environment["PI_CODING_AGENT_DIR"],
+            str(root / "omp-profile"),
         )
         self.assertEqual(definition["KeepAlive"], {"SuccessfulExit": False})
         self.assertTrue(definition["RunAtLoad"])
@@ -84,6 +93,96 @@ class MacLifecycleDefinitionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "logged-in graphical user session"):
             _macos_lifecycle.service_status(runner=runner)
+
+    def test_relocation_rollback_validates_and_restarts_restored_plist(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old_config = root / "old/config.json"
+            new_config = root / "new/config.json"
+            unit = root / "Library/LaunchAgents/com.omp-deck.agent.plist"
+            unit.parent.mkdir(parents=True)
+            old_definition = _macos_lifecycle.launch_agent_plist(
+                old_config,
+                self.settings(root),
+                executable="/usr/bin/python3",
+            )
+            unit.write_bytes(b"new")
+            paths = SimpleNamespace(
+                unit_path=unit,
+                config_path=new_config,
+                manifest_path=root / "manifest",
+            )
+            snapshot = lifecycle.ServiceSnapshot(
+                unit=old_definition,
+                unit_mode=0o644,
+                manifest=None,
+                manifest_mode=None,
+                enabled=True,
+                active=True,
+                installation=paths,
+                roots=(),
+            )
+            calls = []
+
+            def runner(command, *, check=True, capture_output=False):
+                calls.append(command)
+                return SimpleNamespace(returncode=0, stdout="")
+
+            with (
+                patch.object(_macos_lifecycle, "_require_gui_domain", return_value="gui/1"),
+                patch.object(_macos_lifecycle, "_loaded", return_value=False),
+                patch.object(
+                    _macos_lifecycle,
+                    "_validate_existing_service",
+                    return_value=paths,
+                ),
+            ):
+                _macos_lifecycle.restore_service_state(snapshot, runner=runner)
+
+            restored = plistlib.loads(unit.read_bytes())
+            self.assertEqual(restored["ProgramArguments"][-1], str(old_config.absolute()))
+            self.assertNotEqual(restored["ProgramArguments"][-1], str(new_config.absolute()))
+            self.assertIn(
+                ["launchctl", "bootstrap", "gui/1", str(unit)],
+                calls,
+            )
+
+    def test_rollback_rejects_foreign_restored_plist_before_bootstrap(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            unit = root / "agent.plist"
+            paths = SimpleNamespace(unit_path=unit, config_path=root / "config.json", manifest_path=root / "manifest")
+            definition = plistlib.loads(
+                _macos_lifecycle.launch_agent_plist(
+                    paths.config_path, self.settings(root), executable="/usr/bin/python3"
+                )
+            )
+            definition["Label"] = "org.unrelated.service"
+            snapshot = lifecycle.ServiceSnapshot(
+                unit=plistlib.dumps(definition),
+                unit_mode=0o644,
+                manifest=None,
+                manifest_mode=None,
+                enabled=True,
+                active=True,
+                installation=paths,
+                roots=(),
+            )
+            calls = []
+
+            def runner(command, *, check=True, capture_output=False):
+                calls.append(command)
+                return SimpleNamespace(returncode=0, stdout="")
+
+            with (
+                patch.object(_macos_lifecycle, "_require_gui_domain", return_value="gui/1"),
+                patch.object(_macos_lifecycle, "_loaded", return_value=False),
+                patch.object(_macos_lifecycle, "_validate_existing_service", return_value=paths),
+            ):
+                with self.assertRaises(RuntimeError):
+                    _macos_lifecycle.restore_service_state(snapshot, runner=runner)
+
+            self.assertFalse(any(command[:2] == ["launchctl", "bootstrap"] for command in calls))
 
 
 @unittest.skipUnless(

@@ -20,6 +20,7 @@ from .installation_paths import (
     mark_owned,
     remove_owned_root,
     validate_manifest,
+    validate_ownership_claim,
 )
 
 _TASK_NAME = "OMP Deck"
@@ -161,7 +162,10 @@ def _restore_root(snapshot: _RootSnapshot) -> None:
 def _delete_task(runner) -> None:
     if _query_task(runner).returncode != 0:
         return
-    _result(runner, ("schtasks.exe", "/End", "/TN", _TASK_PATH), check=False)
+    active = _task_active(runner)
+    stopped = _result(runner, ("schtasks.exe", "/End", "/TN", _TASK_PATH), check=False)
+    if active and stopped.returncode:
+        raise RuntimeError("cannot stop the OMP Deck scheduled task")
     _result(runner, ("schtasks.exe", "/Delete", "/TN", _TASK_PATH, "/F"))
 
 
@@ -231,9 +235,14 @@ def _allowed_state_entries(settings) -> tuple[Path, ...]:
 
 def prepare_installation(settings, config_path: Path) -> InstallationPaths:
     paths = installation_paths(config_file=config_path, state_root=settings.state_root)
+    allowed_config = (paths.config_path,)
+    allowed_state = _allowed_state_entries(settings)
+    validate_ownership_claim(paths.install_root)
+    validate_ownership_claim(paths.config_root, allowed_config)
+    validate_ownership_claim(paths.state_root, allowed_state)
     mark_owned(paths.install_root)
-    mark_owned(paths.config_root, allowed_existing=(paths.config_path,))
-    mark_owned(paths.state_root, allowed_existing=_allowed_state_entries(settings))
+    mark_owned(paths.config_root, allowed_existing=allowed_config)
+    mark_owned(paths.state_root, allowed_existing=allowed_state)
     if not paths.config_path.exists():
         _write_private(paths.config_path, b"{}\n")
     else:

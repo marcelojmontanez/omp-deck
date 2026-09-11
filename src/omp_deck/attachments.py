@@ -2,16 +2,47 @@ import hashlib
 import os
 import re
 import stat
+import sys
 from pathlib import Path
 
 BLOB_ROOT = None
 _DIGEST = re.compile(r"[a-f0-9]{64}")
+_PROFILE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 _MAX_BLOB_BYTES = 16 * 1024 * 1024
 _CANDIDATE_SUFFIXES = ("", ".png", ".jpg", ".jpeg", ".gif", ".webp")
 
 
 def blob_root():
-    return Path(BLOB_ROOT) if BLOB_ROOT is not None else Path.home() / ".omp/agent/blobs"
+    if BLOB_ROOT is not None:
+        return Path(BLOB_ROOT)
+    profile_value = os.environ.get("OMP_PROFILE")
+    if profile_value is None:
+        profile_value = os.environ.get("PI_PROFILE")
+    profile = profile_value.strip() if profile_value else None
+    if profile == "default":
+        profile = None
+    if (
+        profile in (".", "..")
+        or (profile is not None and profile.endswith("."))
+        or (profile is not None and _PROFILE.fullmatch(profile) is None)
+    ):
+        profile = None
+    home = Path.home()
+    config_root = home / ".omp"
+    if profile:
+        config_root = config_root / "profiles" / profile
+        agent_root = config_root / "agent"
+    else:
+        override = os.environ.get("PI_CODING_AGENT_DIR")
+        agent_root = Path(override).expanduser().absolute() if override else config_root / "agent"
+    if sys.platform in ("linux", "darwin"):
+        xdg_value = os.environ.get("XDG_DATA_HOME")
+        if xdg_value and agent_root == config_root / "agent":
+            xdg_root = Path(xdg_value) / "omp"
+            candidate = xdg_root / "profiles" / profile if profile else xdg_root
+            if candidate.exists():
+                return candidate / "blobs"
+    return agent_root / "blobs"
 
 
 def read_blob(digest):

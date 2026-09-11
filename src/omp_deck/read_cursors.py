@@ -57,6 +57,28 @@ class CursorStore:
             self._data = data
             self._load_error = None
 
+    def import_missing(self, cursors):
+        imported = 0
+        with self._locked():
+            data = self._read()
+            for session_id, message_id in cursors.items():
+                if session_id in data["sessions"]:
+                    continue
+                if not isinstance(session_id, str) or not session_id or len(session_id) > 128:
+                    raise ValueError("invalid cursor session ID")
+                if not isinstance(message_id, str) or not message_id or len(message_id) > 512:
+                    raise ValueError("invalid cursor message ID")
+                data["sessions"][session_id] = {
+                    "messageId": message_id,
+                    "updatedAt": datetime.now(UTC).isoformat(),
+                }
+                imported += 1
+            if imported:
+                self._write(data)
+            self._data = data
+            self._load_error = None
+        return imported
+
     def remove(self, session_id):
         with self._locked():
             data = self._read()

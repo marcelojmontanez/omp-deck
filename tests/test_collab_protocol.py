@@ -203,6 +203,184 @@ class EncodingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_frame(frame)
 
+    def test_accepts_authoritative_rich_host_shapes(self) -> None:
+        assistant = {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "done", "textSignature": '{"v":1,"id":"msg"}'},
+                {"type": "thinking", "thinking": "reason", "thinkingSignature": "sig", "itemId": "item"},
+                {"type": "image", "data": "AA", "mimeType": "image/png", "detail": "original"},
+                {
+                    "type": "toolCall",
+                    "id": "call",
+                    "name": "read",
+                    "arguments": {"path": "x"},
+                    "thoughtSignature": "thought",
+                    "providerMetadata": {"type": "computer", "providerItemId": "item"},
+                },
+            ],
+            "api": "responses",
+            "provider": "openai",
+            "model": "gpt-5",
+            "contextSnapshot": {"promptTokens": 12, "nonMessageTokens": 3},
+            "responseId": "response-1",
+            "usage": {
+                "input": 10,
+                "output": 2,
+                "cacheRead": 1,
+                "cacheWrite": 0,
+                "totalTokens": 13,
+                "cost": {"input": 0.1, "output": 0.2, "cacheRead": 0.01, "cacheWrite": 0, "total": 0.31},
+            },
+            "stopReason": "stop",
+            "stopDetails": {"reason": "complete"},
+            "timestamp": 1,
+            "duration": 20,
+            "ttft": 5,
+            "completedAt": 21,
+        }
+        state = {
+            "isStreaming": True,
+            "queuedMessageCount": 0,
+            "cwd": "/tmp",
+            "participants": [],
+            "model": {
+                "id": "gpt-5",
+                "name": "GPT-5",
+                "provider": "openai",
+                "api": "responses",
+                "baseUrl": "https://api.openai.com",
+                "reasoning": True,
+                "input": ["text", "image"],
+                "cost": {"input": 1, "output": 2, "cacheRead": 0.1, "cacheWrite": 0},
+                "contextWindow": 200000,
+                "maxTokens": 64000,
+            },
+            "contextUsage": {"tokens": 13, "contextWindow": 200000, "percent": 0.0065},
+        }
+        welcome = {
+            "t": "welcome",
+            "proto": COLLAB_PROTO,
+            "header": {
+                "type": "session",
+                "version": 3,
+                "id": "s",
+                "title": "Session",
+                "titleSource": "prompt",
+                "timestamp": "now",
+                "cwd": "/tmp",
+                "additionalDirectories": ["/other"],
+                "providerPromptCacheKey": "cache",
+            },
+            "state": state,
+            "agents": [],
+            "entryCount": 1,
+        }
+        tool_result = {
+            "role": "toolResult",
+            "toolCallId": "call",
+            "toolName": "read",
+            "content": [{"type": "text", "text": "ok", "textSignature": "sig"}],
+            "details": {"path": "x"},
+            "providerMetadata": {
+                "type": "computer",
+                "screenshot": {"type": "computer_screenshot", "file_id": "file"},
+                "acknowledgedSafetyChecks": [],
+            },
+            "useless": True,
+            "isError": False,
+            "timestamp": 2,
+        }
+        snapshot = {
+            "t": "snapshot-chunk",
+            "entries": [
+                {
+                    "type": "message",
+                    "id": "entry",
+                    "parentId": None,
+                    "timestamp": "now",
+                    "message": tool_result,
+                }
+            ],
+            "final": True,
+        }
+        events = (
+            {
+                "t": "event",
+                "event": {
+                    "type": "message_update",
+                    "message": assistant,
+                    "assistantMessageEvent": {
+                        "type": "text_delta",
+                        "contentIndex": 0,
+                        "delta": "e",
+                        "partial": assistant,
+                    },
+                },
+            },
+            {
+                "t": "event",
+                "event": {
+                    "type": "tool_execution_start",
+                    "toolCallId": "call",
+                    "toolName": "read",
+                    "args": {"path": "x"},
+                    "intent": "inspect",
+                },
+            },
+            {
+                "t": "event",
+                "event": {
+                    "type": "agent_end",
+                    "messages": [assistant],
+                    "telemetry": {"durationMs": 20},
+                    "coverage": {"complete": True},
+                    "isTerminal": True,
+                },
+            },
+            {"t": "event", "event": {"type": "turn_end", "message": assistant, "toolResults": []}},
+            {
+                "t": "event",
+                "event": {
+                    "type": "auto_compaction_end",
+                    "action": "shake",
+                    "result": {"summary": "x"},
+                    "aborted": False,
+                    "willRetry": False,
+                },
+            },
+            {
+                "t": "event",
+                "event": {
+                    "type": "auto_retry_start",
+                    "attempt": 1,
+                    "maxAttempts": 3,
+                    "delayMs": 50,
+                    "errorMessage": "retry",
+                    "errorId": 7,
+                },
+            },
+            {
+                "t": "event",
+                "event": {
+                    "type": "thinking_level_changed",
+                    "thinkingLevel": "high",
+                    "configured": "auto",
+                    "resolved": "high",
+                },
+            },
+        )
+        self.assertEqual(open_frame(bytes(range(32)), seal_frame(bytes(range(32)), welcome), direction="host"), welcome)
+        self.assertEqual(
+            open_frame(bytes(range(32)), seal_frame(bytes(range(32)), snapshot), direction="host"),
+            snapshot,
+        )
+        self.assertIs(validate_host_frame(welcome), welcome)
+        self.assertIs(validate_host_frame(snapshot), snapshot)
+        self.assertEqual(validate_host_frame({"t": "state", "state": state}), {"t": "state", "state": state})
+        for frame in events:
+            self.assertIs(validate_host_frame(frame), frame)
+
     def test_decode_rejects_duplicate_keys(self) -> None:
         payload = b'{"t":"hello","t":"abort"}'
         with self.assertRaises(ValueError):

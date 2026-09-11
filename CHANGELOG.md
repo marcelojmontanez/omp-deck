@@ -29,6 +29,15 @@
 - Restore image-viewer focus cleanup and the selected conversation after re-pairing.
 - Keep mobile dashboard counters within their columns.
 - Replace cached dashboard assets after upgrades and rollbacks, including when the restored files have older modification times.
+- Bind confirmation controls to the request actually displayed, preserve session links until initial state arrives, and reconcile repeated prompts without relying on synchronized device clocks.
+- Restore live extension messages and images, retain a working terminal connection when a newer endpoint fails, and keep removed sessions hidden across failed reconnect attempts.
+- Synchronize large extension histories without disconnecting readers, losing concurrent messages, or blocking interrupt and heartbeat controls; close pending Windows pipe connections during shutdown.
+- Accept complete published Collab message and snapshot metadata, update live tool activity, clear settled requests, and close failed connections before reconnecting.
+- Prevent delayed RPC updates from reviving stopped sessions or restoring old conversations, deliver confirmations while commands await them, and allow stopping recovery of disconnected managed sessions.
+- Preserve unrelated services when setup is rejected, retain state when service shutdown fails, and distinguish an absent optional plugin from an invalid plugin inventory during purge.
+- Preserve configured Linux/macOS profile environments, restore the previous macOS configuration after failed relocation, and contain Windows child processes before they can spawn descendants.
+- Keep newer read cursors when migration is repeated, resolve image blobs from the active OMP profile, expand configured executable paths, and share concurrent usage refreshes.
+- Bound HTTP connections and header waits, reject malformed session titles with validation errors, support IPv6 coordinator listeners, and render progress bars under the existing security policy.
 
 ## 1.1.0 — 2026-09-09
 

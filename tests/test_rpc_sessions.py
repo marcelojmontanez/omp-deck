@@ -10,17 +10,14 @@ from pathlib import Path
 from threading import Event, Thread
 from unittest.mock import patch
 
-from omp_rpc import ReadyEvent, RpcProcessExitError
+from omp_rpc import BranchResult, ReadyEvent, RpcProcessExitError
 
+from omp_deck._rpc_dispatch import SessionCommandConflictError, SessionNotConnectedError
 from omp_deck.fleet_model import FleetModel
 from omp_deck.registry_store import RegistryStore
 from omp_deck.rpc_adapter import AdapterError
 from omp_deck.rpc_refresh import RpcRefreshScheduler
-from omp_deck.rpc_sessions import (
-    RpcSessionManager,
-    SessionCommandConflictError,
-    SessionNotConnectedError,
-)
+from omp_deck.rpc_sessions import RpcSessionManager
 from omp_deck.settings import Settings
 
 
@@ -59,6 +56,9 @@ class FakeRpcClient:
 
     fail_get_state_once: BaseException | None = None
     prompt_entered: dict[str, Event] = {}
+    branch_entered: Event | None = None
+    branch_release: Event | None = None
+    ui_response_entered: Event | None = None
     prompt_release: dict[str, Event] = {}
 
     def __init__(self, **kwargs):
@@ -123,15 +123,20 @@ class FakeRpcClient:
             raise RuntimeError("stop failed")
 
     def get_state(self):
-        if self.get_state_entered is not None:
-            self.get_state_entered.set()
-        if self.get_state_release is not None:
-            self.get_state_release.wait(timeout=2)
+        state = self.state
+        entered = self.get_state_entered
+        release = self.get_state_release
+        if entered is not None:
+            self.get_state_entered = None
+            self.get_state_release = None
+            entered.set()
+        if release is not None:
+            release.wait(timeout=2)
         failure = type(self).fail_get_state_once
         if failure is not None:
             type(self).fail_get_state_once = None
             raise failure
-        return self.state
+        return state
 
     def get_messages(self):
         if self.state.message_count == 0:
@@ -187,12 +192,18 @@ class FakeRpcClient:
 
     def branch(self, *args):
         self._call("branch", *args)
+        entered = type(self).branch_entered
+        if entered is not None:
+            entered.set()
+        release = type(self).branch_release
+        if release is not None:
+            release.wait(timeout=2)
         session_file = self.session_root / "omp-branched.jsonl"
         self._write_session(session_file, "omp-branched")
         self.state = dataclasses.replace(
             self.state, session_id="omp-branched", session_file=str(session_file.resolve())
         )
-        return _Correlation("omp-branched", _Outcome.COMPLETE)
+        return BranchResult(text="branched", cancelled=False)
 
     def switch_session(self, session_path):
         self._call("switch_session", session_path)
@@ -206,6 +217,9 @@ class FakeRpcClient:
         return _Outcome.COMPLETE
 
     def send_ui_value(self, *args):
+        entered = type(self).ui_response_entered
+        if entered is not None:
+            entered.set()
         return self._call("send_ui_value", *args)
 
     def send_ui_confirmation(self, *args):
@@ -228,6 +242,10 @@ class FakeRpcClient:
 
     def emit_event(self, value):
         for listener in tuple(self.listeners["event"]):
+            listener(value)
+
+    def emit_ui(self, value):
+        for listener in tuple(self.listeners["ui"]):
             listener(value)
 
 
@@ -262,6 +280,9 @@ class TestRpcSessionManager(unittest.TestCase):
         FakeRpcClient.fail_get_state_once = None
         FakeRpcClient.prompt_entered.clear()
         FakeRpcClient.prompt_release.clear()
+        FakeRpcClient.branch_entered = None
+        FakeRpcClient.ui_response_entered = None
+        FakeRpcClient.branch_release = None
         self.rpc_patch = patch("omp_deck.rpc_sessions.RpcClient", FakeRpcClient)
         self.rpc_patch.start()
         self.manager = RpcSessionManager(self.settings, self.model, self.registry)
@@ -410,7 +431,7 @@ class TestRpcSessionManager(unittest.TestCase):
         )
         self.assertEqual(client.calls[0][2]["streaming_behavior"], "steer")
         self.assertEqual(results["setModel"]["result"], {"session_id": "omp-official-1", "outcome": "complete"})
-        self.assertEqual(results["branch"]["result"]["session_id"], "omp-branched")
+        self.assertEqual(results["branch"]["result"], {"text": "branched", "cancelled": False})
         self.assertEqual(results["switchSession"]["result"]["session_id"], "omp-switched")
         self.assertEqual(results["compact"]["result"], "complete")
         self.assertTrue(all(result["accepted"] for result in results.values()))
@@ -425,6 +446,25 @@ class TestRpcSessionManager(unittest.TestCase):
         self.assertFalse(self.registry.load()[0]["desiredRpcRunning"])
         self.assertEqual(self.model.get(session_id)["transport"]["status"], "disconnected")
         self.assertEqual(self.model.get(session_id)["transport"]["reason"], "shut down")
+
+    def test_disconnected_failed_recovery_can_be_shut_down_durably(self):
+        session_id = self.launch()["id"]
+        self.manager.close()
+        FakeRpcClient.fail_start = True
+        recovering_model = FleetModel()
+        recovering = RpcSessionManager(self.settings, recovering_model, self.registry)
+        self.manager = recovering
+        self.assertIn(session_id, recovering.recover_desired())
+
+        result = recovering.command(session_id, "shutdown", {})
+        self.assertEqual(result, {"accepted": True, "result": None})
+        self.assertFalse(self.registry.load()[0]["desiredRpcRunning"])
+
+        recovering.close()
+        restarted = RpcSessionManager(self.settings, FleetModel(), self.registry)
+        self.manager = restarted
+        self.assertEqual(restarted.recover_desired(), {})
+        self.assertEqual(len(FakeRpcClient.instances), 2)
 
     def test_shutdown_failure_retains_runtime_ownership_for_retry(self):
         session_id = self.launch()["id"]
@@ -627,6 +667,29 @@ class TestRpcSessionManager(unittest.TestCase):
         self.assertEqual(recovering.recover_desired(), {})
         self.assertEqual(FakeRpcClient.instances[-1].resumed_path, str(switch_target))
 
+    def test_refresh_captured_before_branch_cannot_restore_old_identity(self):
+        session_id = self.launch()["id"]
+        client = FakeRpcClient.instances[-1]
+        refresh_entered = Event()
+        refresh_release = Event()
+        client.get_state_entered = refresh_entered
+        client.get_state_release = refresh_release
+        refresh = Thread(target=self.manager.refresh, args=(session_id,), daemon=True)
+        refresh.start()
+        try:
+            self.assertTrue(refresh_entered.wait(timeout=1))
+            self.manager.command(session_id, "branch", {"entryId": "entry-7"})
+        finally:
+            refresh_release.set()
+            refresh.join(timeout=1)
+
+        self.assertFalse(refresh.is_alive())
+        record = self.registry.load()[0]
+        self.assertEqual(record["ompSessionId"], "omp-branched")
+        self.assertEqual(
+            record["recoveryMetadata"], {"sessionFile": str(self.settings.session_root / "omp-branched.jsonl")}
+        )
+
     def test_repeated_recovery_does_not_mutate_generation_or_spawn_again(self):
         session_id = self.launch()["id"]
         self.manager.close()
@@ -682,21 +745,25 @@ class TestRpcSessionManager(unittest.TestCase):
         second_project.mkdir()
         second_id = self.manager.launch("second", second_project)["id"]
         second_client = FakeRpcClient.instances[-1]
-        first_client.get_state_entered = Event()
-        first_client.get_state_release = Event()
-        second_client.get_state_entered = Event()
+        first_entered = Event()
+        first_release = Event()
+        second_entered = Event()
+        first_client.get_state_entered = first_entered
+        first_client.get_state_release = first_release
+        second_client.get_state_entered = second_entered
         second_client.state = dataclasses.replace(second_client.state, thinking_level="low")
         event_id = self.model.journal.latest_id
 
         self.manager.request_refresh_connected()
-
-        self.assertTrue(first_client.get_state_entered.wait(timeout=1))
-        self.assertTrue(second_client.get_state_entered.wait(timeout=1))
-        events = self.model.journal.wait_after(event_id, timeout=1)
-        self.assertTrue(any(event.session_id == second_id for event in events))
-        self.assertEqual(self.model.get(second_id)["thinking"], "low")
-        self.assertEqual(self.model.get(first_id)["thinking"], "medium")
-        first_client.get_state_release.set()
+        try:
+            self.assertTrue(first_entered.wait(timeout=1))
+            self.assertTrue(second_entered.wait(timeout=1))
+            events = self.model.journal.wait_after(event_id, timeout=1)
+            self.assertTrue(any(event.session_id == second_id for event in events))
+            self.assertEqual(self.model.get(second_id)["thinking"], "low")
+            self.assertEqual(self.model.get(first_id)["thinking"], "medium")
+        finally:
+            first_release.set()
 
     def test_failed_reconnect_is_retried_on_next_connected_refresh(self):
         session_id = self.launch()["id"]
@@ -853,6 +920,85 @@ class TestRpcSessionManager(unittest.TestCase):
             )
 
         self.assertFalse((self.settings.state_root / "requests.json").exists())
+
+    def test_ui_response_is_not_blocked_by_command_or_stale_snapshot(self):
+        session_id = self.launch()["id"]
+        client = FakeRpcClient.instances[-1]
+        branch_entered = Event()
+        branch_release = Event()
+        ui_response_entered = Event()
+        refresh_entered = Event()
+        refresh_release = Event()
+        FakeRpcClient.branch_entered = branch_entered
+        FakeRpcClient.branch_release = branch_release
+        FakeRpcClient.ui_response_entered = ui_response_entered
+        branch_result = []
+        responses = []
+        branch = Thread(
+            target=lambda: branch_result.append(
+                self.manager.dispatch(session_id, "branch-request", "branch", {"entryId": "entry-7"})
+            ),
+            daemon=True,
+        )
+        response = Thread(
+            target=lambda: responses.append(
+                self.manager.dispatch(
+                    session_id,
+                    "ui-response",
+                    "respondToUi",
+                    {"requestId": "branch-ui", "value": "answer"},
+                )
+            ),
+            daemon=True,
+        )
+        branch.start()
+        try:
+            self.assertTrue(branch_entered.wait(timeout=1))
+            client.emit_ui(
+                type(
+                    "Ui",
+                    (),
+                    {
+                        "id": "branch-ui",
+                        "method": "input",
+                        "title": "Branch",
+                        "message": "Name",
+                        "options": None,
+                        "option_details": None,
+                        "placeholder": None,
+                        "prefill": None,
+                        "timeout": None,
+                        "target_id": None,
+                        "requires_response": lambda self: True,
+                    },
+                )()
+            )
+            client.get_state_entered = refresh_entered
+            client.get_state_release = refresh_release
+            response.start()
+            self.assertTrue(ui_response_entered.wait(timeout=0.2))
+            response.join(timeout=1)
+            self.assertFalse(response.is_alive())
+            self.assertTrue(refresh_entered.wait(timeout=1))
+            branch_release.set()
+            branch.join(timeout=1)
+            self.assertFalse(branch.is_alive())
+            self.manager.shutdown(session_id)
+        finally:
+            branch_release.set()
+            refresh_release.set()
+            response.join(timeout=1)
+            branch.join(timeout=1)
+            self.manager._refreshes.close(timeout=2)
+
+        self.assertFalse(branch.is_alive())
+        self.assertFalse(response.is_alive())
+        self.assertEqual(branch_result[0]["status"], "accepted")
+        self.assertEqual(responses[0]["status"], "accepted")
+        self.assertEqual(client.calls[-1][0], "send_ui_value")
+        self.assertEqual(self.model.get(session_id)["transport"]["status"], "disconnected")
+        self.assertEqual(self.model.get(session_id)["ompSessionId"], "omp-branched")
+        self.assertEqual(self.registry.load()[0]["ompSessionId"], "omp-branched")
 
     def test_dispatch_serializes_each_session_without_blocking_other_sessions(self):
         first_id = self.launch()["id"]

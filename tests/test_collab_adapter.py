@@ -13,6 +13,7 @@ from omp_deck.collab_protocol import (
     seal_frame,
     unpack_envelope,
 )
+from omp_deck.fleet_model import FleetModel
 from omp_deck.rpc_adapter import AdapterDisconnectedError, AdapterError, AdapterIncompatibleError
 
 KEY = bytes(range(32))
@@ -214,6 +215,114 @@ class CollabAdapterTests(unittest.TestCase):
         adapter._ws = Socket([])
         self.assertTrue(adapter.respond_ui(4, "yes"))
         self.assertFalse(adapter.respond_ui(4, "again"))
+
+    def test_live_events_are_normalized_for_fleet_activity(self):
+        events = []
+        adapter, _ = self.make([], on_event=events.append)
+        welcome = {
+            **WELCOME,
+            "state": {
+                **WELCOME["state"],
+                "sessionName": "Live terminal",
+                "thinkingLevel": "high",
+                "model": {
+                    "id": "gpt-5",
+                    "name": "GPT-5",
+                    "provider": "openai",
+                    "api": "responses",
+                    "contextWindow": 200000,
+                },
+            },
+        }
+        adapter._receive(host(welcome))
+        adapter._receive(host(CHUNK))
+
+        model = FleetModel()
+        model.load_record(
+            {
+                "id": "deck",
+                "title": "Terminal",
+                "project": {"name": "Terminal", "path": "/x"},
+                "adapterKind": "collab",
+                "generation": 1,
+                "updatedAt": "2026-01-01T00:00:00+00:00",
+            }
+        )
+        self.assertTrue(
+            model.apply_collab_snapshot("deck", instance_id="collab", generation=1, snapshot=adapter.snapshot())
+        )
+        projected = model.get("deck")
+        self.assertEqual(projected["title"], "Live terminal")
+        self.assertEqual(projected["thinking"], "high")
+        self.assertEqual(
+            projected["model"],
+            {"provider": "openai", "id": "gpt-5", "name": "GPT-5", "api": "responses"},
+        )
+        adapter._ingest(
+            7,
+            {
+                "t": "event",
+                "event": {
+                    "type": "tool_execution_start",
+                    "toolCallId": "call-1",
+                    "toolName": "read",
+                    "args": {"path": "x"},
+                    "intent": "inspect",
+                },
+            },
+        )
+        event = events[-1]
+        self.assertEqual(event.type, "tool_execution_start")
+        self.assertEqual(
+            event.payload,
+            {"tool_call_id": "call-1", "tool_name": "read", "args": {"path": "x"}, "intent": "inspect"},
+        )
+        self.assertTrue(model.apply_adapter_event("deck", instance_id="collab", generation=1, event=event))
+        self.assertEqual(model.get("deck")["workingOn"], "inspect")
+
+    def test_successful_ui_response_emits_authoritative_settlement(self):
+        events = []
+        adapter, _ = self.make([])
+        adapter._status = "connected"
+        adapter._ws = Socket([])
+        adapter._ui[4] = {"reqId": 4, "kind": "editor", "title": "x"}
+        adapter._ui_order.append(4)
+        adapter._callback = events.append
+
+        self.assertTrue(adapter.respond_ui(4, "yes"))
+        self.assertEqual((events[-1].type, events[-1].payload), ("ui_request_resolved", {"id": "4"}))
+        self.assertIsNone(adapter._ingest_ui_request_end({"reqId": 4}))
+        self.assertEqual(len(events), 1)
+
+    def test_failed_connection_is_closed_before_reconnect(self):
+        class FailingRecvSocket(Socket):
+            def __init__(self, peer):
+                super().__init__([])
+                self.peer = peer
+
+            def recv(self, timeout=None):
+                raise OSError("connection lost")
+
+            def close(self):
+                self.peer.append("closed")
+                super().close()
+
+        observations = []
+        sockets = []
+
+        def connector(url, **opts):
+            observations.append(tuple(sockets[-1].peer) if sockets else ())
+            socket = FailingRecvSocket([])
+            sockets.append(socket)
+            if len(sockets) == 2:
+                adapter._stopping.set()
+            return socket
+
+        adapter = CollabAdapter(link(), "guest", connector=connector, random=lambda: 0)
+        adapter._stopping.wait = lambda delay: False
+        adapter._run()
+        self.assertEqual(observations[1], ("closed",))
+        self.assertTrue(sockets[0].closed)
 
     def test_relay_control_text_is_strict_bounded_and_room_close_is_fatal(self):
         adapter, _ = self.make([], max_frame_bytes=128)

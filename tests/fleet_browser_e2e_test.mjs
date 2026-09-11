@@ -165,6 +165,29 @@ test('independent viewers route duplicate session IDs directly and survive one m
     await pair(page, coordinator);
   }
   const desktopId = await selectMachineSession(phone, 'Desktop');
+  const coldDeepLink = await phone.evaluate(selectedId => {
+    const requested = 'cold-machine:session-before-snapshot';
+    const machine = ompDeckApi.machines()[0];
+    const node = nodeState(machine.id);
+    node.hasSnapshot = false;
+    ompDeckApi.setMachineStatus(machine.id, 'live');
+    state.pendingSelection = requested;
+    const url = new URL(location.href);
+    url.searchParams.set('session', requested);
+    history.replaceState({view: 'chat', session: requested}, '', url);
+    renderFleet();
+    const result = {
+      pendingSelection: state.pendingSelection,
+      urlSelection: new URL(location.href).searchParams.get('session'),
+    };
+    state.pendingSelection = null;
+    selectAgent(selectedId, {pushHistory: false});
+    return result;
+  }, desktopId);
+  assert.deepEqual(coldDeepLink, {
+    pendingSelection: 'cold-machine:session-before-snapshot',
+    urlSelection: 'cold-machine:session-before-snapshot',
+  });
   await phone.type('#message', 'Keep this desktop draft');
   const attachment = await phone.$('#attachment-input');
   const image = path.join(root, 'draft.png');

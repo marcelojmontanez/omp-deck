@@ -48,7 +48,7 @@ function renderPendingRequest(agent) {
   const custom = question.allowCustom || ['input', 'editor'].includes(pending.kind)
     ? `<label class="request-custom"><span>Your answer</span><textarea rows="${pending.kind === 'editor' ? 4 : 2}" data-request-custom placeholder="${escapeHtml(question.customPlaceholder || '')}">${escapeHtml(question.prefill || '')}</textarea></label>`
     : '';
-  el['pending-request'].innerHTML = `<form data-pending-form>
+  el['pending-request'].innerHTML = `<form data-pending-form data-session-id="${escapeHtml(agent.id)}" data-request-id="${escapeHtml(pending.id)}">
     <div class="request-heading"><strong>${escapeHtml(pending.title || 'Input required')}</strong><span>${escapeHtml(pending.kind)}</span></div>
     ${pending.message ? `<p>${escapeHtml(pending.message)}</p>` : ''}
     <fieldset><legend>${escapeHtml(question.prompt || pending.title || 'Choose a response')}</legend>${choices}</fieldset>
@@ -64,6 +64,13 @@ async function settlePendingRequest({cancel = false} = {}) {
   if (!agent || !pending || pending.status === 'terminal_only' || agent.nodeAvailable === false || !agent.bridgeConnected) return;
   if ((!cancel && !agent.capabilities?.answerUiRequest) || (cancel && !agent.capabilities?.cancelUiRequest)) return;
   const form = el['pending-request'].querySelector('[data-pending-form]');
+  if (
+    form?.dataset.sessionId !== agent.id
+    || form?.dataset.requestId !== pending.id
+  ) {
+    renderPendingRequest(agent);
+    return;
+  }
   const status = form?.querySelector('[role="status"]');
   const question = pending.questions?.[pending.questionIndex || 0] || {};
   let value;

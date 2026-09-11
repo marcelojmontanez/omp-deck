@@ -9,7 +9,12 @@ import sys
 import time
 from pathlib import Path
 
-from .installation_paths import has_ownership_marker, installation_paths, validate_manifest
+from .installation_paths import (
+    has_ownership_marker,
+    installation_paths,
+    validate_manifest,
+    validate_ownership_claim,
+)
 from .lifecycle import (
     ServiceSnapshot,
     _capture_roots,
@@ -29,6 +34,7 @@ _INHERITED_PATH_ENVIRONMENT = (
     "OMP_DECK_BIN_DIR",
     "PI_CODING_AGENT_DIR",
 )
+_INHERITED_SCALAR_ENVIRONMENT = ("OMP_PROFILE", "PI_PROFILE")
 
 
 def _result(runner, command, *, check=True, capture_output=False):
@@ -209,6 +215,10 @@ def _environment(config_path: Path, settings, executable: str) -> dict[str, str]
         value = os.environ.get(name)
         if value:
             environment[name] = str(Path(value).expanduser().absolute())
+    for name in _INHERITED_SCALAR_ENVIRONMENT:
+        value = os.environ.get(name)
+        if value:
+            environment[name] = value
 
     omp_executable = Path(settings.omp_bin).expanduser()
     if not omp_executable.is_absolute():
@@ -315,7 +325,9 @@ def restore_service_state(snapshot: ServiceSnapshot, *, runner) -> None:
 
     _restore_service_files(snapshot, paths)
     if snapshot.unit is not None:
-        _validate_plist(paths.unit_path, runner, config_path=paths.config_path)
+        # A relocation rollback restores the plist's original config argument,
+        # which intentionally differs from the failed installation's path.
+        _validate_plist(paths.unit_path, runner)
     if snapshot.installation is not None:
         for root in reversed(snapshot.roots):
             _restore_root(root)
@@ -341,6 +353,15 @@ def install_service(settings, config_path: Path, *, runner, start: bool = True):
         _validate_existing_service(runner, loaded=loaded)
 
     intended_paths = installation_paths(config_file=config_path, state_root=settings.state_root)
+    validate_ownership_claim(intended_paths.install_root)
+    validate_ownership_claim(
+        intended_paths.config_root,
+        (intended_paths.config_path,),
+    )
+    validate_ownership_claim(
+        intended_paths.state_root,
+        (intended_paths.state_root / "auth.json", intended_paths.state_root / ".auth.lock"),
+    )
     _launch_agents_directory(intended_paths.unit_path)
     if loaded:
         _bootout(runner)

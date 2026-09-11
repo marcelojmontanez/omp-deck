@@ -88,6 +88,17 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(repeated["sessionsImported"], 0)
         self.assertEqual(len(RegistryStore(self.state / "registry.json").load()), 1)
 
+    def test_rerun_does_not_replace_a_newer_read_cursor(self):
+        self.write_legacy_state()
+        apply_migration(self.settings)
+        session_id = terminal_id(self.session_id)
+        CursorStore(self.settings.cursor_path).mark_read(session_id, "new-event-9")
+
+        repeated = apply_migration(self.settings)
+
+        self.assertEqual(repeated["readCursorsImported"], 0)
+        self.assertEqual(CursorStore(self.settings.cursor_path).last_read(session_id), "new-event-9")
+
     def test_apply_accepts_authentication_lock_created_by_auth_manager(self):
         auth = self.state / "auth.json"
         auth.write_text('{"version":1}', encoding="utf-8")

@@ -165,6 +165,13 @@ reads bind ACL, owner, reparse-point, size, and final-path validation to the
 opened handles. Private responses use `no-store`, a restrictive CSP, and browser
 hardening headers.
 
+Each HTTP listener admits at most 64 simultaneous connections and closes
+connections whose request headers do not complete within ten seconds, including
+clients that keep sending partial headers. Excess connections are closed before
+allocating a handler. Completed requests, including authenticated SSE streams,
+are not subject to the header deadline. These limits do not replace the
+owner-restricted network access boundary.
+
 Node state contains stable session metadata, hashed local-device credentials,
 last-read cursors, imported Collab credentials, and—when enrolled—the
 coordinator public-key trust record. Coordinator state separately contains its

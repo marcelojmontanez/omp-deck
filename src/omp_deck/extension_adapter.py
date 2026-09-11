@@ -39,7 +39,11 @@ def _default_connector(path: str):
 
         return connect_named_pipe(path)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.connect(path)
+    try:
+        sock.connect(path)
+    except Exception:
+        sock.close()
+        raise
     return sock
 
 
@@ -391,8 +395,8 @@ class ExtensionAdapter:
         if callback is not None:
             try:
                 callback(event)
-            except Exception:
-                pass
+            except Exception as error:
+                raise ExtensionProtocolError("event callback failed") from error
 
     def _reader_loop(self) -> None:
         reason = "extension disconnected"

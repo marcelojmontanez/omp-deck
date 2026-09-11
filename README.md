@@ -29,6 +29,8 @@ Python normalizes all transports into one session model. The browser uses advert
 
 Capabilities can differ by transport, authorization, connection state, platform, and protocol version. Unavailable controls are disabled rather than silently emulated. Extension disconnects never abort the terminal session. Collab failures affect only the imported Collab session.
 
+The extension fallback runs only in interactive terminal mode. RPC, JSON, and print-mode OMP processes do not publish fallback endpoints or appear as additional terminal sessions.
+
 Extension shutdown follows OMP's deferred shutdown request: it may wait for OMP's next idle boundary rather than immediately exit an idle terminal. Deck does not inject terminal input or force-kill that session.
 
 ## Install
@@ -288,10 +290,11 @@ cursor files that are symlinks, world-writable, unowned, oversized, or malformed
 are rejected and reported instead of being trusted. Accepted legacy values are
 rewritten into a mode-`0600` normalized cursor store.
 A migrated terminal session reconnects after that OMP process loads the new
-plugin; Deck never injects code into an already-running OMP process.
+plugin. Wait until the session is idle, then restart OMP and resume it normally.
+`/reload-plugins` does not reload extension modules in OMP 18.1.14 or 18.1.16;
+Deck never injects code or keystrokes into an already-running OMP process.
 
-The currently deployed copied-file version corresponds to source revision
-`051410ee43e4d32fd60a9044a8c8873cf93a4365`. Before an authorized production
+For a copied-file legacy installation, before an authorized production
 cutover, stop the old service and place these artifacts in a mode-`0700`
 backup directory outside `~/.local/state/omp-deck`:
 

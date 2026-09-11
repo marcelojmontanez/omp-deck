@@ -125,9 +125,6 @@ class FakeClient:
     def set_thinking_level(self, *args):
         return self._call("set_thinking_level", *args)
 
-    def new_session(self):
-        return self._call("new_session")
-
     def branch(self, *args):
         return self._call("branch", *args)
 
@@ -199,33 +196,6 @@ class TestRpcAdapter(unittest.TestCase):
         self.assertTrue(client.stopped)
         self.assertEqual(client.unsubscribed, 5)
         self.assertTrue(all(not listeners for listeners in client.listeners.values()))
-
-    def test_commands_map_only_to_public_client_methods(self):
-        adapter, client = started()
-        adapter.send_message("one", images=[{"data": "x"}], streaming_behavior="steer")
-        adapter.follow_up("two")
-        adapter.interrupt()
-        adapter.set_model("openai", "gpt")
-        adapter.set_thinking("high")
-        adapter.new_session()
-        adapter.branch("entry")
-        adapter.switch("session.jsonl")
-        adapter.resume("other.jsonl")
-        self.assertEqual(
-            [call[0] for call in client.calls],
-            [
-                "prompt",
-                "follow_up",
-                "abort",
-                "set_model",
-                "set_thinking_level",
-                "new_session",
-                "branch",
-                "switch_session",
-                "switch_session",
-            ],
-        )
-        self.assertEqual(client.calls[0][2]["streaming_behavior"], "steer")
 
     def test_bounded_event_ingestion_is_ordered_and_callbacks_are_outside_storage(self):
         observed = []

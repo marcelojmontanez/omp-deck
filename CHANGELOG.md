@@ -21,6 +21,7 @@
 - Refuse purging configured XDG roots reached through filesystem aliases.
 - Preserve the original setup error when plugin installation fails before creating a plugin.
 - Persist a fresh managed session before exposing it so an unused empty OMP session resumes after Deck restarts; missing or replaced session files now fail explicitly instead of creating a different conversation.
+- Keep the terminal extension inactive in RPC, JSON, and print modes so a managed session cannot also appear as a duplicate terminal session.
 
 ## 1.1.0 — 2026-09-09
 

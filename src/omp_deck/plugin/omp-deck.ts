@@ -429,6 +429,8 @@ export default function ompDeck(pi: ExtensionAPI) {
   }
 
   function queueRestart(context: ExtensionContext): Promise<void> {
+    // RPC owns its structured transport; only terminal hosts need this fallback.
+    if (context.mode !== "tui") return lifecycleTail;
     const generation = ++lifecycleGeneration;
     lifecycleTail = lifecycleTail.then(() => start(context, generation)).catch((error) => {
       pi.logger.warn("OMP Deck fallback lifecycle failed", { error: errorText(error) });
@@ -437,7 +439,7 @@ export default function ompDeck(pi: ExtensionAPI) {
   }
 
   function startHeartbeat(context: ExtensionContext): void {
-    if (heartbeatTimer) return;
+    if (context.mode !== "tui" || heartbeatTimer) return;
     heartbeatTimer = context.setInterval(() => {
       const now = Date.now();
       for (const peer of peers) {

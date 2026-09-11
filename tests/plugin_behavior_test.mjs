@@ -40,6 +40,7 @@ test('plugin events preserve sequence and synchronize active history', async () 
     {role: 'assistant', content: 'original answer', timestamp: 2},
   ];
   const context = {
+    mode: 'tui',
     cwd: '/work/test',
     model: {provider: 'test', id: 'model'},
     sessionManager: {
@@ -174,6 +175,52 @@ test('plugin events preserve sequence and synchronize active history', async () 
       clearTimeout(timer);
       clearInterval(timer);
     }
+    if (previousStateHome === undefined) delete process.env[stateVariable];
+    else process.env[stateVariable] = previousStateHome;
+    await rm(root, {recursive: true, force: true});
+  }
+});
+
+test('RPC hosts never expose a terminal fallback through lifecycle changes', async () => {
+  const root = await mkdtemp(path.join(process.platform === 'darwin' ? '/tmp' : tmpdir(), 'od-rpc-'));
+  const stateVariable = process.platform === 'win32' ? 'LOCALAPPDATA' : 'XDG_STATE_HOME';
+  const previousStateHome = process.env[stateVariable];
+  process.env[stateVariable] = root;
+  const handlers = new Map();
+  const timers = new Set();
+  const context = {
+    mode: 'rpc',
+    cwd: root,
+    sessionManager: {
+      getSessionId: () => 'managed-rpc',
+      getSessionFile: () => null,
+      getSessionName: () => null,
+    },
+    setInterval(callback, delay) {
+      const timer = setInterval(callback, delay);
+      timers.add(timer);
+      return timer;
+    },
+    clearTimer(timer) {
+      clearInterval(timer);
+      timers.delete(timer);
+    },
+  };
+  try {
+    const {default: register} = await import(`${PLUGIN.href}?rpc=${Date.now()}`);
+    register({
+      pi: {VERSION: 'test'},
+      logger: {warn() {}},
+      on(name, handler) { handlers.set(name, handler); },
+    });
+    for (const event of ['session_start', 'session_switch', 'session_branch']) {
+      await handlers.get(event)({}, context);
+      assert.deepEqual(await readdir(root), [], `${event} exposed a fallback endpoint for RPC`);
+      assert.equal(timers.size, 0, `${event} left a fallback heartbeat running for RPC`);
+    }
+  } finally {
+    await handlers.get('session_shutdown')?.();
+    for (const timer of timers) clearInterval(timer);
     if (previousStateHome === undefined) delete process.env[stateVariable];
     else process.env[stateVariable] = previousStateHome;
     await rm(root, {recursive: true, force: true});

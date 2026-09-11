@@ -479,6 +479,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     renderSummary();
     renderList();
     const history = [...el['agent-list'].querySelectorAll('.agent-card')].map(card => card.dataset.id);
+    const ongoingReturnCount = el['history-count'].textContent;
     selectAgent(active.id, {pushHistory: false});
     el.message.value = 'draft survives history';
     el.message.dispatchEvent(new Event('input', {bubbles: true}));
@@ -497,12 +498,13 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     renderSummary();
     renderList();
     return {
-      ongoing, history, counts, historyFailure, authoritativeHistory,
+      ongoing, history, counts, ongoingReturnCount, historyFailure, authoritativeHistory,
       historyDetail, restoredDraft, selectedAfterReturn: state.selectedId,
     };
   });
   assert.deepEqual(lifecycleDashboard.ongoing.sort(), ['active', 'offline', 'recovering', 'unknown']);
   assert.deepEqual(lifecycleDashboard.history, ['saved']);
+  assert.equal(lifecycleDashboard.ongoingReturnCount, '4');
   assert.deepEqual(lifecycleDashboard.counts, {
     working: '1', attention: '4', idle: '1', history: '1',
   });

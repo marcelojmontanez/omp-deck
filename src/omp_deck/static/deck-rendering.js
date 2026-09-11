@@ -104,7 +104,8 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     el['attention-count'].textContent = ongoing.filter(needsAttention).length;
     el['unread-count'].textContent = ongoing.filter(agent => agent.inboxState === 'unread').length;
     el['idle-count'].textContent = statuses.filter(status => status === 'idle').length;
-    el['history-count'].textContent = state.agents.filter(agent => lifecycle(agent) === 'history').length;
+    el['history-count'].textContent = state.sessionScope === 'history'
+      ? ongoing.length : state.agents.length - ongoing.length;
     el['history-toggle'].setAttribute('aria-pressed', String(state.sessionScope === 'history'));
     el['history-toggle'].lastChild.textContent = state.sessionScope === 'history' ? ' Ongoing' : ' History';
     el['session-scope-title'].textContent = state.sessionScope === 'history' ? 'History' : 'Ongoing';

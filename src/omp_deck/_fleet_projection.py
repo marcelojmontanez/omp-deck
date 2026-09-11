@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ._session_activity import completion_state
+from ._thinking import normalized_thinking, thinking_levels_for_model
 from .rpc_adapter import AdapterSnapshot, PendingUiRequest
 
 CAPABILITIES: dict[str, dict[str, bool]] = {
@@ -18,7 +19,7 @@ CAPABILITIES: dict[str, dict[str, bool]] = {
         "shutdown": True,
         "remove": False,
         "setModel": True,
-        "setThinking": True,
+        "setThinking": False,
         "answerUiRequest": True,
         "cancelUiRequest": True,
         "subagents": True,
@@ -317,6 +318,9 @@ def rpc_projection(
 ) -> dict[str, Any]:
     pending = pending_ui_projection(snapshot.pending_ui_request)
     state = snapshot.state
+    thinking_levels = thinking_levels_for_model(state.get("model"))
+    capabilities = platform_capabilities("rpc")
+    capabilities["setThinking"] = bool(thinking_levels)
     public_state = (
         "disconnected"
         if snapshot.transport_status != "connected"
@@ -339,13 +343,15 @@ def rpc_projection(
             "instanceId": instance_id,
             "reason": snapshot.reason,
         },
+        "capabilities": capabilities,
         "messages": normalize_messages(snapshot.messages, session_id),
         "todos": normalize_todos(snapshot.todos),
         "subagents": bounded_collection(snapshot.subagents),
         "pendingUiRequest": pending,
         "workingOn": None if not state.get("is_streaming") else session.get("workingOn"),
         "model": _model_identity(state),
-        "thinking": state.get("thinking_level"),
+        "thinking": normalized_thinking(state.get("thinking_level")),
+        "thinkingLevels": list(thinking_levels),
         "_generation": generation,
         "_adapterSequence": snapshot.sequence,
         "_resyncRequired": False,
@@ -406,7 +412,8 @@ def collab_projection(
         "pendingUiRequest": pending,
         "workingOn": session.get("workingOn") if state.get("isStreaming") else None,
         "model": _model_identity(state),
-        "thinking": state.get("thinkingLevel"),
+        "thinking": normalized_thinking(state.get("thinkingLevel")),
+        "thinkingLevels": [],
         "_generation": generation,
         "_adapterSequence": snapshot.sequence,
         "_resyncRequired": False,
@@ -417,10 +424,13 @@ def collab_projection(
 def extension_projection(
     session: Mapping[str, Any], registration: Any, snapshot: Any, instance_id: str, generation: int
 ) -> dict[str, Any]:
+    thinking_control = registration.capabilities.get("setThinking") is True
+    thinking_levels = snapshot.thinking_levels if thinking_control else ()
     capabilities = platform_capabilities("extension")
     for capability in capabilities:
         if capability != "remove" and capability in registration.capabilities:
             capabilities[capability] = capabilities[capability] and bool(registration.capabilities[capability])
+    capabilities["setThinking"] = thinking_control and bool(thinking_levels)
     async_jobs = snapshot.async_jobs
     if isinstance(async_jobs, Mapping):
         async_jobs = async_jobs.get("jobs", [])
@@ -456,6 +466,9 @@ def extension_projection(
         "pendingUiRequest": pending,
         "workingOn": None if snapshot.idle else session.get("workingOn"),
         "model": _model_identity({"model": snapshot.model}),
+        "thinking": normalized_thinking(snapshot.thinking) if thinking_control else None,
+        "thinkingLevels": list(thinking_levels),
+        "_extensionThinkingControl": thinking_control,
         "_generation": generation,
         "_adapterSequence": snapshot.sequence,
         "_resyncRequired": False,

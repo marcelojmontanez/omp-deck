@@ -41,6 +41,7 @@ _PUBLIC_KEYS = (
     "workingOn",
     "model",
     "thinking",
+    "thinkingLevels",
 )
 
 
@@ -93,6 +94,7 @@ class FleetModel:
                 "workingOn": existing.get("workingOn") if existing else None,
                 "model": copy.deepcopy(existing.get("model")) if existing else None,
                 "thinking": existing.get("thinking") if existing else None,
+                "thinkingLevels": copy.deepcopy(existing.get("thinkingLevels", [])) if existing else [],
                 "_desiredRpcRunning": bool(record.get("desiredRpcRunning", False)),
                 "_generation": int(record["generation"]),
                 "_adapterSequence": int(existing.get("_adapterSequence", 0)) if live else 0,
@@ -100,6 +102,7 @@ class FleetModel:
                 "_resyncWatermark": int(existing.get("_resyncWatermark", 0)) if live else 0,
                 "_activeTools": copy.deepcopy(existing.get("_activeTools", {})) if live else {},
                 "_toolActivityOverflow": bool(existing.get("_toolActivityOverflow", False)) if live else False,
+                "_extensionThinkingControl": bool(existing.get("_extensionThinkingControl", False)) if live else False,
             }
             self._sessions[session_id] = session
             self._changed_locked("session_registered", session_id, {"session": self._public_session(session)})
@@ -407,6 +410,13 @@ class FleetModel:
     def supports(self, session_id: str, capability: str) -> bool:
         with self._lock:
             return bool(self._sessions[session_id]["capabilities"].get(capability, False))
+
+    def supports_thinking_level(self, session_id: str, level: str) -> bool:
+        with self._lock:
+            session = self._sessions[session_id]
+            return bool(
+                session["capabilities"].get("setThinking", False) and level in session.get("thinkingLevels", ())
+            )
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:

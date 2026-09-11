@@ -165,14 +165,23 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     const chips = [];
     const notices = [];
     const capabilities = agent?.capabilities || {};
+    if (agent) {
+      const choices = thinkingChoices(agent);
+      const level = thinkingLevel(agent);
+      const label = level || 'unavailable';
+      const editable = agent.nodeAvailable !== false && agent.bridgeConnected
+        && capabilities.setThinking && choices.length > 0;
+      const thinkingReason = typeof agent.transportReason === 'string'
+        ? agent.transportReason.trim().slice(0, 160) : '';
+      const unavailable = thinkingReason
+        ? `Thinking controls unavailable: ${thinkingReason}`
+        : 'Thinking controls are unavailable for this session';
+      chips.push(editable
+        ? `<button class="chip" type="button" data-thinking-level="${escapeHtml(label)}" aria-label="${escapeHtml(`Change thinking level; current ${label}`)}">thinking: ${escapeHtml(label)}</button>`
+        : `<span class="chip" title="${escapeHtml(unavailable)}">thinking: ${escapeHtml(label)} · ${escapeHtml(thinkingReason || 'control unavailable')}</span>`);
+    }
     if (agent?.machineName) chips.push(`<span class="chip machine-chip">${escapeHtml(agent.machineName)}</span>`);
     if (session.model) chips.push(`<span class="chip">${escapeHtml(session.model)}</span>`);
-    if (agent) {
-      const level = thinkingLevel(agent);
-      chips.push(agent.nodeAvailable !== false && agent.bridgeConnected && capabilities.setThinking
-        ? `<button class="chip" type="button" data-thinking-level="${escapeHtml(level)}">thinking: ${escapeHtml(level)}</button>`
-        : `<span class="chip">thinking: ${escapeHtml(level)}</span>`);
-    }
     const executionState = displayStatus(agent || {});
     el.detail.querySelector('.detail-title').textContent = agent?.label || 'Choose an OMP';
     el.detail.querySelector('.detail-path').textContent = agent
@@ -221,7 +230,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     }
     if (isLiveSession && agent?.historyError) {
       const safeReason = String(agent.historyError).slice(0, 240);
-      notices.push(`<span class="bridge-warning history-warning" role="status">${escapeHtml(`Conversation history could not synchronize. ${safeReason} Reload extensions in the terminal when this OMP is idle.`)}</span>`);
+      notices.push(`<span class="bridge-warning history-warning" role="status">${escapeHtml(`Conversation history could not synchronize. ${safeReason}. Restart this OMP when idle and resume the session to load an updated extension.`)}</span>`);
     }
     el.detail.querySelector('.detail-notices').innerHTML = notices.join('');
     let taskControl = '';

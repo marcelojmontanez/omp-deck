@@ -8,6 +8,7 @@ import { authenticateNamedPipe } from "./named-pipe-auth.ts";
 import { BoundedSocketWriter } from "./bounded-writer.ts";
 import { BoundedEventQueue } from "./bounded-event-queue.ts";
 import { captureHistory, projectMessage, streamHistory } from "./history-sync.ts";
+import { degradedSnapshot, readThinkingState, setThinking } from "./thinking-state.ts";
 const PROTOCOL = "omp-deck-fallback-v1";
 const MAX_LINE_BYTES = 1024 * 1024;
 const HEARTBEAT_MS = 15_000;
@@ -20,7 +21,8 @@ const UNIX_SOCKET_PATH_BYTES = process.platform === "linux" ? 108 : 104;
 const SOCKET_DIR = WINDOWS
   ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "OMP Deck", "state", "sockets")
   : path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "omp-deck", "sockets");
-type JsonObject = Record<string, unknown>; type ManagedTimer = Parameters<ExtensionContext["clearTimer"]>[0];
+type JsonObject = Record<string, unknown>;
+type ManagedTimer = Parameters<ExtensionContext["clearTimer"]>[0];
 interface Peer {
   socket: net.Socket;
   input: Buffer;
@@ -71,6 +73,7 @@ export default function ompDeck(pi: ExtensionAPI) {
       sessionId: session.id,
       title: session.title,
       project: context.cwd,
+      thinkingLevels: readThinkingState(pi, context).thinkingLevels,
       capabilities: {
         sendMessage: true,
         followUp: true,
@@ -78,6 +81,7 @@ export default function ompDeck(pi: ExtensionAPI) {
         shutdown: true,
         todos: true,
         subagents: true,
+        setThinking: true,
         answerUiRequest: false,
         answer_ui_request: false,
       },
@@ -113,13 +117,7 @@ export default function ompDeck(pi: ExtensionAPI) {
     if (!line) {
       degraded = true;
       if (kind === "snapshot") {
-        const snapshot = data && typeof data === "object" ? data as JsonObject : {};
-        wireData = {
-          idle: snapshot.idle === true,
-          pendingMessages: snapshot.pendingMessages === true,
-          model: null,
-          async: [],
-        };
+        wireData = degradedSnapshot(data);
       } else {
         wireKind = "degraded";
         wireData = { droppedKind: kind, reason: "event exceeds wire limit" };
@@ -144,13 +142,7 @@ export default function ompDeck(pi: ExtensionAPI) {
     let snapshotDegraded = false;
     if (!line) {
       if (kind === "snapshot") {
-        const snapshot = data && typeof data === "object" ? data as JsonObject : {};
-        queuedData = {
-          idle: snapshot.idle === true,
-          pendingMessages: snapshot.pendingMessages === true,
-          model: null,
-          async: [],
-        };
+        queuedData = degradedSnapshot(data);
         snapshotDegraded = true;
       } else {
         queuedKind = "degraded";
@@ -203,6 +195,7 @@ export default function ompDeck(pi: ExtensionAPI) {
       pendingMessages: context.hasPendingMessages(),
       model: context.model ? { provider: context.model.provider, id: context.model.id } : null,
       async: context.getAsyncJobSnapshot(),
+      ...readThinkingState(pi, context),
     };
   }
   async function dispatch(peer: Peer, request: JsonObject): Promise<void> {
@@ -232,6 +225,13 @@ export default function ompDeck(pi: ExtensionAPI) {
         case "shutdown":
           active.shutdown();
           break;
+        case "setThinking": {
+          const thinking = setThinking(pi, active, request.level);
+          emit("thinking", thinking);
+          const result = { ...thinking, eventSequence: peer.sequence };
+          await send(peer, { protocol: PROTOCOL, type: "response", id, ok: true, result });
+          return;
+        }
         case "snapshot": {
           const response = {
             protocol: PROTOCOL,
@@ -445,7 +445,7 @@ export default function ompDeck(pi: ExtensionAPI) {
       const now = Date.now();
       for (const peer of peers) {
         if (now - peer.lastPong > HEARTBEAT_MS * MAX_MISSED_HEARTBEATS) peer.socket.destroy();
-        else sendEvent(peer, "heartbeat", { time: now });
+        else sendEvent(peer, "heartbeat", { time: now, ...readThinkingState(pi, context) });
       }
     }, HEARTBEAT_MS);
   }
@@ -468,6 +468,7 @@ export default function ompDeck(pi: ExtensionAPI) {
   pi.on("session_tree", (_event, context) => { ctx = context; emitHistory(context); });
   pi.on("session_compact", (_event, context) => { ctx = context; emitHistory(context); });
   pi.on("agent_start", () => emit("lifecycle", { state: "agent_start" }));
+  pi.on("turn_start", (_event, context) => emit("thinking", readThinkingState(pi, context)));
   pi.on("agent_end", (_event, context) => emit("lifecycle", { state: "agent_end", snapshot: snapshots(context) }));
   pi.on("message_start", () => emit("message", { phase: "start" }));
   pi.on("message_update", () => emit("message", { phase: "update" }));

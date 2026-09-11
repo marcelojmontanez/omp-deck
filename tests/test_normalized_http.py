@@ -241,6 +241,28 @@ class NormalizedHttpTests(unittest.TestCase):
         self.assertEqual(self.rpc.calls, [])
         self.assertEqual(self.terminal.calls, [])
 
+    def test_thinking_choice_is_authorized_against_normalized_advertisement(self):
+        self.enable("terminal-1", "setThinking")
+        status, _, payload = self.post(
+            "/api/sessions/terminal-1/thinking",
+            {"requestId": "not-advertised", "level": "max"},
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["errorCode"], "unsupported")
+        self.assertEqual(self.terminal.calls, [])
+
+        with self.model._lock:
+            self.model._sessions["terminal-1"]["thinkingLevels"] = ["off", "low", "high"]
+        status, _, _ = self.post(
+            "/api/sessions/terminal-1/thinking",
+            {"requestId": "advertised", "level": "high"},
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(
+            self.terminal.calls,
+            [("terminal-1", "advertised", "setThinking", {"level": "high"})],
+        )
+
     def test_conflicting_request_id_reuse_is_a_409(self):
         first = {"requestId": "same-id", "message": "first"}
         second = {"requestId": "same-id", "message": "different"}

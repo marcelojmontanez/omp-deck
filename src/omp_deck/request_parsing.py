@@ -6,6 +6,7 @@ from http.cookies import SimpleCookie
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from ._thinking import REQUEST_THINKING_LEVELS
 from .attachments import detect_image_mime
 from .auth import COOKIE_NAME
 
@@ -161,7 +162,7 @@ def _non_message_command(suffix, data, session_root, request_id):
 
 def _thinking_command(data):
     level = data.get("level")
-    if level not in {"off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"}:
+    if level not in REQUEST_THINKING_LEVELS:
         raise ValueError("invalid thinking level")
     return "setThinking", {"level": level}
 

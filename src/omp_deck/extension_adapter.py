@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -14,7 +13,6 @@ from collections.abc import Callable, Mapping
 from types import MappingProxyType
 from typing import Any
 
-from ._extension_endpoint import unix_endpoint_name
 from ._extension_protocol import (
     ExtensionAdapterError,
     ExtensionDisconnected,
@@ -26,6 +24,9 @@ from ._extension_protocol import (
     _immutable,
     _object,
     _Pending,
+    parse_registration,
+    parse_thinking_state,
+    snapshot_from_data,
 )
 
 PROTOCOL = "omp-deck-fallback-v1"
@@ -105,6 +106,7 @@ class ExtensionAdapter:
         self._last_heartbeat = 0.0
         self._registration: ExtensionRegistration | None = None
         self._snapshot: ExtensionSnapshot | None = None
+        self._thinking_levels: tuple[str, ...] = ()
         self._closed = True
         self._reason: str | None = None
 
@@ -145,9 +147,10 @@ class ExtensionAdapter:
                     + b"\n"
                 )
                 sock.sendall(handshake)
-            registration = self._parse_registration(self._read_frame())
-            snapshot_frame = self._parse_event(self._read_frame(), require_snapshot=True)
+            registration = parse_registration(self._read_frame(), self.socket_path, PROTOCOL)
             self._registration = registration
+            self._thinking_levels = registration.thinking_levels
+            snapshot_frame = self._parse_event(self._read_frame(), require_snapshot=True)
             self._apply_event(snapshot_frame)
             self._last_heartbeat = self._clock()
             sock.settimeout(min(1.0, self._heartbeat_timeout / 4))
@@ -190,6 +193,48 @@ class ExtensionAdapter:
     def shutdown_session(self) -> Any:
         return self._request("shutdown")
 
+    def set_thinking(self, level: str) -> str | None:
+        with self._state_lock:
+            registration = self._registration
+            levels = self._thinking_levels
+        if registration is None or registration.capabilities.get("setThinking") is not True:
+            raise ExtensionAdapterError("thinking control is unavailable")
+        if level not in levels:
+            raise ValueError("unsupported thinking level")
+        result = _object(self._request("setThinking", level=level), "thinking response")
+        _exact_keys(
+            result,
+            {"thinking", "thinkingLevels", "eventSequence"},
+            set(),
+            "thinking response",
+        )
+        event_sequence = result["eventSequence"]
+        if type(event_sequence) is not int or event_sequence < 1:
+            raise ExtensionProtocolError("invalid thinking response sequence")
+        thinking, updated_levels = parse_thinking_state(result)
+        with self._state_lock:
+            if event_sequence < self._sequence:
+                if self._snapshot is None:
+                    raise ExtensionProtocolError("stale thinking response")
+                return self._snapshot.thinking
+            if event_sequence > self._sequence:
+                raise ExtensionProtocolError("future thinking response")
+            self._thinking_levels = updated_levels
+            if self._snapshot is not None:
+                old = self._snapshot
+                self._snapshot = ExtensionSnapshot(
+                    old.idle,
+                    old.pending_messages,
+                    old.model,
+                    old.async_jobs,
+                    old.sequence,
+                    old.transport_status,
+                    old.reason,
+                    thinking,
+                    updated_levels,
+                )
+        return thinking
+
     def refresh(self) -> ExtensionSnapshot:
         result = _object(self._request("snapshot"), "snapshot response")
         event_sequence = result.get("eventSequence")
@@ -202,7 +247,8 @@ class ExtensionAdapter:
                 return self._snapshot
             if event_sequence > self._sequence:
                 raise ExtensionProtocolError("future snapshot response")
-            snapshot = self._snapshot_from_data(result, event_sequence)
+            snapshot = snapshot_from_data(result, event_sequence, self._registration, self._thinking_levels)
+            self._thinking_levels = snapshot.thinking_levels
             self._snapshot = snapshot
             return snapshot
 
@@ -275,77 +321,6 @@ class ExtensionAdapter:
                 raise ExtensionDisconnected("extension disconnected")
             self._buffer.extend(chunk)
 
-    def _parse_registration(self, frame: dict[str, Any]) -> ExtensionRegistration:
-        required = {
-            "protocol",
-            "version",
-            "type",
-            "ompVersion",
-            "compatible",
-            "connectionId",
-            "session",
-            "sessionId",
-            "title",
-            "project",
-            "capabilities",
-        }
-        _exact_keys(frame, required, set(), "registration")
-        if (
-            frame["protocol"] != PROTOCOL
-            or frame["version"] != 1
-            or frame["type"] != "registration"
-            or frame["compatible"] is not True
-        ):
-            raise ExtensionProtocolError("incompatible registration")
-        strings = (frame["ompVersion"], frame["connectionId"], frame["sessionId"], frame["project"])
-        if any(not isinstance(value, str) or not value or len(value) > 4096 for value in strings):
-            raise ExtensionProtocolError("invalid registration")
-        if "\0" in frame["connectionId"] or "\0" in frame["sessionId"]:
-            raise ExtensionProtocolError("invalid registration")
-        if frame["title"] is not None and (not isinstance(frame["title"], str) or len(frame["title"]) > 4096):
-            raise ExtensionProtocolError("invalid registration")
-        session = _object(frame["session"], "session")
-        _exact_keys(session, {"id", "file", "title"}, set(), "session")
-        if (
-            session["id"] != frame["sessionId"]
-            or session["title"] != frame["title"]
-            or (session["file"] is not None and not isinstance(session["file"], str))
-        ):
-            raise ExtensionProtocolError("invalid session identity")
-        caps = _object(frame["capabilities"], "capabilities")
-        expected_caps = {
-            "sendMessage",
-            "followUp",
-            "interrupt",
-            "shutdown",
-            "todos",
-            "subagents",
-            "answerUiRequest",
-            "answer_ui_request",
-        }
-        _exact_keys(caps, expected_caps, set(), "capabilities")
-        if any(type(value) is not bool for value in caps.values()):
-            raise ExtensionProtocolError("invalid capabilities")
-        basename = os.path.basename(self.socket_path)
-        if os.name == "nt":
-            socket_id = hashlib.sha256(frame["sessionId"].encode("utf-8")).hexdigest()[:24]
-            valid_identity = basename.startswith(socket_id + ".") and basename.endswith(
-                "." + frame["connectionId"] + ".pipe"
-            )
-        else:
-            valid_identity = basename == unix_endpoint_name(frame["sessionId"], frame["connectionId"])
-        if not valid_identity:
-            raise ExtensionProtocolError("registration socket identity mismatch")
-        return ExtensionRegistration(
-            1,
-            frame["ompVersion"],
-            frame["sessionId"],
-            frame["project"],
-            frame["title"],
-            frame["connectionId"],
-            MappingProxyType(dict(caps)),
-        )
-
     def _parse_event(self, frame: dict[str, Any], *, require_snapshot: bool = False) -> Mapping[str, Any]:
         _exact_keys(frame, {"protocol", "type", "sequence", "kind", "data"}, set(), "event")
         if (
@@ -363,32 +338,39 @@ class ExtensionAdapter:
             {"sequence": frame["sequence"], "kind": frame["kind"], "data": _immutable(frame["data"])}
         )
 
-    def _snapshot_from_data(self, data: Any, sequence: int) -> ExtensionSnapshot:
-        data = _object(data, "snapshot")
-        _exact_keys(data, {"idle", "pendingMessages", "model", "async"}, {"eventSequence"}, "snapshot")
-        if type(data["idle"]) is not bool or type(data["pendingMessages"]) is not bool:
-            raise ExtensionProtocolError("invalid snapshot")
-        model = data["model"]
-        frozen_model = None
-        if model is not None:
-            model = _object(model, "model")
-            _exact_keys(model, {"provider", "id"}, set(), "model")
-            if any(not isinstance(value, str) or not value or len(value) > 1024 for value in model.values()):
-                raise ExtensionProtocolError("invalid model")
-            frozen_model = MappingProxyType(dict(model))
-        return ExtensionSnapshot(
-            data["idle"], data["pendingMessages"], frozen_model, _immutable(data["async"]), sequence, "connected", None
-        )
-
     def _apply_event(self, event: Mapping[str, Any]) -> None:
         sequence = event["sequence"]
         if self._sequence and sequence != self._sequence + 1:
             raise ExtensionProtocolError("event sequence gap")
         self._sequence = sequence
         if event["kind"] == "snapshot":
-            snapshot = self._snapshot_from_data(dict(event["data"]), sequence)
+            snapshot = snapshot_from_data(dict(event["data"]), sequence, self._registration, self._thinking_levels)
             with self._state_lock:
                 self._snapshot = snapshot
+                self._thinking_levels = snapshot.thinking_levels
+        elif event["kind"] in {"heartbeat", "thinking"}:
+            data = _object(event["data"], f"{event['kind']} data")
+            if "thinking" in data or "thinkingLevels" in data:
+                if "thinking" not in data or "thinkingLevels" not in data:
+                    raise ExtensionProtocolError("incomplete thinking state")
+                if self._registration is None or self._registration.capabilities.get("setThinking") is not True:
+                    raise ExtensionProtocolError("unadvertised thinking state")
+                thinking, levels = parse_thinking_state(data)
+                with self._state_lock:
+                    self._thinking_levels = levels
+                    if self._snapshot is not None:
+                        old = self._snapshot
+                        self._snapshot = ExtensionSnapshot(
+                            old.idle,
+                            old.pending_messages,
+                            old.model,
+                            old.async_jobs,
+                            sequence,
+                            old.transport_status,
+                            old.reason,
+                            thinking,
+                            levels,
+                        )
         with self._state_lock:
             self._events.append(event)
         callback = self._on_event
@@ -471,7 +453,15 @@ class ExtensionAdapter:
             if self._snapshot is not None:
                 old = self._snapshot
                 self._snapshot = ExtensionSnapshot(
-                    old.idle, old.pending_messages, old.model, old.async_jobs, old.sequence, "degraded", reason
+                    old.idle,
+                    old.pending_messages,
+                    old.model,
+                    old.async_jobs,
+                    old.sequence,
+                    "degraded",
+                    reason,
+                    old.thinking,
+                    old.thinking_levels,
                 )
         for item in pending:
             item.disconnected = True

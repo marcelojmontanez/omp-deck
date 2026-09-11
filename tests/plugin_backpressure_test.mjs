@@ -9,7 +9,7 @@ import {pathToFileURL} from 'node:url';
 
 const PLUGIN = pathToFileURL(path.join(import.meta.dirname, '../src/omp_deck/plugin/omp-deck.ts'));
 
-async function fixture(messages) {
+async function fixture(messages, options = {}) {
   const root = await mkdtemp(path.join(process.platform === 'darwin' ? '/tmp' : tmpdir(), 'od-backpressure-'));
   const stateVariable = process.platform === 'win32' ? 'LOCALAPPDATA' : 'XDG_STATE_HOME';
   const previousStateHome = process.env[stateVariable];
@@ -19,19 +19,25 @@ async function fixture(messages) {
   const intervalCallbacks = [];
   let abortCalls = 0;
   const context = {
-    mode: 'tui', cwd: '/work/backpressure', model: null,
+    mode: 'tui', cwd: '/work/backpressure', model: options.model ?? null,
     sessionManager: {
       getSessionId: () => 'backpressure-test', getSessionFile: () => null,
       getSessionName: () => 'Backpressure test',
       getBranch: () => messages.map((message, index) => ({type: 'message', id: String(index), message})),
     },
-    isIdle: () => true, hasPendingMessages: () => false, getAsyncJobSnapshot: () => [],
+    isIdle: () => true, hasPendingMessages: () => false,
+    getAsyncJobSnapshot: () => options.asyncJobs ?? [],
     setTimeout(callback, delay) { const timer = setTimeout(callback, delay); timers.add(timer); return timer; },
     setInterval(callback, delay) { intervalCallbacks.push(callback); const timer = setInterval(callback, delay); timers.add(timer); return timer; },
     clearTimer(timer) { clearTimeout(timer); clearInterval(timer); timers.delete(timer); },
     abort() { abortCalls++; }, shutdown() {},
   };
-  const pi = {pi: {VERSION: 'test'}, logger: {warn() {}}, on(name, handler) { handlers.set(name, handler); }, async sendUserMessage() {}};
+  const pi = {
+    pi: {VERSION: 'test'}, logger: {warn() {}}, on(name, handler) { handlers.set(name, handler); },
+    async sendUserMessage() {},
+    getThinkingLevel() { return options.thinking; },
+    setThinkingLevel() {},
+  };
   const {default: register} = await import(`${PLUGIN.href}?backpressure=${Date.now()}-${Math.random()}`);
   register(pi);
   await handlers.get('session_start')({}, context);
@@ -57,6 +63,38 @@ async function fixture(messages) {
   }
   return {connect, cleanup, context, handlers, timers, intervalCallbacks, get abortCalls() { return abortCalls; }};
 }
+
+test('oversized snapshots retain their small thinking state when collections degrade', async () => {
+  const app = await fixture([], {
+    thinking: 'high',
+    model: {
+      provider: 'openai',
+      id: 'gpt',
+      reasoning: true,
+      thinking: {mode: 'effort', efforts: ['low', 'medium', 'high', 'xhigh']},
+    },
+    asyncJobs: [{output: 'x'.repeat(2 * 1024 * 1024)}],
+  });
+  let socket;
+  try {
+    socket = await app.connect();
+    const lines = readline.createInterface({input: socket, crlfDelay: Infinity});
+    const frames = lines[Symbol.asyncIterator]();
+    await frames.next();
+    const snapshot = JSON.parse((await frames.next()).value);
+    const degraded = JSON.parse((await frames.next()).value);
+
+    assert.equal(snapshot.kind, 'snapshot');
+    assert.deepEqual(snapshot.data.async, []);
+    assert.equal(snapshot.data.thinking, 'high');
+    assert.deepEqual(snapshot.data.thinkingLevels, ['off', 'low', 'medium', 'high', 'xhigh']);
+    assert.equal(degraded.kind, 'degraded');
+    assert.equal(degraded.data.droppedKind, 'snapshot');
+  } finally {
+    socket?.destroy();
+    await app.cleanup();
+  }
+});
 
 test('history larger than the outbound cap completes before its response', async () => {
   const messages = Array.from({length: 500}, (_, index) => ({role: 'assistant', content: `${index}:`.padEnd(20 * 1024, 'x'), timestamp: index}));

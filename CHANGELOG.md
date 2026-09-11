@@ -15,6 +15,7 @@
 - Reject legacy migration outside Linux. macOS and Windows use the normal setup commands.
 - Qualify managed RPC recovery and the extension lifecycle against stock OMP 18.1.14 on macOS and 18.1.16 on Linux, alongside 18.1.10.
 - Keep session execution, transport connectivity, and history availability distinct; identify Deck connectivity separately and preserve last-known grouping during machine outages.
+- Identify a directly connected machine by its Deck address instead of `This machine`; preserve enrolled machine names.
 
 ### Fixed
 
@@ -41,9 +42,10 @@
 - Keep newer read cursors when migration is repeated, resolve image blobs from the active OMP profile, expand configured executable paths, and share concurrent usage refreshes.
 - Bound HTTP connections and header waits, reject malformed session titles with validation errors, support IPv6 coordinator listeners, and render progress bars under the existing security policy.
 - Remove empty assistant bubbles and false unread indicators from tool-only or thinking-only records while retaining image-only replies and explicit errors.
-- Avoid sending oversized tool arguments, results, and redundant lifecycle payloads through the terminal extension. Already-running older extensions need a terminal extension reload when idle to receive the producer fix.
+- Avoid sending oversized tool arguments, results, and redundant lifecycle payloads through the terminal extension. Already-running older extensions need an idle restart and resume to receive the producer fix.
 - Keep a verified live terminal manageable through a bounded control-only reconnect when an older extension cannot synchronize history, with a visible history warning instead of hiding it as an old session.
 - Restore visible session identity and back navigation, keep connection warnings readable on narrow screens, and show the correct connected-state indicator.
+- Restore tappable thinking-level control for updated terminal extensions and show OMP's effective level instead of assuming missing state means `auto`. Offer only model-supported levels and refresh terminal-side changes on the next heartbeat. Already-running terminals need an idle restart and resume to load the updated extension.
 
 ## 1.1.0 — 2026-09-09
 

@@ -9,6 +9,7 @@ import tempfile
 import threading
 import unittest
 from collections import deque
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 from unittest.mock import patch
@@ -150,6 +151,7 @@ class FakeExtensionAdapter:
         "todos": True,
         "subagents": True,
         "answerUiRequest": False,
+        "setThinking": True,
     }
 
     def __init__(self, socket_path, on_event=None):
@@ -165,6 +167,7 @@ class FakeExtensionAdapter:
             title="Extension title",
             connection_id="connection-1",
             capabilities=MappingProxyType(dict(self.capabilities)),
+            thinking_levels=("off", "low", "medium", "high", "xhigh"),
         )
         self._snapshot = ExtensionSnapshot(
             idle=True,
@@ -174,7 +177,10 @@ class FakeExtensionAdapter:
             sequence=1,
             transport_status="connected",
             reason=None,
+            thinking="high",
+            thinking_levels=("off", "low", "medium", "high", "xhigh"),
         )
+        self._refresh_snapshot = None
         self.__class__.instances.append(self)
 
     def start(self):
@@ -184,6 +190,12 @@ class FakeExtensionAdapter:
         return self.registration
 
     def snapshot(self):
+        return self._snapshot
+
+    def refresh(self):
+        self.calls.append(("refresh",))
+        if self._refresh_snapshot is not None:
+            self._snapshot = self._refresh_snapshot
         return self._snapshot
 
     def sync_history(self):
@@ -201,6 +213,13 @@ class FakeExtensionAdapter:
 
     def shutdown_session(self):
         self.calls.append(("shutdown_session",))
+
+    def set_thinking(self, level):
+        self.calls.append(("set_thinking", level))
+        self._snapshot = replace(self._snapshot, thinking=level)
+        if self._refresh_snapshot is not None:
+            self._refresh_snapshot = replace(self._refresh_snapshot, thinking=level)
+        return level
 
     def close(self):
         self.calls.append(("close",))
@@ -1097,6 +1116,20 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.assertEqual(first_adapter.calls.count(("send_message", "once", None)), 1)
         self.assertNotIn(("send_message", "once", None), FakeCollabAdapter.instances[-1].calls)
 
+    def test_thinking_refresh_does_not_replay_stale_cached_idle_state(self):
+        manager = self.manager()
+        session_id, _, adapter = self.connect_extension(manager)
+        adapter.callback({"sequence": 2, "kind": "lifecycle", "data": {"state": "agent_start"}})
+        self.assertTrue(adapter.snapshot().idle)
+        self.assertEqual(self.model.get(session_id)["state"], "working")
+        adapter._refresh_snapshot = replace(adapter.snapshot(), idle=False, sequence=2)
+
+        manager.command(session_id, "thinking-running", "setThinking", {"level": "low"})
+
+        self.assertIn(("refresh",), adapter.calls)
+        self.assertEqual(self.model.get(session_id)["state"], "working")
+        self.assertEqual(self.model.get(session_id)["thinking"], "low")
+
     def test_extension_commands_route_and_unadvertised_capability_is_rejected(self):
         manager = self.manager()
         session_id, _, adapter = self.connect_extension(manager)
@@ -1104,10 +1137,32 @@ class TerminalSessionManagerTests(unittest.TestCase):
         manager.command(session_id, "follow", "followUp", {"message": "later"})
         manager.command(session_id, "interrupt", "interrupt", {})
         manager.command(session_id, "shutdown", "shutdown", {})
+        first_thinking = manager.command(session_id, "thinking", "setThinking", {"level": "low"})
+        self.assertEqual(
+            manager.command(session_id, "thinking", "setThinking", {"level": "low"}),
+            first_thinking,
+        )
+        with self.assertRaises(TerminalCommandConflict):
+            manager.command(session_id, "thinking", "setThinking", {"level": "high"})
         self.assertIn(("send_message", "now", None), adapter.calls)
         self.assertIn(("send_message", "later", "followUp"), adapter.calls)
         self.assertIn(("interrupt",), adapter.calls)
         self.assertIn(("shutdown_session",), adapter.calls)
+        self.assertEqual(adapter.calls.count(("set_thinking", "low")), 1)
+        self.assertEqual(self.model.get(session_id)["thinking"], "low")
+        adapter.callback(
+            {
+                "sequence": 2,
+                "kind": "heartbeat",
+                "data": {
+                    "time": 1,
+                    "thinking": "xhigh",
+                    "thinkingLevels": ["off", "low", "high", "xhigh"],
+                },
+            }
+        )
+        self.assertEqual(self.model.get(session_id)["thinking"], "xhigh")
+        self.assertEqual(self.model.get(session_id)["thinkingLevels"], ["off", "low", "high", "xhigh"])
 
         adapter.registration = ExtensionRegistration(
             1,
@@ -1120,8 +1175,18 @@ class TerminalSessionManagerTests(unittest.TestCase):
         )
         adapter._snapshot = ExtensionSnapshot(True, False, None, (), 2, "connected", None)
         manager.refresh_connected()
-        for index, action in enumerate(("sendMessage", "followUp", "interrupt", "shutdown")):
-            payload = {"message": "x"} if action in {"sendMessage", "followUp"} else {}
+        legacy = self.model.get(session_id)
+        self.assertIsNone(legacy["thinking"])
+        self.assertEqual(legacy["thinkingLevels"], [])
+        self.assertFalse(legacy["capabilities"]["setThinking"])
+        for index, action in enumerate(("sendMessage", "followUp", "interrupt", "shutdown", "setThinking")):
+            payload = (
+                {"message": "x"}
+                if action in {"sendMessage", "followUp"}
+                else {"level": "low"}
+                if action == "setThinking"
+                else {}
+            )
             with self.subTest(action=action):
                 with self.assertRaises(ValueError):
                     manager.command(session_id, f"unsupported-{index}", action, payload)

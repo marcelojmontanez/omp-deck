@@ -1,5 +1,11 @@
 function thinkingLevel(agent) {
-  return thinkingOverrides.get(agent.id) || agent.session?.thinking || 'auto';
+  const override = thinkingOverrides.get(agent.id);
+  if (typeof override === 'string' && override) return override;
+  const observed = agent.session?.thinking;
+  return typeof observed === 'string' && observed ? observed : null;
+}
+function thinkingChoices(agent) {
+  return Array.isArray(agent?.session?.thinkingLevels) ? agent.session.thinkingLevels : [];
 }
 function composerDeliveryRoute(agent) {
   const status = agent?.executionState || agent?.status || 'idle';

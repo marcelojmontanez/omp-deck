@@ -112,6 +112,8 @@ class NormalizedActionDispatcher:
     def _dispatch(self, session_id, request_id, action, payload, *, ui=False):
         if not self.fleet_model.supports(session_id, _CAPABILITIES[action]):
             return 409, _failed(request_id, "unsupported")
+        if action == "setThinking" and not self.fleet_model.supports_thinking_level(session_id, payload["level"]):
+            return 409, _failed(request_id, "unsupported")
         if payload.get("images") and not self.fleet_model.supports(session_id, "attachments"):
             return 409, _failed(request_id, "attachments_unsupported")
         result = self.dispatch_command(session_id, request_id, action, payload)

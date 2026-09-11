@@ -1,7 +1,6 @@
 try { localStorage.clear(); } catch {}
 const thinkingOverrides = new Map();
 let thinkingUpdateTokens = new Map();
-const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'auto'];
 const initialSession = new URL(location.href).searchParams.get('session');
 const state = {
   agents: [],
@@ -311,9 +310,10 @@ document.querySelector('.detail-header').addEventListener('click', async event =
   }
   const button = event.target.closest('[data-thinking-level]');
   const agent = selectedAgent();
-  if (!button || agent?.nodeAvailable === false || !agent?.bridgeConnected || !agent.capabilities.setThinking) return;
+  const choices = thinkingChoices(agent);
+  if (!button || !choices.length || agent?.nodeAvailable === false || !agent?.bridgeConnected || !agent?.capabilities?.setThinking) return;
   const current = thinkingLevel(agent);
-  const next = THINKING_LEVELS[(THINKING_LEVELS.indexOf(current) + 1) % THINKING_LEVELS.length];
+  const next = choices[(choices.indexOf(current) + 1) % choices.length];
   const updates = thinkingUpdateTokens;
   const previous = updates.get(agent.id);
   let settle;

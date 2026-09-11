@@ -74,9 +74,12 @@ class TerminalCommandCoordinator:
                 "shutdown": "shutdown",
                 "respondToUi": "answerUiRequest",
                 "cancelUi": "cancelUiRequest",
+                "setThinking": "setThinking",
             }.get(action)
             if capability is None or not self.model.supports(session_id, capability):
                 raise ValueError("action is unavailable for this terminal transport")
+            if action == "setThinking" and not self.model.supports_thinking_level(session_id, payload.get("level")):
+                raise ValueError("unsupported thinking level")
             active = runtime(session_id)
             prepared = self._prepare(active, action, payload)
             self.requests.reserve(scope, request_id, request_fingerprint)
@@ -116,6 +119,8 @@ class TerminalCommandCoordinator:
             raise ValueError("action is unavailable for this terminal transport")
         if action == "shutdown" and active.kind != "extension":
             raise ValueError("action is unavailable for this terminal transport")
+        if action == "setThinking" and active.kind != "extension":
+            raise ValueError("action is unavailable for this terminal transport")
         if action not in {"respondToUi", "cancelUi"}:
             return None
         if active.kind != "collab":
@@ -133,8 +138,7 @@ class TerminalCommandCoordinator:
             )
         return request_id, value
 
-    @staticmethod
-    def _execute(active, request_id, action, payload, prepared):
+    def _execute(self, active, request_id, action, payload, prepared):
         adapter = active.adapter
         if action == "sendMessage":
             if active.kind == "collab":
@@ -147,6 +151,18 @@ class TerminalCommandCoordinator:
             adapter.interrupt()
         elif action == "shutdown":
             adapter.shutdown_session()
+        elif action == "setThinking":
+            adapter.set_thinking(payload["level"])
+            registration = adapter.registration
+            snapshot = adapter.refresh()
+            if registration is not None and snapshot is not None:
+                self.model.apply_extension_snapshot(
+                    active.session_id,
+                    instance_id=active.instance_id,
+                    generation=active.generation,
+                    registration=registration,
+                    snapshot=snapshot,
+                )
         elif prepared is not None:
             numeric_id, value = prepared
             if not adapter.respond_ui(numeric_id, value):

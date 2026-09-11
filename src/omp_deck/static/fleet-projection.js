@@ -54,6 +54,9 @@ function projectSession(session, machine = null) {
   const machineId = machine?.id || null;
   const localId = session.id;
   const projectedId = machineId ? ompDeckApi.sessionKey(machineId, localId) : localId;
+  const thinkingLevels = Array.isArray(session.thinkingLevels)
+    ? session.thinkingLevels.filter(level => typeof level === 'string' && level)
+    : [];
   const activity = (session.messages || []).filter(message => (
     ['user', 'assistant'].includes(message?.role) && hasVisibleContent(message)
   )).map(message => {
@@ -115,7 +118,8 @@ function projectSession(session, machine = null) {
     }),
     session: {
       model: session.model ? [session.model.provider, session.model.id || session.model.name].filter(Boolean).join('/') : null,
-      thinking: session.thinking,
+      thinking: typeof session.thinking === 'string' && session.thinking ? session.thinking : null,
+      thinkingLevels,
       updatedMs,
       workingOn: session.workingOn,
       activity,

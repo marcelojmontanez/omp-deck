@@ -28,12 +28,16 @@ test('plugin events preserve sequence and synchronize active history', async () 
   process.env[stateVariable] = root;
   const handlers = new Map();
   const timers = new Set();
+  const intervalCallbacks = [];
   const warnings = [];
+  let thinking = 'high';
   const pi = {
     pi: {VERSION: 'test'},
     logger: {warn(message, detail) { warnings.push([message, detail]); }},
     on(name, handler) { handlers.set(name, handler); },
     async sendUserMessage() {},
+    getThinkingLevel() { return thinking; },
+    setThinkingLevel(level) { thinking = level; },
   };
   let branchMessages = [
     {role: 'user', content: 'original question', timestamp: 1},
@@ -42,7 +46,10 @@ test('plugin events preserve sequence and synchronize active history', async () 
   const context = {
     mode: 'tui',
     cwd: '/work/test',
-    model: {provider: 'test', id: 'model'},
+    model: {
+      provider: 'test', id: 'model', reasoning: true,
+      thinking: {mode: 'effort', efforts: ['low', 'medium', 'high', 'xhigh']},
+    },
     sessionManager: {
       getSessionId: () => 'plugin-sequence-test',
       getSessionFile: () => null,
@@ -62,6 +69,7 @@ test('plugin events preserve sequence and synchronize active history', async () 
       return timer;
     },
     setInterval(callback, delay) {
+      intervalCallbacks.push(callback);
       const timer = setInterval(callback, delay);
       timers.add(timer);
       return timer;
@@ -124,17 +132,55 @@ test('plugin events preserve sequence and synchronize active history', async () 
     assert.equal(registration.type, 'registration');
     assert.equal(snapshot.kind, 'snapshot');
     assert.equal(snapshot.sequence, 1);
+    assert.equal(registration.capabilities.setThinking, true);
+    assert.deepEqual(registration.thinkingLevels, ['off', 'low', 'medium', 'high', 'xhigh']);
+    assert.equal(snapshot.data.thinking, 'high');
+    assert.deepEqual(snapshot.data.thinkingLevels, registration.thinkingLevels);
+
+    socket.write(`${JSON.stringify({
+      protocol: 'omp-deck-fallback-v1',
+      type: 'request',
+      id: 'thinking-1',
+      action: 'setThinking',
+      level: 'xhigh',
+    })}\n`);
+    const thinkingFrames = [JSON.parse((await frames.next()).value), JSON.parse((await frames.next()).value)];
+    const thinkingEvent = thinkingFrames.find(frame => frame.type === 'event');
+    const thinkingResponse = thinkingFrames.find(frame => frame.type === 'response');
+    assert.equal(thinkingEvent.kind, 'thinking');
+    assert.equal(thinkingEvent.data.thinking, 'xhigh');
+    assert.equal(thinkingResponse.result.thinking, thinkingEvent.data.thinking);
+    assert.deepEqual(thinkingResponse.result.thinkingLevels, thinkingEvent.data.thinkingLevels);
+    assert.equal(thinkingResponse.result.eventSequence, 1);
+
+    socket.write(`${JSON.stringify({
+      protocol: 'omp-deck-fallback-v1',
+      type: 'request',
+      id: 'unsupported-thinking',
+      action: 'setThinking',
+      level: 'max',
+    })}\n`);
+    const rejectedThinking = JSON.parse((await frames.next()).value);
+    assert.equal(rejectedThinking.ok, false);
+    assert.equal(thinking, 'xhigh');
+
+    thinking = 'low';
+    intervalCallbacks[0]();
+    const heartbeat = JSON.parse((await frames.next()).value);
+    assert.equal(heartbeat.kind, 'heartbeat');
+    assert.equal(heartbeat.data.thinking, 'low');
+    assert.deepEqual(heartbeat.data.thinkingLevels, ['off', 'low', 'medium', 'high', 'xhigh']);
 
     handlers.get('message_end')({message: {role: 'assistant', content: 'x'.repeat(1024 * 1024)}});
     const degraded = JSON.parse((await frames.next()).value);
     assert.equal(degraded.kind, 'degraded');
     assert.equal(degraded.data.droppedKind, 'message');
-    assert.equal(degraded.sequence, 2);
+    assert.equal(degraded.sequence, 4);
 
     handlers.get('agent_start')({turn: 1});
     const following = JSON.parse((await frames.next()).value);
     assert.equal(following.kind, 'lifecycle');
-    assert.equal(following.sequence, 3);
+    assert.equal(following.sequence, 5);
 
     socket.write(`${JSON.stringify({
       protocol: 'omp-deck-fallback-v1',
@@ -144,7 +190,7 @@ test('plugin events preserve sequence and synchronize active history', async () 
     })}\n`);
     const initialHistory = JSON.parse((await frames.next()).value);
     assert.equal(initialHistory.kind, 'history');
-    assert.equal(initialHistory.sequence, 4);
+    assert.equal(initialHistory.sequence, 6);
     assert.equal(initialHistory.data.complete, true);
     assert.deepEqual(initialHistory.data.messages.map(message => message.content), [
       'original question',
@@ -161,7 +207,7 @@ test('plugin events preserve sequence and synchronize active history', async () 
     await handlers.get('session_tree')({}, context);
     const treeHistory = JSON.parse((await frames.next()).value);
     assert.equal(treeHistory.kind, 'history');
-    assert.equal(treeHistory.sequence, 5);
+    assert.equal(treeHistory.sequence, 7);
     assert.equal(treeHistory.data.complete, true);
     assert.deepEqual(treeHistory.data.messages.map(message => message.content), [
       'selected branch question',

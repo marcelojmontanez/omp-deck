@@ -13,6 +13,7 @@ from ._fleet_projection import (
     strict_clone,
 )
 from ._session_activity import clear_activity, completion_state, update_tool_activity
+from ._thinking import normalized_thinking, validated_thinking_levels
 
 _HISTORY_SYNC_KEY = "_extensionHistorySync"
 
@@ -77,6 +78,23 @@ def _apply_history(session: dict[str, Any], session_id: str, payload: Mapping[st
 
 
 def project_extension_event(session: dict[str, Any], session_id: str, kind: str, payload: Mapping[str, Any]) -> None:
+    if (
+        session.get("_extensionThinkingControl") is True
+        and kind in {"heartbeat", "thinking"}
+        and "thinking" in payload
+        and "thinkingLevels" in payload
+    ):
+        raw_thinking = payload.get("thinking")
+        thinking = normalized_thinking(raw_thinking)
+        if raw_thinking is None or thinking is not None:
+            session["thinking"] = thinking
+        try:
+            levels = validated_thinking_levels(payload["thinkingLevels"])
+        except ValueError:
+            pass
+        else:
+            session["thinkingLevels"] = list(levels)
+            session["capabilities"]["setThinking"] = bool(levels)
     if kind == "message":
         _apply_message(session, session_id, payload)
     elif kind == "history":

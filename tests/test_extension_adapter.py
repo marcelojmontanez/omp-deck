@@ -55,6 +55,26 @@ def registration(**changes):
     return value
 
 
+def thinking_registration(levels=("off", "low", "medium", "high", "xhigh")):
+    value = registration()
+    value["capabilities"]["setThinking"] = True
+    value["thinkingLevels"] = list(levels)
+    return value
+
+
+def thinking_snapshot(thinking="high", levels=("off", "low", "medium", "high", "xhigh")):
+    return event(
+        data={
+            "idle": True,
+            "pendingMessages": False,
+            "model": {"provider": "openai", "id": "gpt"},
+            "async": [],
+            "thinking": thinking,
+            "thinkingLevels": list(levels),
+        }
+    )
+
+
 def event(sequence=1, kind="snapshot", data=None):
     if data is None:
         data = {"idle": True, "pendingMessages": False, "model": {"provider": "p", "id": "m"}, "async": [{"id": "job"}]}
@@ -132,6 +152,9 @@ class ExtensionAdapterTests(unittest.TestCase):
             self.assertIsNotNone(snapshot)
             self.assertEqual((snapshot.idle, snapshot.pending_messages, snapshot.sequence), (True, False, 1))
             self.assertEqual(snapshot.transport_status, "connected")
+            self.assertIsNone(snapshot.thinking)
+            self.assertEqual(snapshot.thinking_levels, ())
+            self.assertNotIn("setThinking", got.capabilities)
         finally:
             adapter.close()
             peer.close()
@@ -167,11 +190,98 @@ class ExtensionAdapterTests(unittest.TestCase):
                 with self.assertRaisesRegex(ExtensionProtocolError, match):
                     self.make_adapter(peer).start()
 
+    def test_registration_rejects_unadvertised_or_noncanonical_thinking_choices(self):
+        unadvertised = registration(thinkingLevels=["low"])
+        reversed_levels = thinking_registration(("high", "low"))
+        for value in (unadvertised, reversed_levels):
+            with self.subTest(registration=value):
+                peer = self.make_peer((value, event()))
+                with self.assertRaises(ExtensionProtocolError):
+                    self.make_adapter(peer).start()
+
     def test_start_requires_snapshot_as_second_frame(self):
         peer = self.make_peer((registration(), event(kind="heartbeat", data={"time": 1})))
         with self.assertRaisesRegex(ExtensionProtocolError, "snapshot"):
             self.make_adapter(peer).start()
         peer.close()
+
+    def test_new_registration_exposes_effective_thinking_and_model_choices(self):
+        peer = self.make_peer((thinking_registration(), thinking_snapshot()))
+        adapter = self.make_adapter(peer)
+
+        registration_value = adapter.start()
+        snapshot = adapter.snapshot()
+
+        self.assertTrue(registration_value.capabilities["setThinking"])
+        self.assertEqual(registration_value.thinking_levels, ("off", "low", "medium", "high", "xhigh"))
+        self.assertEqual(snapshot.thinking, "high")
+        self.assertEqual(snapshot.thinking_levels, registration_value.thinking_levels)
+
+    def test_set_thinking_is_correlated_and_uses_authoritative_clamped_result(self):
+        peer = self.make_peer((thinking_registration(), thinking_snapshot()))
+        adapter = self.make_adapter(peer)
+        adapter.start()
+        result = []
+        thread = threading.Thread(target=lambda: result.append(adapter.set_thinking("xhigh")))
+        thread.start()
+        self.addCleanup(self.stop_and_join, adapter, thread)
+
+        request = peer.read()
+        self.assertEqual(
+            {key: request[key] for key in ("protocol", "type", "action", "level")},
+            {"protocol": PROTOCOL, "type": "request", "action": "setThinking", "level": "xhigh"},
+        )
+        peer.send(
+            response(
+                request,
+                result={
+                    "thinking": "high",
+                    "thinkingLevels": ["off", "low", "medium", "high", "xhigh"],
+                    "eventSequence": 1,
+                },
+            )
+        )
+        thread.join(1)
+
+        self.assertEqual(result, ["high"])
+        self.assertEqual(adapter.snapshot().thinking, "high")
+        with self.assertRaisesRegex(ValueError, "unsupported"):
+            adapter.set_thinking("max")
+
+    def test_set_thinking_does_not_overwrite_a_newer_event_with_a_stale_response(self):
+        peer = self.make_peer((thinking_registration(), thinking_snapshot()))
+        adapter = self.make_adapter(peer)
+        adapter.start()
+        result = []
+        thread = threading.Thread(target=lambda: result.append(adapter.set_thinking("xhigh")))
+        thread.start()
+        self.addCleanup(self.stop_and_join, adapter, thread)
+
+        request = peer.read()
+        peer.send(
+            event(
+                sequence=2,
+                kind="thinking",
+                data={"thinking": "low", "thinkingLevels": ["off", "low"]},
+            )
+        )
+        peer.send(
+            response(
+                request,
+                result={
+                    "thinking": "xhigh",
+                    "thinkingLevels": ["off", "low", "medium", "high", "xhigh"],
+                    "eventSequence": 1,
+                },
+            )
+        )
+        thread.join(1)
+
+        snapshot = adapter.snapshot()
+        self.assertEqual(result, ["low"])
+        self.assertEqual(snapshot.thinking, "low")
+        self.assertEqual(snapshot.thinking_levels, ("off", "low"))
+        self.assertEqual(snapshot.sequence, 2)
 
     def test_command_bytes_and_response_correlation(self):
         peer = self.make_peer()
@@ -345,6 +455,31 @@ class ExtensionAdapterTests(unittest.TestCase):
         self.assertEqual(adapter.snapshot().reason, "stale heartbeat")
         adapter.close()
         peer.close()
+
+    def test_heartbeat_reconciles_external_thinking_and_model_choices(self):
+        peer = self.make_peer((thinking_registration(), thinking_snapshot()))
+        adapter = self.make_adapter(peer)
+        adapter.start()
+
+        peer.send(
+            event(
+                2,
+                "heartbeat",
+                {
+                    "time": 10,
+                    "thinking": "low",
+                    "thinkingLevels": ["off", "minimal", "low"],
+                },
+            )
+        )
+        pong = peer.read()
+        deadline = time.monotonic() + 1
+        while adapter.snapshot().sequence < 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+
+        self.assertEqual(pong["action"], "pong")
+        self.assertEqual(adapter.snapshot().thinking, "low")
+        self.assertEqual(adapter.snapshot().thinking_levels, ("off", "minimal", "low"))
 
     def test_callback_values_are_deeply_immutable(self):
         peer = self.make_peer()

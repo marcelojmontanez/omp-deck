@@ -35,6 +35,7 @@ class FleetModelTests(unittest.TestCase):
                 "name": "GPT 5",
                 "api": "responses",
                 "reasoning": True,
+                "thinking": {"mode": "effort", "efforts": ("low", "medium", "high", "xhigh")},
             },
             "thinking_level": "high",
             "message_count": 7,
@@ -95,6 +96,7 @@ class FleetModelTests(unittest.TestCase):
                 "workingOn",
                 "model",
                 "thinking",
+                "thinkingLevels",
             },
         )
         self.assertEqual(session["project"], {"name": "deck", "path": "/work/deck"})
@@ -117,6 +119,8 @@ class FleetModelTests(unittest.TestCase):
             {"provider": "openai", "id": "gpt-5", "name": "GPT 5", "api": "responses"},
         )
         self.assertEqual(session["thinking"], "high")
+        self.assertEqual(session["thinkingLevels"], ["off", "low", "medium", "high", "xhigh"])
+        self.assertTrue(session["capabilities"]["setThinking"])
         self.assertEqual(session["messages"][0]["role"], "user")
         self.assertEqual(session["messages"][0]["content"], [{"type": "text", "text": "hello"}])
         self.assertIn("id", session["messages"][0])
@@ -126,6 +130,31 @@ class FleetModelTests(unittest.TestCase):
         public = model.snapshot()
         self.assertEqual(set(public), {"generatedAt", "snapshotGeneration", "lastEventId", "sessions"})
         self.assertEqual(public["sessions"], [session])
+
+    def test_rpc_thinking_uses_official_snake_case_and_missing_is_unknown(self):
+        model = FleetModel()
+        model.load_record(self.make_record())
+        state = {
+            "thinkingLevel": "max",
+            "thinking_level": None,
+            "model": {
+                "provider": "openai",
+                "id": "gpt-5",
+                "reasoning": True,
+                "thinking": {"mode": "effort", "efforts": ["low", "high"]},
+            },
+        }
+
+        model.apply_rpc_snapshot(
+            "deck-1",
+            instance_id="instance-a",
+            generation=3,
+            snapshot=self.make_snapshot(**state),
+        )
+
+        session = model.get("deck-1")
+        self.assertIsNone(session["thinking"])
+        self.assertEqual(session["thinkingLevels"], ["off", "low", "high"])
 
     def test_lifecycle_uses_runtime_ownership_and_managed_intent(self):
         model = FleetModel()

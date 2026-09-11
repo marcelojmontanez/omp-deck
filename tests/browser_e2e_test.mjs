@@ -128,6 +128,8 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       sessionStorageLength: sessionStorage.length,
       overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
       cookiesEnabled,
+      machineName: ompDeckApi.machine('local')?.name,
+      browserHost: location.host,
     };
   });
   assert.equal(result.projectsStatus, 200);
@@ -140,6 +142,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   assert.equal(result.sessionStorageLength, 0);
   assert(result.overflow <= 0);
   assert.equal(result.cookiesEnabled, true);
+  assert.equal(result.machineName, result.browserHost);
   const cookies = await page.cookies();
   const device = cookies.find(cookie => cookie.name === 'omp_deck_device');
   assert(device, `secure device cookie missing; service stderr: ${serviceError}`);
@@ -923,13 +926,18 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   const thinkingChanges = await page.evaluate(async () => {
     const originalRequest = ompDeckApi.request;
     const requests = [];
-    let authoritative = 'medium';
+    const advertised = ['off', 'low', 'medium', 'high', 'xhigh'];
+    let authoritative = 'xhigh';
+    let settable = true;
+    let transportReason = null;
+    const visibleLevel = chip => chip.textContent.match(/\b(off|minimal|low|medium|high|xhigh|max|auto)\b/)?.[1] ?? null;
     const rawSession = () => ({
       id: 'thinking-session', title: 'Thinking session',
       project: {name: 'demo', path: '/demo'}, state: 'idle', unread: false,
       lifecycle: 'ongoing',
-      transport: {kind: 'rpc', status: 'connected'},
-      capabilities: {setThinking: true}, thinking: authoritative,
+      transport: {kind: 'extension', status: 'connected', reason: transportReason},
+      capabilities: {setThinking: settable}, thinking: authoritative,
+      thinkingLevels: settable ? advertised : [],
       messages: [], todos: [], subagents: [], updatedAt: new Date().toISOString(),
     });
     const waitUntil = async predicate => {
@@ -949,8 +957,12 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       await waitUntil(() => requests.length === start + 2);
       if (secondSucceeds) authoritative = requests[start + 1].level;
       requests[start + 1].resolve({ok: secondSucceeds, status: secondSucceeds ? 200 : 500});
-      await new Promise(resolve => setTimeout(resolve, 0));
-      return {simultaneous, display: document.querySelector('[data-thinking-level]').textContent};
+      await waitUntil(() => !thinkingOverrides.has('thinking-session'));
+      return {
+        simultaneous,
+        levels: requests.slice(start, start + 2).map(request => request.level),
+        level: visibleLevel(document.querySelector('[data-thinking-level]')),
+      };
     };
     try {
       ompDeckApi.request = (path, options) => {
@@ -968,21 +980,65 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       await refresh('local');
       selectAgent('thinking-session');
       const accepted = await cycleTwice(true);
-      authoritative = 'max';
+      authoritative = 'high';
       await refresh('local');
-      const external = document.querySelector('[data-thinking-level]').textContent;
-      authoritative = 'medium';
+      const external = visibleLevel(document.querySelector('[data-thinking-level]'));
+      authoritative = 'auto';
+      await refresh('local');
+      const reportedAuto = visibleLevel(document.querySelector('[data-thinking-level]'));
+      authoritative = null;
+      await refresh('local');
+      const unknownButton = document.querySelector('[data-thinking-level]');
+      const chipContainer = document.getElementById('detail-chips');
+      const chipRect = unknownButton.getBoundingClientRect();
+      const containerRect = chipContainer.getBoundingClientRect();
+      const unavailable = {
+        level: visibleLevel(unknownButton),
+        editable: unknownButton.tagName === 'BUTTON',
+        visible: chipRect.width > 0 && containerRect.width > 0
+          && chipRect.left >= containerRect.left && chipRect.right <= containerRect.right,
+      };
+      const unknownStart = requests.length;
+      unknownButton.click();
+      await waitUntil(() => requests.length === unknownStart + 1);
+      const selectedFromUnavailable = requests[unknownStart].level;
+      requests[unknownStart].resolve({ok: false, status: 500});
+      await waitUntil(() => !thinkingOverrides.has('thinking-session'));
+      settable = false;
+      authoritative = 'high';
+      transportReason = 'Requires <terminal restart>';
+      await refresh('local');
+      const readOnlyChip = [...document.querySelectorAll('#detail-chips .chip')]
+        .find(chip => chip.textContent.startsWith('thinking:'));
+      const readOnly = {
+        level: visibleLevel(readOnlyChip),
+        editable: Boolean(document.querySelector('[data-thinking-level]')),
+        reasonVisible: readOnlyChip.textContent.includes(transportReason),
+        reasonEscaped: readOnlyChip.innerHTML.includes('&lt;terminal restart&gt;'),
+      };
+      settable = true;
+      transportReason = null;
+      authoritative = 'xhigh';
       await refresh('local');
       const failed = await cycleTwice(false);
-      return {accepted, external, failed};
+      return {accepted, external, reportedAuto, unavailable, selectedFromUnavailable, readOnly, failed};
     } finally {
       ompDeckApi.request = originalRequest;
     }
   });
   assert.deepEqual(thinkingChanges, {
-    accepted: {simultaneous: 1, display: 'thinking: xhigh'},
-    external: 'thinking: max',
-    failed: {simultaneous: 1, display: 'thinking: medium'},
+    accepted: {simultaneous: 1, levels: ['off', 'low'], level: 'low'},
+    external: 'high',
+    reportedAuto: 'auto',
+    unavailable: {level: null, editable: true, visible: true},
+    selectedFromUnavailable: 'off',
+    readOnly: {
+      level: 'high',
+      editable: false,
+      reasonVisible: true,
+      reasonEscaped: true,
+    },
+    failed: {simultaneous: 1, levels: ['off', 'low'], level: 'xhigh'},
   });
 
   const multiAsk = await page.evaluate(async () => {
@@ -1294,6 +1350,28 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     ['/api/projects/demo/sessions', '/api/projects/demo/sessions'],
   );
   assert.equal(launchRetry[0].body.requestId, launchRetry[1].body.requestId);
+
+  const resetIdentity = await page.evaluate(async () => {
+    const originalFetch = window.fetch;
+    window.fetch = async (input, options) => (
+      input === '/api/projects' ? new Response('', {status: 401}) : originalFetch(input, options)
+    );
+    try {
+      const response = await ompDeckApi.request('/api/projects');
+      return {
+        status: response.status,
+        machineName: ompDeckApi.machine('local')?.name,
+        browserHost: location.host,
+      };
+    } finally {
+      window.fetch = originalFetch;
+    }
+  });
+  assert.deepEqual(resetIdentity, {
+    status: 401,
+    machineName: `localhost:${port}`,
+    browserHost: `localhost:${port}`,
+  });
 
   assert.equal(device.httpOnly, true);
   assert.equal(device.secure, true);

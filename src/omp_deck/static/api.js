@@ -107,7 +107,7 @@
         if (mode === 'local') {
           machines.set(LOCAL_MACHINE_ID, {
             id: LOCAL_MACHINE_ID,
-            name: 'This machine',
+            name: location.host,
             origin: location.origin,
             local: true,
             accessToken: null,
@@ -444,7 +444,7 @@
     if (mode === 'local') {
       machines.set(LOCAL_MACHINE_ID, {
         id: LOCAL_MACHINE_ID,
-        name: 'This machine',
+        name: location.host,
         origin: location.origin,
         local: true,
         accessToken: null,

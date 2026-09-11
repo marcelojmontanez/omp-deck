@@ -37,7 +37,7 @@ The green session connection indicator means the session transport is connected,
 
 Large tool arguments, tool results, and provider-only message content are not sent as conversation bubbles. The extension preserves conversational text, supported image references, and explicit errors; unavailable images remain visible as placeholders. Wire and retained-history limits still apply.
 
-An older extension already loaded in a terminal may disconnect while synchronizing a large history. Deck makes one control-only reconnect after a verified handshake, keeps that session in Ongoing, and displays a history warning without treating its control channel as disconnected. It does not repeatedly request the failed history while that connection remains healthy. Updating Deck does not replace extension code inside running OMP processes: reload extensions in that terminal when idle to pick up the fix. Deck does not remotely reload or interrupt ongoing terminal work.
+An older extension already loaded in a terminal may disconnect while synchronizing a large history. Deck makes one control-only reconnect after a verified handshake, keeps that session in Ongoing, and displays a history warning without treating its control channel as disconnected. It does not repeatedly request the failed history while that connection remains healthy. Updating Deck does not replace extension code inside running OMP processes: wait until idle, then restart OMP and resume the session to load the update. Deck does not remotely restart or interrupt ongoing terminal work.
 
 ## Install
 
@@ -109,9 +109,11 @@ omp-deck serve
 
 Unread sessions appear first and only meaningful assistant content creates unread state. Tool-only, thinking-only, and whitespace-only records do not create empty conversation bubbles. Image-only replies and explicit errors remain visible. Running subagents appear beneath their parent session, and supported todo lists retain their phase grouping. Completed runs that report an error remain marked as failed.
 
-The conversation header identifies the selected session and its project, with a **Back** button to return to the session list. Existing session links can still open retained history.
+The conversation header identifies the selected session and its project, with a **Back** button to return to the session list. Existing session links can still open retained history. A direct connection identifies the machine by its Deck address (hostname and any non-default port); the multi-machine coordinator uses enrolled machine names.
 
-Drafts and selected images stay with their session when you switch conversations. Thinking changes are sent in order per session and reconcile to OMP's reported setting. Drafts and images remain memory-only: reloading, logging out, or clearing local data discards them.
+Drafts and selected images stay with their session when you switch conversations. Drafts and images remain memory-only: reloading, logging out, or clearing local data discards them.
+
+The **thinking** control shows OMP's effective level. Tap it to cycle through the current model's supported choices when control is available. Missing state is shown as unavailable, not assumed to be `auto`. Changes are sent in order per session and reconcile to OMP's reported level. With the updated terminal extension, changes made directly in OMP also reach Deck on the next heartbeat, normally within 15 seconds. Already-running terminals need an idle restart and resume to load the updated extension.
 
 ## Multi-machine coordinator
 
@@ -311,7 +313,7 @@ are rejected and reported instead of being trusted. Accepted legacy values are
 rewritten into a mode-`0600` normalized cursor store.
 A migrated terminal session reconnects after that OMP process loads the new
 plugin. Wait until the session is idle, then restart OMP and resume it normally.
-`/reload-plugins` does not reload extension modules in OMP 18.1.14 or 18.1.16;
+`/reload-plugins` does not reload extension modules in OMP 18.1.14, 18.1.16, or 18.1.17;
 Deck never injects code or keystrokes into an already-running OMP process.
 
 For a copied-file legacy installation, before an authorized production

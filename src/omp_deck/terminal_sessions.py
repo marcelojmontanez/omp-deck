@@ -17,6 +17,7 @@ from ._terminal_discovery import discover_extension_candidates, removed_extensio
 from ._terminal_discovery import terminal_id as _terminal_id
 from ._terminal_runtime import (
     TerminalSessionNotConnected,
+    _open_extension,
     _registry_record,
     _Runtime,
     _RuntimeStore,
@@ -403,17 +404,15 @@ class TerminalSessionManager:
                     )
                     raise
 
-        activation = ExtensionEventActivation(apply_event)
-        adapter_options = {"on_event": activation.publish}
-        if os.name == "nt":
-            adapter_options["connection_token"] = metadata.get("authToken")
-        adapter = ExtensionAdapter(str(socket_path), **adapter_options)
+        def new_adapter() -> tuple[ExtensionEventActivation, ExtensionAdapter]:
+            candidate_activation = ExtensionEventActivation(apply_event)
+            options = {"on_event": candidate_activation.publish}
+            if os.name == "nt":
+                options["connection_token"] = metadata.get("authToken")
+            return candidate_activation, ExtensionAdapter(str(socket_path), **options)
+
+        activation, adapter, registration, snapshot, history_error = _open_extension(new_adapter)
         try:
-            registration = adapter.start()
-            snapshot = adapter.snapshot()
-            if snapshot is None:
-                raise TerminalSessionNotConnected(session_id)
-            adapter.sync_history()
             record = _upsert_extension_record(
                 self.registry,
                 session_id,
@@ -447,6 +446,10 @@ class TerminalSessionManager:
                     snapshot=snapshot,
                 ):
                     raise TerminalSessionNotConnected(session_id)
+                if history_error is not None:
+                    self.model.set_history_error(
+                        session_id, instance_id=connection_id, generation=generation, reason=history_error
+                    )
 
             drain_events = getattr(adapter, "drain_events", lambda: ())
             activation.activate(adopt, drain_events)

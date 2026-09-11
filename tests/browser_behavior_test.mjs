@@ -44,6 +44,7 @@ function loadTodoUi() {
 function session(overrides = {}) {
   return {
     id: 'session-1',
+    lifecycle: 'ongoing',
     title: 'Build release',
     project: { name: 'deck', path: '/work/deck' },
     state: 'needs_input',
@@ -117,6 +118,9 @@ test('projects normalized RPC, collaboration, extension, and disconnected sessio
     assert.equal(projected.project, expected.project, name);
     assert.equal(projected.cwd, expected.cwd, name);
   }
+  assert.equal(projectSession(session()).historyError, null);
+  assert.equal(projectSession(session({historyError: 'History stream unavailable'})).historyError,
+    'History stream unavailable');
 });
 
 test('preserves the capability contract and pending UI request shape', () => {
@@ -153,7 +157,7 @@ test('keeps message content as plain text data without generating HTML', () => {
   const hostile = '<img src=x onerror="alert(1)"> & <script>bad()</script>';
   const projected = projectSession(session({
     messages: [
-      { id: 'm1', role: 'user', content: hostile, createdAt: '2026-08-20T12:00:00Z' },
+      { id: 'm1', role: 'user', content: [{type: 'text', text: hostile}], createdAt: '2026-08-20T12:00:00Z' },
       { id: 'm2', role: 'assistant', content: [
         { type: 'text', text: '<b>literal</b>' },
         { type: 'tool', text: '<i>ignored</i>' },

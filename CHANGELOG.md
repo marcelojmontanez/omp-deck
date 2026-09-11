@@ -7,12 +7,14 @@
 - Support native macOS with a per-user LaunchAgent, graphical-login startup, failure restarts, setup rollback, health diagnostics, and ownership-checked removal and purge. The service requires a logged-in desktop user and does not prevent Mac sleep.
 - Add a native macOS CI gate for LaunchAgent lifecycle, Python portability contracts, and the Unix-socket plugin.
 - Add an optional standalone multi-machine coordinator with explicit node enrollment, an authenticated shared dashboard, direct browser-to-node connections using 60-second Ed25519 bearer tickets, per-machine outage isolation, bounded revocation behavior, and documented backup and re-enrollment recovery.
+- Make ongoing sessions the default dashboard, with a quiet secondary History view for retained unattached records and ongoing-only summary counts.
 
 ### Changed
 
 - Shorten Unix extension endpoint names to fit macOS socket limits. After upgrading, rerun `omp-deck setup` and restart terminal-owned OMP sessions; older Unix endpoints are no longer discovered.
 - Reject legacy migration outside Linux. macOS and Windows use the normal setup commands.
 - Qualify managed RPC recovery and the extension lifecycle against stock OMP 18.1.14 on macOS and 18.1.16 on Linux, alongside 18.1.10.
+- Keep session execution, transport connectivity, and history availability distinct; identify Deck connectivity separately and preserve last-known grouping during machine outages.
 
 ### Fixed
 
@@ -38,6 +40,10 @@
 - Preserve configured Linux/macOS profile environments, restore the previous macOS configuration after failed relocation, and contain Windows child processes before they can spawn descendants.
 - Keep newer read cursors when migration is repeated, resolve image blobs from the active OMP profile, expand configured executable paths, and share concurrent usage refreshes.
 - Bound HTTP connections and header waits, reject malformed session titles with validation errors, support IPv6 coordinator listeners, and render progress bars under the existing security policy.
+- Remove empty assistant bubbles and false unread indicators from tool-only or thinking-only records while retaining image-only replies and explicit errors.
+- Avoid sending oversized tool arguments, results, and redundant lifecycle payloads through the terminal extension. Already-running older extensions need a terminal extension reload when idle to receive the producer fix.
+- Keep a verified live terminal manageable through a bounded control-only reconnect when an older extension cannot synchronize history, with a visible history warning instead of hiding it as an old session.
+- Restore visible session identity and back navigation, keep connection warnings readable on narrow screens, and show the correct connected-state indicator.
 
 ## 1.1.0 — 2026-09-09
 

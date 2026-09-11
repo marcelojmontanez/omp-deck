@@ -12,6 +12,7 @@ const state = {
   coordinatorAvailable: true,
   pendingSelection: initialSession,
   filter: 'all',
+  sessionScope: 'ongoing',
   showTodo: false,
   showArchive: false,
   renderRevision: 0,
@@ -23,12 +24,13 @@ const state = {
 
 const el = Object.fromEntries([
   'connection', 'connection-text', 'working-count', 'attention-count', 'unread-count',
-  'idle-count', 'agent-list', 'app', 'workspace', 'detail', 'detail-chips',
-  'task-control', 'transport-status', 'pending-request', 'activity', 'scroll-newest',
-  'composer', 'attachments', 'attach', 'gallery', 'attachment-input', 'gallery-input',
-  'message', 'send', 'send-state', 'toast', 'overflow-button', 'session-menu',
-  'machine-panel', 'machine-select', 'machine-status-list', 'fleet-reload', 'fleet-reload-button',
-  'project-root-label', 'project-select', 'project-new', 'project-launch', 'launch-state'
+  'idle-count', 'agent-list', 'history-toggle', 'history-count', 'session-scope-title',
+  'app', 'workspace', 'detail', 'detail-chips', 'task-control', 'transport-status',
+  'pending-request', 'activity', 'scroll-newest', 'composer', 'attachments', 'attach',
+  'gallery', 'attachment-input', 'gallery-input', 'message', 'send', 'send-state',
+  'toast', 'overflow-button', 'session-menu', 'machine-panel', 'machine-select',
+  'machine-status-list', 'fleet-reload', 'fleet-reload-button', 'project-root-label',
+  'project-select', 'project-new', 'project-launch', 'launch-state'
 ].map(id => [id, document.getElementById(id)]));
 async function clearLocalData() {
   try { localStorage.clear(); } catch {}
@@ -138,12 +140,14 @@ function renderMachineControls() {
   const live = machines.filter(machine => machine.status === 'live').length;
   if (coordinatorMode && state.coordinatorAvailable === false) {
     el.connection.classList.add('offline');
-    el['connection-text'].textContent = 'Coordinator access unavailable; current machine access expires shortly';
+    el['connection-text'].textContent = 'Deck coordinator unavailable; machine access may expire';
   } else {
     el.connection.classList.toggle('offline', machines.length > 0 && live === 0);
     el['connection-text'].textContent = coordinatorMode
-      ? `${live}/${machines.length} machines live`
-      : (machines[0]?.status === 'live' ? 'Live' : machineStatusLabel(machines[0]?.status));
+      ? `Deck connected · ${live}/${machines.length} machines reachable`
+      : (machines[0]?.status === 'live'
+        ? 'Deck connected'
+        : `Deck ${machineStatusLabel(machines[0]?.status).toLowerCase()}`);
   }
 }
 
@@ -220,6 +224,16 @@ el['machine-select'].addEventListener('change', () => {
 });
 el['fleet-reload-button'].addEventListener('click', () => location.reload());
 
+
+el['history-toggle'].addEventListener('click', () => {
+  state.sessionScope = state.sessionScope === 'history' ? 'ongoing' : 'history';
+  state.filter = 'all';
+  document.querySelectorAll('.filter').forEach(item =>
+    item.classList.toggle('active', item.dataset.filter === 'all')
+  );
+  renderSummary();
+  renderList();
+});
 
 document.querySelector('.filters').addEventListener('click', event => {
   const button = event.target.closest('[data-filter]');
@@ -383,7 +397,7 @@ function showAuthentication({clearToken = false} = {}) {
     else viewer.close();
   }
   el['agent-list'].replaceChildren();
-  el['detail-chips'].replaceChildren();
+  el.detail.querySelectorAll('[data-session-identity], #detail-chips').forEach(node => node.replaceChildren());
   el['pending-request'].replaceChildren();
   el['pending-request'].hidden = true;
   el.activity.innerHTML = '<p class="activity-empty">Waiting for structured OMP events.</p>';

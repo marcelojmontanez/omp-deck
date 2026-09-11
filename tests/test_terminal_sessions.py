@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 from omp_deck._collab_imports import CollabImportError
 from omp_deck._extension_endpoint import unix_endpoint_name
+from omp_deck._extension_protocol import ExtensionDisconnected
 from omp_deck._terminal_commands import TerminalCommandConflict
 from omp_deck._terminal_discovery import discover_extension_candidates
 from omp_deck.collab_adapter import CollabAdapter, CollabSnapshot
@@ -140,6 +141,7 @@ class FakeExtensionAdapter:
     fail_start = False
     fail_close = False
     fail_sync = False
+    sync_errors = deque()
     capabilities = {
         "sendMessage": True,
         "followUp": True,
@@ -186,6 +188,8 @@ class FakeExtensionAdapter:
 
     def sync_history(self):
         self.calls.append(("sync_history",))
+        if type(self).sync_errors:
+            raise type(self).sync_errors.popleft()
         if type(self).fail_sync:
             raise RuntimeError("sync failed")
 
@@ -234,6 +238,7 @@ class TerminalSessionManagerTests(unittest.TestCase):
         FakeExtensionAdapter.fail_start = False
         FakeExtensionAdapter.fail_close = False
         FakeExtensionAdapter.fail_sync = False
+        FakeExtensionAdapter.sync_errors.clear()
 
     def tearDown(self):
         for manager in reversed(self.managers):
@@ -350,6 +355,36 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.assertEqual(self.model.get(session_id)["id"], session_id)
         self.assertEqual(manager.registry.load()[0]["title"], "Renamed")
 
+    def test_history_disconnect_reconnects_once_as_verified_control_only_session(self):
+        manager = self.manager()
+        FakeExtensionAdapter.sync_errors.append(ExtensionDisconnected("outbound queue exceeded"))
+        path, _, metadata = self.unix_registration()
+
+        with patch("omp_deck.terminal_sessions.ExtensionAdapter", FakeExtensionAdapter):
+            manager._reconcile_extensions({"omp-extension": (path, metadata)})
+            manager._reconcile_extensions({"omp-extension": (path, metadata)})
+
+        session_id = _terminal_id("omp-extension")
+        session = self.model.get(session_id)
+        self.assertEqual(len(FakeExtensionAdapter.instances), 2)
+        self.assertTrue(FakeExtensionAdapter.instances[0].closed)
+        self.assertIn(("sync_history",), FakeExtensionAdapter.instances[0].calls)
+        self.assertNotIn(("sync_history",), FakeExtensionAdapter.instances[1].calls)
+        self.assertEqual(session["lifecycle"], "ongoing")
+        self.assertEqual(session["transport"]["status"], "connected")
+        self.assertIsNotNone(session["historyError"])
+
+        manager.command(session_id, "still-live", "sendMessage", {"message": "still live"})
+        self.assertIn(("send_message", "still live", None), FakeExtensionAdapter.instances[1].calls)
+        FakeExtensionAdapter.instances[1].callback(
+            {
+                "sequence": 2,
+                "kind": "history",
+                "data": {"syncId": "later", "offset": 0, "messages": [], "complete": True},
+            }
+        )
+        self.assertIsNone(self.model.get(session_id)["historyError"])
+
     def test_extension_failure_survives_agent_end_and_idle_refresh(self):
         manager = self.manager()
         session_id, _, adapter = self.connect_extension(manager)
@@ -378,7 +413,7 @@ class TerminalSessionManagerTests(unittest.TestCase):
         adapter.callback({"sequence": 4, "kind": "lifecycle", "data": {"state": "agent_start"}})
         self.assertEqual(self.model.get(session_id)["state"], "working")
 
-    def test_extension_degraded_event_is_visible_in_fleet_state(self):
+    def test_extension_degraded_event_does_not_fabricate_network_failure(self):
         manager = self.manager()
         session_id, _, adapter = self.connect_extension(manager)
 
@@ -395,8 +430,8 @@ class TerminalSessionManagerTests(unittest.TestCase):
 
         session = self.model.get(session_id)
         self.assertEqual(session["state"], "degraded")
-        self.assertEqual(session["transport"]["status"], "degraded")
-        self.assertEqual(session["transport"]["reason"], "event exceeds wire limit")
+        self.assertEqual(session["transport"]["status"], "connected")
+        self.assertIsNone(session["transport"]["reason"])
 
     def test_extension_history_replaces_messages_only_after_complete_sync(self):
         manager = self.manager()

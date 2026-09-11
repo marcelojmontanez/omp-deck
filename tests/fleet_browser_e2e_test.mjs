@@ -164,6 +164,15 @@ test('independent viewers route duplicate session IDs directly and survive one m
     });
     await pair(page, coordinator);
   }
+  for (const page of [phone, computer]) {
+    assert.deepEqual(await page.evaluate(() => state.agents.map(agent => ({
+      lifecycle: agent.lifecycle,
+      historyError: agent.historyError,
+    }))), [
+      {lifecycle: 'ongoing', historyError: null},
+      {lifecycle: 'ongoing', historyError: null},
+    ]);
+  }
   const desktopId = await selectMachineSession(phone, 'Desktop');
   const coldDeepLink = await phone.evaluate(selectedId => {
     const requested = 'cold-machine:session-before-snapshot';

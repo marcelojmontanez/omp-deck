@@ -25,7 +25,19 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
   }
   function displayStatus(agent) {
     if (agent?.nodeAvailable === false) return 'disconnected';
-    return agent.executionState || agent.status || 'idle';
+    return agent?.executionState || agent?.status || 'unknown';
+  }
+  function lifecycle(agent) {
+    return ['ongoing', 'history'].includes(agent?.lifecycle) ? agent.lifecycle : 'unknown';
+  }
+  function needsAttention(agent) {
+    if (lifecycle(agent) === 'history') return false;
+    return lifecycle(agent) === 'unknown'
+      || Boolean(agent?.historyError)
+      || agent?.nodeAvailable === false
+      || !agent?.bridgeConnected
+      || ['needs-input', 'failed', 'degraded', 'recovering', 'disconnected', 'unknown']
+        .includes(displayStatus(agent));
   }
   function relativeTime(value) {
     if (!value) return 'now';
@@ -57,9 +69,12 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     toastTimer = setTimeout(() => { el.toast.hidden = true; }, 5000);
   }
   function matchesFilter(agent) {
+    const agentLifecycle = lifecycle(agent);
+    if (state.sessionScope === 'history') return agentLifecycle === 'history';
+    if (agentLifecycle === 'history') return false;
     if (state.filter === 'all') return true;
     const status = displayStatus(agent);
-    if (state.filter === 'attention') return ['needs-input', 'failed'].includes(status);
+    if (state.filter === 'attention') return needsAttention(agent);
     if (state.filter === 'unread') return agent.inboxState === 'unread';
     return status === state.filter;
   }
@@ -83,15 +98,17 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     return label || String(left.id || '').localeCompare(String(right.id || ''));
   }
   function renderSummary() {
-    const statuses = state.agents.map(displayStatus);
-    const working = statuses.filter(status => status === 'working').length;
-    const attention = statuses.filter(status => ['needs-input', 'failed'].includes(status)).length;
-    const unread = state.agents.filter(agent => agent.inboxState === 'unread').length;
-    const idle = statuses.filter(status => status === 'idle').length;
-    el['working-count'].textContent = working;
-    el['attention-count'].textContent = attention;
-    el['unread-count'].textContent = unread;
-    el['idle-count'].textContent = idle;
+    const ongoing = state.agents.filter(agent => lifecycle(agent) !== 'history');
+    const statuses = ongoing.map(displayStatus);
+    el['working-count'].textContent = statuses.filter(status => status === 'working').length;
+    el['attention-count'].textContent = ongoing.filter(needsAttention).length;
+    el['unread-count'].textContent = ongoing.filter(agent => agent.inboxState === 'unread').length;
+    el['idle-count'].textContent = statuses.filter(status => status === 'idle').length;
+    el['history-count'].textContent = state.agents.filter(agent => lifecycle(agent) === 'history').length;
+    el['history-toggle'].setAttribute('aria-pressed', String(state.sessionScope === 'history'));
+    el['history-toggle'].lastChild.textContent = state.sessionScope === 'history' ? ' Ongoing' : ' History';
+    el['session-scope-title'].textContent = state.sessionScope === 'history' ? 'History' : 'Ongoing';
+    document.querySelector('.filters').hidden = state.sessionScope === 'history';
   }
 
 
@@ -99,35 +116,40 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     const visible = state.agents.filter(matchesFilter).sort(compareAgents);
     el['agent-list'].innerHTML = visible.length ? visible.map(agent => {
       const session = agent.session || {};
-      const status = agent.nodeAvailable === false ? 'disconnected' : displayStatus(agent);
+      const agentLifecycle = lifecycle(agent);
+      const status = agentLifecycle === 'history' ? 'history' : displayStatus(agent);
       const children = (agent.subagents || [])
         .filter(subagent => subagent.executionState === 'working');
       const subagents = children.map(subagent =>
         `<span class="subagent"><i class="status-dot ${escapeHtml(subagent.executionState)}"></i><span><strong>${escapeHtml(subagent.label)}</strong><small>${escapeHtml(subagent.activitySummary || subagent.executionState)}</small></span></span>`
       ).join('');
-      const owner = agent.machineName
-        ? `<span class="agent-machine">${escapeHtml(agent.machineName)}</span>`
-        : '';
-      return `<button class="agent-card" data-id="${escapeHtml(agent.id)}" type="button" aria-label="${escapeHtml(`${agent.project}, ${agent.label}${agent.machineName ? `, on ${agent.machineName}` : ''}`)}">
+      const metadata = [agent.project, agent.machineName].filter(Boolean).join(' · ');
+      const lifecycleNote = agentLifecycle === 'history'
+        ? 'Saved conversation · no live session connection'
+        : agentLifecycle === 'unknown'
+          ? 'Session lifecycle unavailable'
+          : agent.nodeAvailable === false
+            ? 'Machine unavailable'
+            : `${agent.activitySummary || status.replace('-', ' ')}${agent.historyError ? ' · History unavailable' : ''}`;
+      return `<button class="agent-card ${escapeHtml(agentLifecycle)}" data-id="${escapeHtml(agent.id)}" type="button" aria-label="${escapeHtml(`${agent.label}${metadata ? `, ${metadata}` : ''}, ${lifecycleNote}`)}">
         <span class="agent-card-top">
           <span class="status-stack"><i class="status-dot ${escapeHtml(status)}"></i>${agent.inboxState === 'unread' ? '<i class="inbox-dot" title="Unread response"></i>' : ''}</span>
           <span>
-            <span class="agent-name">${escapeHtml(agent.project)}</span>
-            ${owner}
-            <span class="agent-project">${escapeHtml(agent.label)}</span>
-            <span class="activity-summary">${escapeHtml(agent.nodeAvailable === false ? 'Machine unavailable' : (agent.activitySummary || status.replace('-', ' ')))}</span>
+            <span class="agent-name">${escapeHtml(agent.label || 'Untitled conversation')}</span>
+            <span class="agent-project">${escapeHtml(metadata || 'Project and machine unavailable')}</span>
+            <span class="activity-summary">${escapeHtml(lifecycleNote)}</span>
           </span>
           <span class="agent-age">${relativeTime(session.updatedMs)}</span>
         </span>
         ${subagents ? `<span class="subagent-progress">${children.length} working subagent${children.length === 1 ? '' : 's'}</span><span class="subagents" aria-label="Working subagents">${subagents}</span>` : ''}
       </button>`;
-    }).join('') : '<div class="empty-card">No OMPs match this filter.</div>';
+    }).join('') : `<div class="empty-card">${state.sessionScope === 'history' ? 'No saved conversation history.' : 'No ongoing OMPs match this filter.'}</div>`;
   }
 
   function renderDetail({selectionChanged = false} = {}) {
     const agent = selectedAgent();
     const session = agent?.session || {};
-    const renderKey = `${session.updatedMs || ''}:${agent?.inboxState || ''}:${state.showArchive}`;
+    const renderKey = `${session.updatedMs || ''}:${agent?.inboxState || ''}:${agent?.historyError || ''}:${state.showArchive}`;
     if (!selectionChanged
         && state.renderedSessionId === agent?.id
         && state.renderedUpdatedMs === renderKey
@@ -140,6 +162,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
       ompDeckImages.releaseOwner(previousRenderedId);
     }
     const chips = [];
+    const notices = [];
     const capabilities = agent?.capabilities || {};
     if (agent?.machineName) chips.push(`<span class="chip machine-chip">${escapeHtml(agent.machineName)}</span>`);
     if (session.model) chips.push(`<span class="chip">${escapeHtml(session.model)}</span>`);
@@ -150,11 +173,18 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
         : `<span class="chip">thinking: ${escapeHtml(level)}</span>`);
     }
     const executionState = displayStatus(agent || {});
+    el.detail.querySelector('.detail-title').textContent = agent?.label || 'Choose an OMP';
+    el.detail.querySelector('.detail-path').textContent = agent
+      ? [agent.project, agent.machineName, lifecycle(agent) === 'history' ? 'History' : executionState.replaceAll('-', ' ')].filter(Boolean).join(' · ')
+      : '';
+    const agentLifecycle = lifecycle(agent);
+    const isLiveSession = agentLifecycle === 'ongoing';
     const menuCapabilities = {clear: 'compact', interrupt: 'interrupt', quit: 'shutdown'};
     for (const [action, capability] of Object.entries(menuCapabilities)) {
       const button = el['session-menu'].querySelector(`[data-session-action="${action}"]`);
       const available = Boolean(
-        agent?.nodeAvailable !== false
+        isLiveSession
+        && agent?.nodeAvailable !== false
         && capabilities[capability]
         && (action === 'quit' || agent?.bridgeConnected)
       );
@@ -165,28 +195,34 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     const removable = Boolean(agent?.nodeAvailable !== false && capabilities.remove);
     removeButton.hidden = !removable;
     removeButton.disabled = !removable;
-    const transportConnected = Boolean(agent?.nodeAvailable !== false && agent?.bridgeConnected);
-    const transportLabel = transportConnected
-      ? agent.transport.kind === 'rpc'
-        ? 'RPC session'
-        : agent.transport.kind === 'extension'
-          ? 'Terminal session via extension'
-          : agent.transport.kind === 'collab'
-            ? 'Terminal session via Collab'
-            : 'Connected session'
-      : 'Disconnected';
-    el['transport-status'].className = `transport-status ${transportConnected ? escapeHtml(agent.transport.kind) : 'disconnected'}`;
+    const transportConnected = Boolean(
+      isLiveSession && agent?.nodeAvailable !== false && agent?.bridgeConnected
+    );
+    const transportLabel = agentLifecycle === 'history'
+      ? 'History · no live session connection'
+      : agentLifecycle === 'unknown'
+        ? 'Session lifecycle unavailable'
+        : agent?.nodeAvailable === false
+          ? 'Machine unavailable'
+          : transportConnected
+            ? (agent.transport?.label || 'Session connected')
+            : ['recovering', 'reconnecting', 'connecting'].includes(agent.transport?.status)
+              ? 'Session connection recovering'
+              : 'Session connection degraded';
+    el['transport-status'].className = `transport-status ${transportConnected ? 'connected' : 'disconnected'}`;
     el['transport-status'].title = transportLabel;
     el['transport-status'].querySelector('span').textContent = transportLabel;
-    if (agent?.nodeAvailable === false) {
-      const machine = ompDeckApi.machine(agent.machineId);
-      const warning = machine?.status === 'unavailable'
-        ? 'Machine access unavailable'
-        : machine?.status === 'connecting' ? 'Machine connecting' : 'Machine offline';
-      chips.push(`<span class="bridge-warning" role="status">${escapeHtml(warning)}</span>`);
-    } else if (agent?.bridgeConnected === false || executionState === 'disconnected') {
-      chips.push('<span class="bridge-warning" role="status">Disconnected</span>');
+    if (!transportConnected) {
+      const safeReason = typeof agent?.transportReason === 'string'
+        ? agent.transportReason.slice(0, 160)
+        : '';
+      notices.push(`<span class="bridge-warning" role="status">${escapeHtml(safeReason ? `${transportLabel}: ${safeReason}` : transportLabel)}</span>`);
     }
+    if (isLiveSession && agent?.historyError) {
+      const safeReason = String(agent.historyError).slice(0, 240);
+      notices.push(`<span class="bridge-warning history-warning" role="status">${escapeHtml(`Conversation history could not synchronize. ${safeReason} Reload extensions in the terminal when this OMP is idle.`)}</span>`);
+    }
+    el.detail.querySelector('.detail-notices').innerHTML = notices.join('');
     let taskControl = '';
     if (session.todo) {
       const taskCount = TodoUI.parse(session.todo).reduce((count, phase) => count + phase.tasks.length, 0);
@@ -194,7 +230,8 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     }
     el['task-control'].innerHTML = taskControl;
     el['detail-chips'].innerHTML = chips.join('');
-    renderPendingRequest(agent);
+    if (isLiveSession) renderPendingRequest(agent);
+    else renderPendingRequest(null);
 
     const currentEvents = (session.activity || [])
       .filter(event => ['user', 'assistant', 'error'].includes(event.kind));
@@ -208,20 +245,22 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     const archive = (session.archiveActivity || []).length
       ? `<div class="archive-separator"><button type="button" data-toggle-archive aria-expanded="${state.showArchive}">${state.showArchive ? 'Hide earlier history' : 'Show earlier history'}</button></div>${state.showArchive ? archivedEvents.reverse().map(event => `<article class="event archived ${escapeHtml(event.kind)}"><div class="event-head"><span class="event-title">${escapeHtml(event.title)}</span><time class="event-time">${escapeHtml(clockTime(event.time))}</time></div>${eventAttachments(event)}${renderEventDetail(event)}</article>`).join('') : ''}`
       : '';
-    const pending = agent ? [...getComposer().pendingFor(agent.id)].reverse().map(item => ({
-      kind: 'user pending',
-      title: item.accepted ? 'You · Delivered live' : 'You · Delivering',
-      detail: item.text,
-      time: new Date(item.createdAt).toISOString(),
-      attachments: item.attachments,
-    })) : [];
+    const pending = isLiveSession && agent
+      ? [...getComposer().pendingFor(agent.id)].reverse().map(item => ({
+        kind: 'user pending',
+        title: item.accepted ? 'You · Delivered live' : 'You · Delivering',
+        detail: item.text,
+        time: new Date(item.createdAt).toISOString(),
+        attachments: item.attachments,
+      }))
+      : [];
     events.unshift(...pending);
-    if (executionState === 'working' || pending.length) {
+    if (isLiveSession && (executionState === 'working' || pending.length)) {
       const workingOn = pending.length ? 'Preparing a response' : (agent?.activitySummary || session.workingOn || 'Preparing a response');
       events.unshift({kind: 'thinking', title: `OMP · ${workingOn}`, time: null});
-    } else if (executionState === 'needs-input') {
+    } else if (isLiveSession && executionState === 'needs-input') {
       events.unshift({kind: 'notice', title: 'OMP needs your input', detail: agent.activitySummary || 'Reply to continue.', time: null});
-    } else if (executionState === 'failed') {
+    } else if (isLiveSession && executionState === 'failed') {
       events.unshift({kind: 'error', title: 'OMP failed', detail: agent.activitySummary || 'The last operation failed.', time: null});
     }
     const conversation = events.length ? events.map(event => `<article class="event ${escapeHtml(event.kind)}" ${event.id ? `data-event-id="${escapeHtml(event.id)}"` : ''}>
@@ -232,7 +271,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
       ${event.kind === 'thinking'
         ? '<div class="typing-dots" aria-label="OMP is working"><i></i><i></i><i></i></div>'
         : `${eventAttachments(event)}${renderEventDetail(event)}`}
-    </article>`).join('') : '<p class="activity-empty">No conversation available yet.</p>';
+    </article>`).join('') : `<p class="activity-empty">${agentLifecycle === 'history' ? 'No conversation content retained for this session.' : 'No conversation available yet.'}</p>`;
     el.activity.innerHTML = todoPanel + conversation + archive;
     if (agent) ompDeckImages.hydrate(el.activity, agent.id);
     el['scroll-newest'].hidden = el.activity.scrollTop < 160;
@@ -241,10 +280,17 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
       getComposer().select(agent?.id);
       requestAnimationFrame(() => { el.activity.scrollTop = 0; });
     }
-    const canMessage = Boolean(agent?.nodeAvailable !== false && agent?.bridgeConnected && capabilities.sendMessage);
+    const canMessage = Boolean(
+      isLiveSession
+      && agent?.nodeAvailable !== false
+      && agent?.bridgeConnected
+      && capabilities.sendMessage
+    );
     const canAttach = canMessage && Boolean(capabilities.attachments);
     el.message.setAttribute('aria-label', agent ? `Message ${agent.label}` : 'Message selected OMP');
-    el.message.placeholder = agent && !canMessage ? 'Messaging is unavailable for this session' : 'Message this OMP…';
+    el.message.placeholder = agentLifecycle === 'history'
+      ? 'History is read-only'
+      : agent && !canMessage ? 'Messaging is unavailable for this session' : 'Message this OMP…';
     el.message.disabled = !canMessage;
     el.attach.disabled = !canAttach;
     el.gallery.disabled = !canAttach;
@@ -384,6 +430,16 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     touchRender();
     renderFleet();
   }
+
+  el.detail.querySelector('[data-back-to-sessions]').addEventListener('click', () => {
+    const previousId = state.selectedId;
+    const url = new URL(location.href);
+    url.searchParams.delete('session');
+    history.replaceState({view: 'menu'}, '', url);
+    showMenu();
+    const card = el['agent-list'].querySelector(`[data-id="${CSS.escape(previousId || '')}"]`);
+    (card || el['history-toggle']).focus();
+  });
 
   return Object.freeze({
     markRead,

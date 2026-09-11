@@ -21,14 +21,9 @@
   border-radius: 50%;
   background: var(--red);
 }
-.transport-status.rpc i {
+.transport-status.connected i {
   background: var(--green);
   box-shadow: 0 0 12px rgba(84, 230, 162, .62);
-}
-.transport-status.extension i,
-.transport-status.collab i {
-  background: var(--amber);
-  box-shadow: 0 0 12px rgba(255, 199, 107, .52);
 }
 .pending-request {
   flex: 0 0 auto;

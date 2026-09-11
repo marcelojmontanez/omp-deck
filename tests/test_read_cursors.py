@@ -10,7 +10,7 @@ from pathlib import Path
 
 from omp_deck.fleet_model import FleetModel
 from omp_deck.read_cursors import CursorStore
-from omp_deck.rpc_adapter import AdapterSnapshot
+from omp_deck.rpc_adapter import AdapterEvent, AdapterSnapshot
 
 
 def _mark_cursor_in_process(path, index, start, failures):
@@ -31,6 +31,7 @@ class CursorStoreTests(unittest.TestCase):
                 "title": "Deck",
                 "project": {"name": "deck", "path": "/work/deck"},
                 "adapterKind": "rpc",
+                "desiredRpcRunning": True,
                 "ompSessionId": None,
                 "generation": 1,
                 "updatedAt": "2026-09-03T12:00:00+00:00",
@@ -70,6 +71,59 @@ class CursorStoreTests(unittest.TestCase):
             )
             restarted.apply_rpc_snapshot("deck-1", instance_id="two", generation=1, snapshot=newer)
             self.assertTrue(restarted.get("deck-1")["unread"])
+
+    def test_invisible_assistant_records_do_not_create_unread_or_override_later_cursor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cursors.json"
+            store = CursorStore(path)
+            record = {
+                "id": "deck-1",
+                "title": "Deck",
+                "project": {"name": "deck", "path": "/work/deck"},
+                "adapterKind": "rpc",
+                "desiredRpcRunning": True,
+                "ompSessionId": None,
+                "generation": 1,
+                "updatedAt": "2026-09-03T12:00:00+00:00",
+            }
+            snapshot = AdapterSnapshot(
+                state={"session_id": "omp-1", "is_streaming": False},
+                messages=(
+                    {"id": "visible", "role": "assistant", "content": "done"},
+                    {"id": "tool-only", "role": "assistant", "content": []},
+                ),
+                todos=(),
+                subagents=(),
+                sequence=0,
+                pending_ui_request=None,
+                transport_status="connected",
+                reason=None,
+            )
+            store.mark_read("deck-1", "tool-only")
+            model = FleetModel(cursor_store=store)
+            model.load_record(record)
+            model.apply_rpc_snapshot("deck-1", instance_id="one", generation=1, snapshot=snapshot)
+            self.assertFalse(model.get("deck-1")["unread"])
+            self.assertFalse(model.mark_read("deck-1")["unread"])
+            self.assertEqual(store.last_read("deck-1"), "visible")
+            model.apply_adapter_event(
+                "deck-1",
+                instance_id="one",
+                generation=1,
+                event=AdapterEvent(sequence=1, type="agent_end", payload={"messages": snapshot.messages}, timestamp=1),
+            )
+            self.assertFalse(model.get("deck-1")["unread"])
+
+            newer = replace(
+                snapshot,
+                messages=(
+                    *snapshot.messages,
+                    {"id": "new-visible", "role": "assistant", "content": "new"},
+                ),
+                sequence=2,
+            )
+            model.apply_rpc_snapshot("deck-1", instance_id="one", generation=1, snapshot=newer)
+            self.assertTrue(model.get("deck-1")["unread"])
 
     def test_concurrent_processes_do_not_lose_cursor_updates(self):
         with tempfile.TemporaryDirectory() as directory:

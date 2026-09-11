@@ -1,6 +1,6 @@
 # OMP Deck
 
-OMP Deck is a local-first mobile control surface for one developer's [Oh My Pi](https://github.com/can1357/oh-my-pi) sessions. It shows managed and terminal-owned sessions, live conversation state, unread responses, todos, subagents, usage limits, and pending input requests. From the browser you can launch managed sessions, continue conversations, attach images, interrupt work, and use capabilities advertised by each session.
+OMP Deck is a local-first mobile control surface for one developer's [Oh My Pi](https://github.com/can1357/oh-my-pi) sessions. It focuses on ongoing work: live conversation state, unread responses, todos, subagents, usage limits, and pending input requests. Retained sessions without a live attachment are available separately in History. From the browser you can launch managed sessions, continue conversations, attach images, interrupt work, and use capabilities advertised by each session.
 
 Deck is not a Collab replacement. It does not expose rooms, invite links, participant identities, public sharing, or multi-user arbitration. A writable Collab link may be imported as a private server-side transport credential for one terminal-owned session.
 
@@ -22,16 +22,22 @@ Python normalizes all transports into one session model. The browser uses advert
 
 | Indicator | Ownership and behavior |
 | --- | --- |
-| Green, **RPC session** | Deck launches and supervises `omp --mode rpc`. Full managed controls, remote Ask responses, model/thinking controls, todos, subagents, and image prompts are available when advertised. |
-| Amber, **Terminal session via Collab** | A terminal-owned OMP session connected through an imported writable Collab link. Published pi-wire permissions and request settlement rules apply. The link remains server-side. Todo reporting is unavailable on this transport. |
-| Amber, **Terminal session via extension** | A terminal-owned session discovered through the bundled OMP plugin and a private Unix socket on Linux/macOS or same-user named pipe on Windows. Only extension-advertised controls are enabled. Ask is visible but must be answered in the terminal. |
-| Red, **Disconnected** | The transport is unavailable. Persisted state remains visible. Managed-session shutdown can still cancel automatic recovery; other controls require their advertised availability. |
+| **RPC session** | Deck launches and supervises `omp --mode rpc`. Full managed controls, remote Ask responses, model/thinking controls, todos, subagents, and image prompts are available when advertised. |
+| **Terminal session via Collab** | A terminal-owned OMP session connected through an imported writable Collab link. Published pi-wire permissions and request settlement rules apply. The link remains server-side. Todo reporting is unavailable on this transport. |
+| **Terminal session via extension** | A terminal-owned session discovered through the bundled OMP plugin and a private Unix socket on Linux/macOS or same-user named pipe on Windows. Only extension-advertised controls are enabled. Ask is visible but must be answered in the terminal. |
+| **Disconnected** | The transport is unavailable. Managed-session shutdown can still cancel automatic recovery; other controls require their advertised availability. Retained records remain available in History when there is no live owner or managed recovery intent. |
 
 Capabilities can differ by transport, authorization, connection state, platform, and protocol version. Unavailable controls are disabled rather than silently emulated. Extension disconnects never abort the terminal session. Collab failures affect only the imported Collab session.
 
 The extension fallback runs only in interactive terminal mode. RPC, JSON, and print-mode OMP processes do not publish fallback endpoints or appear as additional terminal sessions.
 
 Extension shutdown follows OMP's deferred shutdown request: it may wait for OMP's next idle boundary rather than immediately exit an idle terminal. Deck does not inject terminal input or force-kill that session.
+
+The green session connection indicator means the session transport is connected, regardless of transport type. The separate **Deck connected** label describes the browser's dashboard connection, not the health of every OMP session.
+
+Large tool arguments, tool results, and provider-only message content are not sent as conversation bubbles. The extension preserves conversational text, supported image references, and explicit errors; unavailable images remain visible as placeholders. Wire and retained-history limits still apply.
+
+An older extension already loaded in a terminal may disconnect while synchronizing a large history. Deck makes one control-only reconnect after a verified handshake, keeps that session in Ongoing, and displays a history warning without treating its control channel as disconnected. It does not repeatedly request the failed history while that connection remains healthy. Updating Deck does not replace extension code inside running OMP processes: reload extensions in that terminal when idle to pick up the fix. Deck does not remotely reload or interrupt ongoing terminal work.
 
 ## Install
 
@@ -97,7 +103,13 @@ omp-deck serve
 - use the session menu to compact, interrupt, shut down, or remove a terminal transport only when that capability is available;
 - answer pending RPC or Collab input requests in the request panel; extension-fallback requests remain terminal-only.
 
-Unread sessions appear first. Running subagents appear beneath their parent session, and supported todo lists retain their phase grouping. Completed runs that report an error remain marked as failed, with the error visible in the conversation.
+**Ongoing** is the default view. It includes sessions with a current transport owner and managed sessions whose recovery is still requested. **Needs attention** includes pending input, failures, unavailable machines, connection recovery, and incomplete history. Summary counts and filters apply to ongoing sessions, not old records.
+
+**History** is a secondary, read-only view of retained session records without a current attachment or managed recovery intent. Moving a record there does not delete it, prove that its terminal process ended, or promise a complete archived transcript. A restored live attachment returns it to Ongoing. Machine outages preserve the browser's last-known session grouping rather than reclassifying every session as history.
+
+Unread sessions appear first and only meaningful assistant content creates unread state. Tool-only, thinking-only, and whitespace-only records do not create empty conversation bubbles. Image-only replies and explicit errors remain visible. Running subagents appear beneath their parent session, and supported todo lists retain their phase grouping. Completed runs that report an error remain marked as failed.
+
+The conversation header identifies the selected session and its project, with a **Back** button to return to the session list. Existing session links can still open retained history.
 
 Drafts and selected images stay with their session when you switch conversations. Thinking changes are sent in order per session and reconcile to OMP's reported setting. Drafts and images remain memory-only: reloading, logging out, or clearing local data discards them.
 

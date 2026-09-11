@@ -56,9 +56,11 @@ function eventAttachments(event) {
     }
     const path = safeImagePath(value);
     const machineId = typeof attachment === 'object' ? attachment?.machineId : null;
-    if (!path || typeof machineId !== 'string' || !machineId) return '';
-    return `<button class="message-image image-loading" type="button" data-image-path="${escapeHtml(path)}" data-image-machine="${escapeHtml(machineId)}" aria-label="Enlarge attached image"><span>Loading image…</span></button>`;
-  }).filter(Boolean);
+    if (path && typeof machineId === 'string' && machineId) {
+      return `<button class="message-image image-loading" type="button" data-image-path="${escapeHtml(path)}" data-image-machine="${escapeHtml(machineId)}" aria-label="Enlarge attached image"><span>Loading image…</span></button>`;
+    }
+    return '<div class="message-image image-unavailable" role="note">Image unavailable</div>';
+  });
   if (images.length) return `<div class="message-attachments">${images.join('')}</div>`;
   if (event.attachments && !Array.isArray(event.attachments)) {
     return `<div class="attachment-count">▧ ${event.attachments} file${event.attachments === 1 ? '' : 's'}</div>`;

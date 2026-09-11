@@ -152,6 +152,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     ].join('\n'));
     const session = {
       id: 'session-1',
+      lifecycle: 'ongoing',
       project: {name: 'demo', path: '/demo'},
       title: 'Demo session',
       state: 'idle',
@@ -221,6 +222,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     });
     const rawSession = title => ({
       id: 'recovery-session',
+      lifecycle: 'ongoing',
       ompSessionId: 'omp-recovery',
       title,
       project: {name: 'demo', path: '/work/demo'},
@@ -305,6 +307,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     node.recoveryTimer = null;
     const baseGeneration = node.snapshotGeneration + 20;
     const rawSession = (title, messages = []) => ({
+      lifecycle: 'ongoing',
       id: sessionId,
       ompSessionId: 'omp-normalized-ordering',
       title,
@@ -400,12 +403,138 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   assert.match(normalizedEventOrdering.largeTitleVisible, /Large transcript/);
   assert.equal(normalizedEventOrdering.largeTranscriptVisible, true);
 
+  const lifecycleDashboard = await page.evaluate(async () => {
+    const makeAgent = (id, lifecycle, executionState, overrides = {}) => ({
+      id, lifecycle, executionState, status: executionState,
+      project: 'deck', label: `${id} conversation`, machineName: 'Workstation',
+      machineId: 'local', nodeAvailable: true, bridgeConnected: true,
+      inboxState: 'read', capabilities: {sendMessage: true, attachments: true},
+      transport: {status: 'connected', label: 'Session connected'},
+      subagents: [], pendingUiRequest: null,
+      session: {activity: [], archiveActivity: [], updatedMs: Date.now()},
+      ...overrides,
+    });
+    const active = makeAgent('active', 'ongoing', 'working', {
+      historyError: '<history stream unavailable>',
+    });
+    const recovering = makeAgent('recovering', 'ongoing', 'recovering', {
+      bridgeConnected: false,
+      transport: {status: 'reconnecting', label: 'Reconnecting'},
+    });
+    const offline = makeAgent('offline', 'ongoing', 'idle', {nodeAvailable: false});
+    const unknown = makeAgent('unknown', 'unknown', 'idle');
+    const saved = makeAgent('saved', 'history', 'disconnected', {
+      bridgeConnected: false,
+      capabilities: {},
+      session: {
+        activity: [{id: 'image-only', kind: 'assistant', title: 'OMP', detail: '', attachments: [{unavailable: true}]}],
+        archiveActivity: [],
+        updatedMs: Date.now(),
+      },
+    });
+    state.agents = [active, recovering, offline, unknown, saved];
+    state.sessionScope = 'ongoing';
+    state.filter = 'all';
+    renderSummary();
+    renderList();
+    const ongoing = [...el['agent-list'].querySelectorAll('.agent-card')].map(card => card.dataset.id);
+    const counts = {
+      working: el['working-count'].textContent,
+      attention: el['attention-count'].textContent,
+      idle: el['idle-count'].textContent,
+      history: el['history-count'].textContent,
+    };
+    selectAgent(active.id, {pushHistory: false});
+    const originalRequest = ompDeckApi.request;
+    let composerPath = null;
+    ompDeckApi.request = async path => {
+      composerPath = path;
+      return {ok: true, status: 202, json: async () => ({})};
+    };
+    el.message.value = 'Control channel still works';
+    el.composer.requestSubmit();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    ompDeckApi.request = originalRequest;
+    const historyFailure = {
+      sendDisabled: el.send.disabled,
+      messageDisabled: el.message.disabled,
+      attachDisabled: el.attach.disabled,
+      reasonVisible: el.detail.querySelector('.history-warning')?.textContent
+        .includes('<history stream unavailable>'),
+      reasonEscaped: el.detail.querySelector('.history-warning')?.innerHTML
+        .includes('&lt;history stream unavailable&gt;'),
+      composerPath,
+    };
+    active.historyError = null;
+    active.session.updatedMs += 1;
+    touchRender();
+    renderSummary();
+    renderDetail();
+    const authoritativeHistory = {
+      attention: el['attention-count'].textContent,
+      warningPresent: Boolean(el.detail.querySelector('.history-warning')),
+      sendDisabled: el.send.disabled,
+    };
+    state.sessionScope = 'history';
+    renderSummary();
+    renderList();
+    const history = [...el['agent-list'].querySelectorAll('.agent-card')].map(card => card.dataset.id);
+    selectAgent(active.id, {pushHistory: false});
+    el.message.value = 'draft survives history';
+    el.message.dispatchEvent(new Event('input', {bubbles: true}));
+    selectAgent(saved.id, {pushHistory: false});
+    selectAgent(active.id, {pushHistory: false});
+    const restoredDraft = el.message.value;
+    selectAgent(saved.id, {pushHistory: false});
+    const historyDetail = {
+      sendDisabled: el.send.disabled,
+      placeholder: el.message.placeholder,
+      status: el['transport-status'].title,
+      imageUnavailable: el.activity.textContent.includes('Image unavailable'),
+    };
+    el.detail.querySelector('[data-back-to-sessions]').click();
+    state.sessionScope = 'ongoing';
+    renderSummary();
+    renderList();
+    return {
+      ongoing, history, counts, historyFailure, authoritativeHistory,
+      historyDetail, restoredDraft, selectedAfterReturn: state.selectedId,
+    };
+  });
+  assert.deepEqual(lifecycleDashboard.ongoing.sort(), ['active', 'offline', 'recovering', 'unknown']);
+  assert.deepEqual(lifecycleDashboard.history, ['saved']);
+  assert.deepEqual(lifecycleDashboard.counts, {
+    working: '1', attention: '4', idle: '1', history: '1',
+  });
+  assert.deepEqual(lifecycleDashboard.historyFailure, {
+    sendDisabled: false,
+    messageDisabled: false,
+    attachDisabled: false,
+    reasonVisible: true,
+    reasonEscaped: true,
+    composerPath: '/api/sessions/active/messages',
+  });
+  assert.deepEqual(lifecycleDashboard.authoritativeHistory, {
+    attention: '3',
+    warningPresent: false,
+    sendDisabled: false,
+  });
+  assert.deepEqual(lifecycleDashboard.historyDetail, {
+    sendDisabled: true,
+    placeholder: 'History is read-only',
+    status: 'History · no live session connection',
+    imageUnavailable: true,
+  });
+  assert.equal(lifecycleDashboard.restoredDraft, 'draft survives history');
+  assert.equal(lifecycleDashboard.selectedAfterReturn, null);
   const queueBehavior = await page.evaluate(async () => {
+
     const originalRequest = ompDeckApi.request;
     const agent = {
       id: 'queue-session',
       project: 'demo',
       label: 'Queue session',
+      lifecycle: 'ongoing',
       status: 'idle',
       executionState: 'idle',
       inboxState: 'read',
@@ -520,6 +649,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     const previousSelectedId = state.selectedId;
     const agent = {
       id: 'echo-session', project: 'demo', label: 'Echo session',
+      lifecycle: 'ongoing',
       status: 'idle', executionState: 'idle', inboxState: 'read',
       bridgeConnected: true, capabilities: {sendMessage: true},
       transport: {kind: 'rpc', status: 'connected', label: 'RPC'},
@@ -795,6 +925,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     const rawSession = () => ({
       id: 'thinking-session', title: 'Thinking session',
       project: {name: 'demo', path: '/demo'}, state: 'idle', unread: false,
+      lifecycle: 'ongoing',
       transport: {kind: 'rpc', status: 'connected'},
       capabilities: {setThinking: true}, thinking: authoritative,
       messages: [], todos: [], subagents: [], updatedAt: new Date().toISOString(),
@@ -951,13 +1082,17 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     document.body.append(host);
     renderUsage({reports: [{
       provider: 'test',
-      limits: [{label: 'Window', amount: {usedFraction: 0.25}}],
+      limits: [
+        {label: 'Fresh', amount: {usedFraction: 0}},
+        {label: 'Window', amount: {usedFraction: 0.25}},
+        {label: 'Spent', amount: {usedFraction: 1}},
+      ],
     }]});
     const todo = host.querySelector('progress');
-    const usage = document.querySelector('#usage-list progress');
+    const usage = [...document.querySelectorAll('#usage-list progress')];
     const result = {
       todo: {value: todo.value, max: todo.max, style: todo.getAttribute('style')},
-      usage: {value: usage.value, max: usage.max, style: usage.getAttribute('style')},
+      usage: usage.map(item => ({value: item.value, max: item.max, style: item.getAttribute('style')})),
     };
     host.remove();
     return result;
@@ -966,6 +1101,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   const disconnectedShutdown = await page.evaluate(() => {
     const agent = {
       id: 'disconnected-rpc-shutdown', project: 'demo', label: 'Stopped RPC',
+      lifecycle: 'ongoing',
       bridgeConnected: false, nodeAvailable: true, executionState: 'disconnected',
       inboxState: 'read', capabilities: {shutdown: true},
       transport: {kind: 'rpc', status: 'disconnected', label: 'Disconnected'},
@@ -981,7 +1117,11 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   assert.deepEqual(disconnectedShutdown, {disabled: false, title: ''});
   assert.deepEqual(cspProgress, {
     todo: {value: 1, max: 4, style: null},
-    usage: {value: 25, max: 100, style: null},
+    usage: [
+      {value: 0, max: 100, style: null},
+      {value: 25, max: 100, style: null},
+      {value: 100, max: 100, style: null},
+    ],
   });
 
   const askRetryIds = await page.evaluate(async () => {
@@ -1036,6 +1176,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       id: 'control-retry-session',
       project: 'demo',
       label: 'Control retry',
+      lifecycle: 'ongoing',
       bridgeConnected: true,
       executionState: 'idle',
       inboxState: 'read',

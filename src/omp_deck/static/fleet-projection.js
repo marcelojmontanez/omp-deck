@@ -25,6 +25,14 @@ function contentText(content) {
     .join('\n');
 }
 
+function hasVisibleContent(message) {
+  if (!Array.isArray(message?.content)) return false;
+  return message.content.some(item => (
+    item?.type === 'image'
+    || (item?.type === 'text' && typeof item.text === 'string' && item.text.trim())
+  ));
+}
+
 function todosText(todos) {
   if (!Array.isArray(todos) || !todos.length) return '';
   const groups = new Map();
@@ -46,15 +54,19 @@ function projectSession(session, machine = null) {
   const machineId = machine?.id || null;
   const localId = session.id;
   const projectedId = machineId ? ompDeckApi.sessionKey(machineId, localId) : localId;
-  const activity = (session.messages || []).map(message => {
+  const activity = (session.messages || []).filter(message => (
+    ['user', 'assistant'].includes(message?.role) && hasVisibleContent(message)
+  )).map(message => {
     const images = Array.isArray(message.content)
-      ? message.content.filter(item => item?.type === 'image' && typeof item.url === 'string')
-        .map(item => ({url: item.url, machineId}))
+      ? message.content.filter(item => item?.type === 'image').map(item => {
+        const url = typeof item.url === 'string' ? item.url : null;
+        return {url, machineId, unavailable: !url};
+      })
       : [];
     return {
       id: message.id,
-      kind: ['user', 'assistant'].includes(message.role) ? message.role : 'notice',
-      title: message.role === 'user' ? 'You' : message.role === 'assistant' ? 'OMP' : String(message.role || 'OMP'),
+      kind: message.role,
+      title: message.role === 'user' ? 'You' : 'OMP',
       detail: contentText(message.content),
       time: message.createdAt,
       attachments: images,
@@ -71,6 +83,7 @@ function projectSession(session, machine = null) {
     machineId,
     machineName: machine?.name || '',
     machineOrigin: machine?.origin || '',
+    lifecycle: ['ongoing', 'history'].includes(session.lifecycle) ? session.lifecycle : 'unknown',
     nodeAvailable: machine ? machine.status === 'live' : true,
     project: session.project?.name || 'Terminal',
     cwd: session.project?.path || '',
@@ -81,7 +94,15 @@ function projectSession(session, machine = null) {
     bridgeConnected: session.transport?.status === 'connected',
     activitySummary,
     capabilities: session.capabilities || {},
-    transport: session.transport || {kind: 'unknown', status: 'disconnected', label: 'Disconnected'},
+    transport: session.transport || {kind: 'unknown', status: 'unknown', label: 'Transport unavailable', reason: null},
+    transportReason: typeof session.transport?.reason === 'string' && session.transport.reason.trim()
+      ? session.transport.reason
+      : null,
+    transportStatus: session.transport?.status || 'unknown',
+    historyError: typeof session.historyError === 'string' && session.historyError.trim()
+      ? session.historyError
+      : null,
+    transportLabel: session.transport?.label || 'Transport unavailable',
     pendingUiRequest: session.pendingUiRequest || null,
     subagents: (session.subagents || []).map(item => {
       const executionState = normalizedSubagentStatus(item.executionState || item.status);

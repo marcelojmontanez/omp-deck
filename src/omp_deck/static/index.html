@@ -8,6 +8,7 @@
   <title>OMP Deck</title>
   <link rel="stylesheet" href="/composer.css">
   <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/session-list.css">
   <link rel="stylesheet" href="/fleet.css">
   <link rel="stylesheet" href="/todo.css">
   <link rel="stylesheet" href="/launcher.css">
@@ -38,7 +39,7 @@
           <h1 id="dashboard-title" tabindex="-1">OMP Deck</h1>
         </div>
       </div>
-      <div class="connection" id="connection"><span class="live-dot"></span><span id="connection-text">Connecting</span></div>
+      <div class="connection" id="connection"><span class="live-dot"></span><span id="connection-text">Deck connecting</span></div>
     </header>
 
     <section class="overview" aria-live="polite">
@@ -87,11 +88,15 @@
     </section>
 
     <section class="workspace" id="workspace">
-      <aside class="rail" aria-label="Active OMPs">
-        <nav class="filters" aria-label="Filter OMPs">
+      <aside class="rail" aria-label="OMP sessions">
+        <div class="session-scope">
+          <h2 id="session-scope-title">Ongoing</h2>
+          <button id="history-toggle" type="button" aria-pressed="false"><span id="history-count">0</span> History</button>
+        </div>
+        <nav class="filters" aria-label="Filter ongoing OMPs">
           <button class="filter active" data-filter="all">All</button>
           <button class="filter" data-filter="working">Working</button>
-          <button class="filter" data-filter="attention" title="Errors or agents waiting for your input">Needs attention</button>
+          <button class="filter" data-filter="attention" title="Sessions needing input or with connection problems">Needs attention</button>
           <button class="filter" data-filter="unread">Unread</button>
           <button class="filter" data-filter="idle">Idle</button>
         </nav>
@@ -100,6 +105,13 @@
 
       <section class="detail" id="detail" aria-live="polite">
         <header class="detail-header">
+          <div class="detail-heading">
+            <button class="back-button" type="button" data-back-to-sessions aria-label="Back to sessions">Back</button>
+            <div class="detail-identity">
+              <h2 class="detail-title" data-session-identity></h2>
+              <p class="detail-path" data-session-identity></p>
+            </div>
+          </div>
           <div class="chips" id="detail-chips"></div>
           <div class="detail-actions">
             <div id="task-control"></div>
@@ -116,6 +128,7 @@
               <button type="button" role="menuitem" data-session-action="revoke-all">Revoke all devices</button>
             </div>
           </div>
+          <div class="detail-notices" data-session-identity></div>
         </header>
         <section class="pending-request" id="pending-request" aria-live="polite" hidden></section>
         <div class="activity" id="activity"><p class="activity-empty">Waiting for structured OMP events.</p></div>

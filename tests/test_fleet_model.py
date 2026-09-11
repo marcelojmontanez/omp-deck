@@ -16,6 +16,7 @@ class FleetModelTests(unittest.TestCase):
             "title": "Build Deck",
             "project": {"name": "deck", "path": "/work/deck"},
             "adapterKind": "rpc",
+            "desiredRpcRunning": True,
             "ompSessionId": "omp-old",
             "generation": 3,
             "updatedAt": "2026-09-03T12:00:00+00:00",
@@ -80,8 +81,10 @@ class FleetModelTests(unittest.TestCase):
                 "ompSessionId",
                 "title",
                 "project",
+                "lifecycle",
                 "state",
                 "transport",
+                "historyError",
                 "capabilities",
                 "messages",
                 "todos",
@@ -105,6 +108,7 @@ class FleetModelTests(unittest.TestCase):
                 "reason": None,
             },
         )
+        self.assertIsNone(session["historyError"])
         self.assertEqual(session["ompSessionId"], "omp-live")
         self.assertEqual(session["state"], "working")
         self.assertTrue(session["capabilities"]["attachments"])
@@ -122,6 +126,126 @@ class FleetModelTests(unittest.TestCase):
         public = model.snapshot()
         self.assertEqual(set(public), {"generatedAt", "snapshotGeneration", "lastEventId", "sessions"})
         self.assertEqual(public["sessions"], [session])
+
+    def test_lifecycle_uses_runtime_ownership_and_managed_intent(self):
+        model = FleetModel()
+        model.load_record(self.make_record(desiredRpcRunning=False))
+        self.assertEqual(model.get("deck-1")["lifecycle"], "history")
+
+        self.assertTrue(
+            model.set_transport(
+                "deck-1",
+                instance_id="owned-runtime",
+                generation=3,
+                status="connected",
+                reason=None,
+            )
+        )
+        self.assertEqual(model.get("deck-1")["lifecycle"], "ongoing")
+
+        self.assertTrue(
+            model.set_transport(
+                "deck-1",
+                instance_id="owned-runtime",
+                generation=3,
+                status="disconnected",
+                reason="collaboration connection lost",
+            )
+        )
+        disconnected = model.get("deck-1")
+        self.assertEqual(disconnected["lifecycle"], "ongoing")
+        self.assertEqual(disconnected["transport"]["reason"], "collaboration connection lost")
+
+    def test_desired_rpc_survives_disconnect_but_stop_becomes_history(self):
+        model = FleetModel()
+        model.load_record(self.make_record())
+        self.assertEqual(model.get("deck-1")["lifecycle"], "ongoing")
+        self.assertTrue(
+            model.set_transport(
+                "deck-1",
+                instance_id=None,
+                generation=3,
+                status="disconnected",
+                reason="machine unavailable",
+            )
+        )
+        self.assertEqual(model.get("deck-1")["lifecycle"], "ongoing")
+
+        model.load_record(self.make_record(generation=4, desiredRpcRunning=False))
+        self.assertTrue(
+            model.set_transport(
+                "deck-1",
+                instance_id=None,
+                generation=4,
+                status="disconnected",
+                reason="shut down",
+            )
+        )
+        stopped = model.get("deck-1")
+        self.assertEqual(stopped["lifecycle"], "history")
+        self.assertFalse(
+            model.set_transport(
+                "deck-1",
+                instance_id="stale-runtime",
+                generation=3,
+                status="connected",
+                reason=None,
+            )
+        )
+        self.assertEqual(model.get("deck-1"), stopped)
+
+    def test_restored_unowned_terminal_record_is_history(self):
+        model = FleetModel()
+        model.load_record(self.make_record(adapterKind="collab", desiredRpcRunning=False))
+        session = model.get("deck-1")
+        self.assertEqual(session["lifecycle"], "history")
+        self.assertEqual(session["state"], "disconnected")
+
+    def test_extension_message_end_only_marks_visible_assistant_content_unread(self):
+        model = FleetModel()
+        model.load_record(self.make_record(adapterKind="extension", desiredRpcRunning=False))
+        self.assertTrue(
+            model.set_transport(
+                "deck-1",
+                instance_id="extension-runtime",
+                generation=3,
+                status="connected",
+                reason=None,
+            )
+        )
+        self.assertTrue(
+            model.apply_extension_event(
+                "deck-1",
+                instance_id="extension-runtime",
+                generation=3,
+                event={
+                    "sequence": 1,
+                    "kind": "message",
+                    "data": {
+                        "phase": "end",
+                        "message": {"id": "tool-only", "role": "assistant", "content": []},
+                    },
+                },
+            )
+        )
+        self.assertFalse(model.get("deck-1")["unread"])
+
+        self.assertTrue(
+            model.apply_extension_event(
+                "deck-1",
+                instance_id="extension-runtime",
+                generation=3,
+                event={
+                    "sequence": 2,
+                    "kind": "message",
+                    "data": {
+                        "phase": "end",
+                        "message": {"id": "visible", "role": "assistant", "content": "done"},
+                    },
+                },
+            )
+        )
+        self.assertTrue(model.get("deck-1")["unread"])
 
     def test_record_reload_preserves_live_session_identity_and_adapter_progress(self):
         model = self.connected_model()

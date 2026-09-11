@@ -4,7 +4,14 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from ._fleet_projection import MAX_MESSAGE_BYTES, MAX_MESSAGES, normalize_messages, normalize_todos, strict_clone
+from ._fleet_projection import (
+    MAX_MESSAGE_BYTES,
+    MAX_MESSAGES,
+    has_visible_content,
+    normalize_messages,
+    normalize_todos,
+    strict_clone,
+)
 from ._session_activity import clear_activity, completion_state, update_tool_activity
 
 _HISTORY_SYNC_KEY = "_extensionHistorySync"
@@ -65,6 +72,7 @@ def _apply_history(session: dict[str, Any], session_id: str, payload: Mapping[st
         session["messages"] = normalize_messages(retained, session_id)
         if session["state"] in {"idle", "failed"}:
             session["state"] = completion_state(retained)
+        session["historyError"] = None
         session.pop(_HISTORY_SYNC_KEY, None)
 
 
@@ -93,10 +101,9 @@ def project_extension_event(session: dict[str, Any], session_id: str, kind: str,
             reason = "extension event degraded"
         if payload.get("droppedKind") == "history":
             session.pop(_HISTORY_SYNC_KEY, None)
-            session["messages"] = []
-        session["state"] = "degraded"
-        session["transport"]["status"] = "degraded"
-        session["transport"]["reason"] = reason[:256]
+            session["historyError"] = reason[:256]
+        else:
+            session["state"] = "degraded"
     elif kind == "todo" and isinstance(payload.get("todos"), Sequence):
         session["todos"] = normalize_todos([item for item in payload["todos"] if isinstance(item, Mapping)])
 
@@ -116,8 +123,10 @@ def _apply_message(session: dict[str, Any], session_id: str, payload: Mapping[st
         ]
         raw_messages.append(message)
         session["messages"] = normalize_messages(raw_messages, session_id)
+        normalized = session["messages"][-1]
         if message.get("role") == "assistant":
-            session["unread"] = True
+            if has_visible_content(normalized):
+                session["unread"] = True
             if completion_state([message]) == "failed":
                 session["state"] = "failed"
     elif phase in {"start", "update"}:

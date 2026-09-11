@@ -116,8 +116,7 @@ def _message_content(message: Mapping[str, Any]) -> list[Any]:
     elif isinstance(content, Sequence) and not isinstance(content, (str, bytes, bytearray)):
         values = content
     else:
-        text = message.get("output") or message.get("summary") or message.get("command")
-        values = [{"type": "text", "text": text}] if isinstance(text, str) else []
+        values = []
     result = []
     for value in values:
         if not isinstance(value, Mapping):
@@ -143,6 +142,20 @@ def _message_content(message: Mapping[str, Any]) -> list[Any]:
     if isinstance(error, str) and error.strip():
         result.append({"type": "text", "text": error})
     return result
+
+
+def has_visible_content(message: Mapping[str, Any]) -> bool:
+    content = message.get("content")
+    if not isinstance(content, Sequence) or isinstance(content, (str, bytes, bytearray)):
+        return False
+    return any(
+        isinstance(item, Mapping)
+        and (
+            item.get("type") == "image"
+            or (item.get("type") == "text" and isinstance(item.get("text"), str) and bool(item["text"].strip()))
+        )
+        for item in content
+    )
 
 
 def normalize_messages(values: Sequence[Mapping[str, Any]], session_id: str) -> list[dict[str, Any]]:

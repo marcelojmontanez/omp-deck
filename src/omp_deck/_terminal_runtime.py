@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ._extension_activation import ExtensionEventActivation
+from ._extension_protocol import ExtensionDisconnected, ExtensionRequestTimeout
 from .collab_adapter import CollabAdapter
 from .extension_adapter import ExtensionAdapter
 from .registry_store import RegistryStore
@@ -15,6 +17,33 @@ from .registry_store import RegistryStore
 
 class TerminalSessionNotConnected(LookupError):
     pass
+
+
+def _open_extension(factory: Callable[[], tuple[ExtensionEventActivation, ExtensionAdapter]]):
+    """Prepare a verified connection before replacing any existing owner."""
+
+    def register(adapter: ExtensionAdapter):
+        registration = adapter.start()
+        snapshot = adapter.snapshot()
+        if snapshot is None or snapshot.transport_status != "connected":
+            raise TerminalSessionNotConnected("Extension snapshot unavailable")
+        return registration, snapshot
+
+    activation, adapter = factory()
+    history_error = None
+    try:
+        registration, snapshot = register(adapter)
+        try:
+            adapter.sync_history()
+        except (ExtensionDisconnected, ExtensionRequestTimeout):
+            adapter.close()
+            activation, adapter = factory()
+            registration, snapshot = register(adapter)
+            history_error = "The extension could not synchronize conversation history"
+        return activation, adapter, registration, snapshot, history_error
+    except Exception:
+        adapter.close()
+        raise
 
 
 @dataclass(slots=True)

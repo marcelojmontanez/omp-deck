@@ -223,7 +223,7 @@ class RpcSessionManager:
                     self._runtimes.pop(session_id)
             self.model.set_transport(
                 session_id,
-                instance_id=runtime.instance_id if runtime else None,
+                instance_id=None,
                 generation=record["generation"],
                 status="disconnected",
                 reason="shut down",

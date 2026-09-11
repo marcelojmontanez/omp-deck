@@ -253,6 +253,57 @@ test('overlapping histories stay contiguous and live messages follow the replace
   }
 });
 
+test('large tool payloads cannot replace conversation history or lifecycle with degradation', async () => {
+  const large = 'tool output '.repeat(200_000);
+  const answer = {role: 'assistant', timestamp: 2, content: [
+    {type: 'toolCall', id: 'tool-1', name: 'read', arguments: {output: large}},
+    {type: 'text', text: 'The useful answer.'},
+    {type: 'image', data: `blob:sha256:${'a'.repeat(64)}`},
+    {type: 'image', data: large},
+  ]};
+  const messages = [{role: 'toolResult', toolCallId: 'tool-1', content: large}, answer];
+  const app = await fixture(messages);
+  let socket;
+  try {
+    socket = await app.connect();
+    const lines = readline.createInterface({input: socket, crlfDelay: Infinity});
+    const frames = lines[Symbol.asyncIterator]();
+    await frames.next();
+    await frames.next();
+    socket.write(`${JSON.stringify({protocol: 'omp-deck-fallback-v1', type: 'request', id: 'large', action: 'syncHistory'})}\n`);
+    const history = JSON.parse((await frames.next()).value);
+    assert.equal(history.kind, 'history');
+    assert.equal(history.data.complete, true);
+    assert.deepEqual(history.data.messages.map(message => message.content), [[], [
+      {type: 'text', text: 'The useful answer.'},
+      {type: 'image', data: `blob:sha256:${'a'.repeat(64)}`},
+      {type: 'image'},
+    ]]);
+    assert.equal(JSON.parse((await frames.next()).value).ok, true);
+    const tool = {toolCallId: 'tool-1', toolName: 'read', args: {output: large}, partialResult: large, result: large};
+    app.handlers.get('tool_execution_start')(tool);
+    app.handlers.get('tool_execution_update')(tool);
+    app.handlers.get('tool_execution_end')(tool);
+    app.handlers.get('message_update')({message: answer, assistantMessageEvent: {partial: large}});
+    app.handlers.get('message_end')({message: answer});
+    app.handlers.get('turn_end')({messages, toolResults: large}, app.context);
+    app.handlers.get('agent_end')({messages}, app.context);
+    const events = [];
+    for (let index = 0; index < 7; index++) events.push(JSON.parse((await frames.next()).value));
+    assert.deepEqual(events.map(event => event.kind), ['tool', 'tool', 'tool', 'message', 'message', 'async', 'lifecycle']);
+    assert.deepEqual(events.slice(0, 3).map(event => [event.data.phase, event.data.toolCallId]), [
+      ['start', 'tool-1'], ['update', 'tool-1'], ['end', 'tool-1'],
+    ]);
+    assert.deepEqual(events[4].data.message, history.data.messages[1]);
+    assert.equal(events[6].data.state, 'agent_end');
+    assert.equal(events[6].data.snapshot.idle, true);
+    lines.close();
+  } finally {
+    socket?.destroy();
+    await app.cleanup();
+  }
+});
+
 test('interrupt and pong bypass a history write blocked by its reader', async () => {
   const messages = Array.from({length: 500}, (_, index) => ({
     role: 'assistant', content: `${index}:`.padEnd(20 * 1024, 'x'),

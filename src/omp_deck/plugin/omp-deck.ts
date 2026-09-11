@@ -7,7 +7,7 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { authenticateNamedPipe } from "./named-pipe-auth.ts";
 import { BoundedSocketWriter } from "./bounded-writer.ts";
 import { BoundedEventQueue } from "./bounded-event-queue.ts";
-import { captureHistory, streamHistory } from "./history-sync.ts";
+import { captureHistory, projectMessage, streamHistory } from "./history-sync.ts";
 const PROTOCOL = "omp-deck-fallback-v1";
 const MAX_LINE_BYTES = 1024 * 1024;
 const HEARTBEAT_MS = 15_000;
@@ -449,6 +449,11 @@ export default function ompDeck(pi: ExtensionAPI) {
       }
     }, HEARTBEAT_MS);
   }
+  function toolEvent(phase: string, event: { toolCallId: string; toolName: string; intent?: string }): void {
+    const terminalOnly = event.toolName.toLowerCase() === "ask";
+    emit("tool", { phase, toolCallId: event.toolCallId, toolName: event.toolName, intent: event.intent,
+      ...(terminalOnly ? { terminalOnly: true, instruction: "Answer this request in the terminal" } : {}) });
+  }
   // Handlers are deliberately registered synchronously during factory load.
   pi.on("session_start", async (_event, context) => {
     ctx = context;
@@ -462,19 +467,17 @@ export default function ompDeck(pi: ExtensionAPI) {
   pi.on("session_branch", async (_event, context) => { ctx = context; emit("lifecycle", { state: "session_branch" }); await queueRestart(context); });
   pi.on("session_tree", (_event, context) => { ctx = context; emitHistory(context); });
   pi.on("session_compact", (_event, context) => { ctx = context; emitHistory(context); });
-  pi.on("agent_start", (event) => emit("lifecycle", { state: "agent_start", event }));
-  pi.on("agent_end", (event, context) => emit("lifecycle", { state: "agent_end", event, snapshot: snapshots(context) }));
-  pi.on("message_start", (event) => emit("message", { phase: "start", message: event.message }));
-  pi.on("message_update", (event) => emit("message", { phase: "update", message: event.message, update: event.assistantMessageEvent }));
-  pi.on("message_end", (event) => emit("message", { phase: "end", message: event.message }));
-  pi.on("tool_execution_start", (event) => emit("tool", event.toolName.toLowerCase() === "ask"
-    ? { phase: "start", ...event, terminalOnly: true, instruction: "Answer this request in the terminal" }
-    : { phase: "start", ...event }));
-  pi.on("tool_execution_update", (event) => emit("tool", { phase: "update", ...event }));
-  pi.on("tool_execution_end", (event) => emit("tool", { phase: "end", ...event }));
+  pi.on("agent_start", () => emit("lifecycle", { state: "agent_start" }));
+  pi.on("agent_end", (_event, context) => emit("lifecycle", { state: "agent_end", snapshot: snapshots(context) }));
+  pi.on("message_start", () => emit("message", { phase: "start" }));
+  pi.on("message_update", () => emit("message", { phase: "update" }));
+  pi.on("message_end", (event) => emit("message", { phase: "end", message: projectMessage(event.message) }));
+  pi.on("tool_execution_start", (event) => toolEvent("start", event));
+  pi.on("tool_execution_update", (event) => toolEvent("update", event));
+  pi.on("tool_execution_end", (event) => toolEvent("end", event));
   pi.on("todo_reminder", (event) => emit("todo", { todos: event.todos, attempt: event.attempt }));
   pi.on("goal_updated", (event) => emit("todo", { goal: event.goal, state: event.state }));
-  pi.on("turn_end", (event, context) => emit("async", { event, snapshot: context.getAsyncJobSnapshot() }));
+  pi.on("turn_end", (_event, context) => emit("async", { snapshot: context.getAsyncJobSnapshot() }));
   pi.on("session_shutdown", async () => {
     stopping = true;
     lifecycleGeneration++;

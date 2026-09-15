@@ -10,8 +10,8 @@
   border: 0;
 }
 .transport-status {
-  width: 28px;
-  height: 36px;
+  width: 16px;
+  height: 44px;
   display: grid;
   place-items: center;
 }
@@ -21,9 +21,18 @@
   border-radius: 50%;
   background: var(--red);
 }
-.transport-status.connected i {
+.transport-status.connected[data-transport="rpc"] i {
   background: var(--green);
   box-shadow: 0 0 12px rgba(84, 230, 162, .62);
+}
+.transport-status.connected[data-transport="extension"] i,
+.transport-status.connected[data-transport="collab"] i {
+  background: var(--amber);
+  box-shadow: 0 0 12px rgba(255, 199, 107, .4);
+}
+.transport-status[data-lifecycle="history"] i {
+  background: var(--muted);
+  box-shadow: none;
 }
 .pending-request {
   flex: 0 0 auto;

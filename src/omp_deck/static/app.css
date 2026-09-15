@@ -48,9 +48,17 @@ button:focus-visible, textarea:focus-visible, input:focus-visible, select:focus-
 }
 
 .appbar, .brand, .connection, .overview, .metric-row,
-.detail-title-row, .detail-heading, .chips, .composer-actions { display: flex; align-items: center; }
+.dashboard-actions, .chips, .composer-actions { display: flex; align-items: center; }
 .appbar { justify-content: space-between; gap: 18px; }
 .brand { gap: 12px; min-width: 0; }
+.dashboard-actions { gap: 8px; min-width: 0; }
+.settings-button {
+  width: 44px; height: 44px; flex: 0 0 auto; padding: 10px;
+  border: 0; border-radius: 10px; background: transparent; color: var(--muted); cursor: pointer;
+}
+.settings-button svg { width: 24px; height: 24px; fill: var(--bg); stroke: currentColor; stroke-width: 1.6; }
+.settings-button:hover { background: var(--panel-solid); color: var(--text); }
+#dashboard-title:focus { outline: none; }
 .mark {
   width: 38px;
   height: 38px;
@@ -151,31 +159,18 @@ h1 { font-size: 18px; letter-spacing: -.02em; }
 
 .detail { position: relative; display: flex; flex-direction: column; overflow: hidden; }
 .detail-header {
-  min-height: 51px;
-  padding: 8px 12px;
+  min-height: 57px;
+  padding: 6px 10px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  align-items: start;
-  gap: 8px;
+  align-items: center;
+  gap: 6px;
   border-bottom: 1px solid var(--line);
-}
-.detail-heading { grid-column: 1 / -1; gap: 10px; min-width: 0; }
-.detail-identity { min-width: 0; flex: 1; }
-.detail-title { margin: 0; font-size: 16px; line-height: 1.3; overflow-wrap: anywhere; }
-.detail-path { margin: 3px 0 0; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
-.back-button {
-  flex: 0 0 auto;
-  min-height: 40px;
-  padding: 0 10px;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  background: transparent;
-  color: var(--text);
-  cursor: pointer;
 }
 .detail-notices { grid-column: 1 / -1; display: grid; gap: 6px; min-width: 0; }
 .detail-notices:empty { display: none; }
 .detail-notices .bridge-warning { max-width: 100%; border-radius: 9px; white-space: normal; overflow-wrap: anywhere; }
+.history-notice { color: var(--muted); font-size: 11px; padding: 0 2px 4px; }
 .chips {
   display: flex;
   align-items: center;
@@ -189,6 +184,7 @@ h1 { font-size: 18px; letter-spacing: -.02em; }
 }
 .chips::-webkit-scrollbar { display: none; }
 .detail-actions {
+  position: relative;
   display: flex;
   flex: 0 0 auto;
   align-items: center;
@@ -204,19 +200,40 @@ h1 { font-size: 18px; letter-spacing: -.02em; }
   flex: 0 0 auto;
   white-space: nowrap;
 }
-button.chip { cursor: pointer; }
+button.chip { min-height: 44px; cursor: pointer; color: var(--text); }
+.chip.read-only { background: transparent; }
+.chip.model-chip { flex: 1 1 auto; min-width: 0; padding-inline: 0; background: transparent; overflow: hidden; text-overflow: ellipsis; }
 button.chip:active { background: #283247; }
 .overflow-button {
-  flex: 0 0 auto; min-width: 30px; min-height: 36px; padding: 0; border: 0; border-radius: 9px;
+  flex: 0 0 auto; min-width: 44px; min-height: 44px; padding: 0; border: 0; border-radius: 9px;
   background: transparent; color: var(--text); font-size: 24px; line-height: 1; cursor: pointer;
 }
 .session-menu {
-  position: absolute; z-index: 20; top: 46px; right: 10px; min-width: 180px; padding: 6px;
+  position: absolute; z-index: 20; top: calc(100% + 4px); right: 0; width: min(250px, calc(100vw - 40px)); padding: 6px;
+  max-height: calc(var(--app-height) - 80px); overflow-y: auto; overscroll-behavior: contain;
   border: 1px solid var(--line-bright); border-radius: 12px; background: #151b28; box-shadow: 0 12px 40px #0009;
 }
-.session-menu button { display: block; width: 100%; min-height: 42px; padding: 8px 11px; border: 0; border-radius: 8px; background: transparent; color: var(--text); text-align: left; }
-.session-menu button:hover, .session-menu button:focus { background: #252e40; outline: none; }
+.session-menu button { display: block; width: 100%; min-height: 44px; padding: 8px 11px; border: 0; border-radius: 8px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.session-menu button:hover, .session-menu button:focus-visible { background: #252e40; }
 .session-menu button:disabled { opacity: .45; cursor: not-allowed; }
+.deck-dialog {
+  width: min(460px, calc(100vw - 28px)); max-height: calc(var(--app-height) - 28px);
+  padding: 16px; overflow-y: auto; overscroll-behavior: contain;
+  border: 1px solid var(--line-bright); border-radius: 16px;
+  background: var(--panel-solid); color: var(--text);
+}
+.deck-dialog::backdrop { background: #000a; }
+.deck-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.deck-dialog h2 { font-size: 17px; }
+.deck-dialog [data-close-dialog] { width: 44px; height: 44px; border: 0; border-radius: 9px; background: transparent; color: var(--text); font-size: 24px; cursor: pointer; }
+.deck-dialog dl { display: grid; grid-template-columns: minmax(4.5rem, 1fr) minmax(0, 3fr); gap: 12px; margin: 0; font-size: 13px; }
+.deck-dialog dt { color: var(--muted); overflow-wrap: anywhere; }
+.deck-dialog dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.settings-actions { display: grid; gap: 8px; }
+.settings-actions button { min-height: 44px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: #1a2130; color: var(--text); text-align: left; cursor: pointer; }
+.settings-actions .danger { color: var(--red); }
+#settings-status { margin-top: 12px; font-size: 13px; overflow-wrap: anywhere; }
+#settings-status:empty { display: none; }
 .archive-separator { display: flex; align-items: center; gap: 10px; margin: 4px 0 8px; }
 .archive-separator::before, .archive-separator::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
 .archive-separator button { border: 0; background: transparent; color: var(--muted); font-size: 11px; white-space: nowrap; cursor: pointer; }
@@ -386,9 +403,9 @@ button.chip:active { background: #283247; }
   .appbar { padding: 0 3px; }
   .mark { width: 34px; height: 34px; border-radius: 10px; }
   .overview { padding: 13px 14px; border-radius: 16px; }
-  .metric-row { display: grid; width: 100%; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+  .metric-row { display: grid; width: 100%; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; align-items: stretch; }
   body.keyboard-open .composer { padding-bottom: 0; }
-  .metric { padding: 5px 4px; font-size: 10px; text-align: center; }
+  .metric { display: flex; align-items: center; justify-content: center; gap: 3px; min-height: 36px; padding: 5px 3px; font-size: 10px; text-align: center; white-space: normal; }
   .rail, .detail { border-radius: 17px; }
   .usage { align-items: flex-start; flex-direction: column; gap: 8px; padding: 10px 12px; }
   .usage-list { width: 100%; grid-template-columns: 1fr; }
@@ -397,10 +414,12 @@ button.chip:active { background: #283247; }
     backdrop-filter: none;
   }
   .app.chat-open .detail { height: 100%; min-height: 0; overflow: hidden; }
-  .back-button { display: block; }
-  .detail-header { padding: 14px 14px 13px; }
-  .detail-title { font-size: 16px; }
-  .detail-path { max-width: 250px; }
+  .detail-header { padding: 6px 10px; }
+  .connection:not(.offline) #connection-text {
+    position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden;
+    clip: rect(0, 0, 0, 0); white-space: nowrap;
+  }
+  .connection.offline { max-width: 160px; font-size: 11px; }
   .activity { padding: 13px; }
   .app.chat-open .activity {
     min-height: 0;

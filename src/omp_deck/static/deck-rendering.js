@@ -115,6 +115,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
 
   function renderList() {
     const visible = state.agents.filter(matchesFilter).sort(compareAgents);
+    const showMachine = ompDeckApi.machines().length > 1;
     el['agent-list'].innerHTML = visible.length ? visible.map(agent => {
       const session = agent.session || {};
       const agentLifecycle = lifecycle(agent);
@@ -124,21 +125,24 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
       const subagents = children.map(subagent =>
         `<span class="subagent"><i class="status-dot ${escapeHtml(subagent.executionState)}"></i><span><strong>${escapeHtml(subagent.label)}</strong><small>${escapeHtml(subagent.activitySummary || subagent.executionState)}</small></span></span>`
       ).join('');
-      const metadata = [agent.project, agent.machineName].filter(Boolean).join(' · ');
+      const project = agent.project || agent.label || 'Untitled conversation';
+      const label = agent.label && agent.label !== project ? agent.label : '';
+      const machine = showMachine ? agent.machineName : '';
+      const metadata = [label, machine].filter(Boolean).join(' · ');
       const lifecycleNote = agentLifecycle === 'history'
-        ? 'Saved conversation · no live session connection'
+        ? 'Saved conversation'
         : agentLifecycle === 'unknown'
           ? 'Session lifecycle unavailable'
           : agent.nodeAvailable === false
             ? 'Machine unavailable'
             : `${agent.activitySummary || status.replace('-', ' ')}${agent.historyError ? ' · History unavailable' : ''}`;
-      return `<button class="agent-card ${escapeHtml(agentLifecycle)}" data-id="${escapeHtml(agent.id)}" type="button" aria-label="${escapeHtml(`${agent.label}${metadata ? `, ${metadata}` : ''}, ${lifecycleNote}`)}">
+      return `<button class="agent-card ${escapeHtml(agentLifecycle)}" data-id="${escapeHtml(agent.id)}" type="button" aria-label="${escapeHtml(`${project}${metadata ? `, ${metadata}` : ''}, ${lifecycleNote}`)}">
         <span class="agent-card-top">
           <span class="status-stack"><i class="status-dot ${escapeHtml(status)}"></i>${agent.inboxState === 'unread' ? '<i class="inbox-dot" title="Unread response"></i>' : ''}</span>
           <span>
-            <span class="agent-name">${escapeHtml(agent.label || 'Untitled conversation')}</span>
-            <span class="agent-project">${escapeHtml(metadata || 'Project and machine unavailable')}</span>
-            <span class="activity-summary">${escapeHtml(lifecycleNote)}</span>
+            <span class="agent-name">${escapeHtml(project)}</span>
+            ${metadata ? `<span class="agent-project">${escapeHtml(metadata)}</span>` : ''}
+            ${agentLifecycle !== 'history' ? `<span class="activity-summary">${escapeHtml(lifecycleNote)}</span>` : ''}
           </span>
           <span class="agent-age">${relativeTime(session.updatedMs)}</span>
         </span>
@@ -162,44 +166,37 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     if (previousRenderedId && previousRenderedId !== agent?.id) {
       ompDeckImages.releaseOwner(previousRenderedId);
     }
+    const focusedControl = document.activeElement?.matches('[data-thinking-level]')
+      ? '[data-thinking-level]' : document.activeElement?.matches('[data-toggle-todo]') ? '[data-toggle-todo]' : null;
     const chips = [];
     const notices = [];
     const capabilities = agent?.capabilities || {};
+    const agentLifecycle = lifecycle(agent);
+    const isLiveSession = agentLifecycle === 'ongoing';
+    let thinkingDescription = 'Unavailable';
+    if (session.model) chips.push(`<span class="chip model-chip" title="${escapeHtml(session.model)}">${escapeHtml(session.model)}</span>`);
     if (agent) {
       const choices = thinkingChoices(agent);
       const level = thinkingLevel(agent);
       const label = level || 'unavailable';
-      const editable = agent.nodeAvailable !== false && agent.bridgeConnected
+      const editable = isLiveSession && agent.nodeAvailable !== false && agent.bridgeConnected
         && capabilities.setThinking && choices.length > 0;
       const thinkingReason = typeof agent.transportReason === 'string'
         ? agent.transportReason.trim().slice(0, 160) : '';
       const unavailable = thinkingReason
         ? `Thinking controls unavailable: ${thinkingReason}`
         : 'Thinking controls are unavailable for this session';
-      chips.push(editable
+      thinkingDescription = editable ? label : `${label} · ${thinkingReason || 'control unavailable'}`;
+      if (level || isLiveSession) chips.push(editable
         ? `<button class="chip" type="button" data-thinking-level="${escapeHtml(label)}" aria-label="${escapeHtml(`Change thinking level; current ${label}`)}">thinking: ${escapeHtml(label)}</button>`
-        : `<span class="chip" title="${escapeHtml(unavailable)}">thinking: ${escapeHtml(label)} · ${escapeHtml(thinkingReason || 'control unavailable')}</span>`);
+        : `<span class="chip read-only" title="${escapeHtml(unavailable)}" aria-label="${escapeHtml(`Thinking ${label}; read-only`)}">thinking: ${escapeHtml(label)}</span>`);
     }
-    if (agent?.machineName) chips.push(`<span class="chip machine-chip">${escapeHtml(agent.machineName)}</span>`);
-    if (session.model) chips.push(`<span class="chip">${escapeHtml(session.model)}</span>`);
     const executionState = displayStatus(agent || {});
-    el.detail.querySelector('.detail-title').textContent = agent?.label || 'Choose an OMP';
-    el.detail.querySelector('.detail-path').textContent = agent
-      ? [agent.project, agent.machineName, lifecycle(agent) === 'history' ? 'History' : executionState.replaceAll('-', ' ')].filter(Boolean).join(' · ')
-      : '';
-    const agentLifecycle = lifecycle(agent);
-    const isLiveSession = agentLifecycle === 'ongoing';
-    const menuCapabilities = {clear: 'compact', interrupt: 'interrupt', quit: 'shutdown'};
-    for (const [action, capability] of Object.entries(menuCapabilities)) {
+    el.detail.setAttribute('aria-label', agent ? `${agent.project || agent.label} conversation` : 'Conversation');
+    for (const {action, enabled} of sessionActionOptions(agent)) {
       const button = el['session-menu'].querySelector(`[data-session-action="${action}"]`);
-      const available = Boolean(
-        isLiveSession
-        && agent?.nodeAvailable !== false
-        && capabilities[capability]
-        && (action === 'quit' || agent?.bridgeConnected)
-      );
-      button.disabled = !available || (action === 'interrupt' && executionState !== 'working');
-      button.title = button.disabled ? `${action} is unavailable for this session` : '';
+      button.disabled = !enabled;
+      button.hidden = !enabled;
     }
     const removeButton = el['session-menu'].querySelector('[data-session-action="remove"]');
     const removable = Boolean(agent?.nodeAvailable !== false && capabilities.remove);
@@ -221,8 +218,12 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
               : 'Session connection degraded';
     el['transport-status'].className = `transport-status ${transportConnected ? 'connected' : 'disconnected'}`;
     el['transport-status'].title = transportLabel;
+    el['transport-status'].dataset.transport = agent?.transport?.kind || '';
+    el['transport-status'].dataset.lifecycle = agentLifecycle;
     el['transport-status'].querySelector('span').textContent = transportLabel;
-    if (!transportConnected) {
+    if (agentLifecycle === 'history') {
+      notices.push('<span class="history-notice">Saved conversation · read-only</span>');
+    } else if (!transportConnected) {
       const safeReason = typeof agent?.transportReason === 'string'
         ? agent.transportReason.slice(0, 160)
         : '';
@@ -233,6 +234,15 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
       notices.push(`<span class="bridge-warning history-warning" role="status">${escapeHtml(`Conversation history could not synchronize. ${safeReason}. Restart this OMP when idle and resume the session to load an updated extension.`)}</span>`);
     }
     el.detail.querySelector('.detail-notices').innerHTML = notices.join('');
+    const metadata = [
+      ['Project', agent?.project], ['Session', agent?.label], ['Machine', agent?.machineName],
+      ['Directory', agent?.cwd],
+      ['Model', session.model], ['Thinking', thinkingDescription], ['Connection', transportLabel],
+      ['Status', agentLifecycle === 'history' ? 'Saved conversation' : executionState.replaceAll('-', ' ')],
+    ];
+    document.getElementById('session-metadata').innerHTML = agent
+      ? metadata.filter(([, value]) => value).map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join('')
+      : '';
     let taskControl = '';
     if (session.todo) {
       const taskCount = TodoUI.parse(session.todo).reduce((count, phase) => count + phase.tasks.length, 0);
@@ -240,6 +250,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     }
     el['task-control'].innerHTML = taskControl;
     el['detail-chips'].innerHTML = chips.join('');
+    if (focusedControl) el.detail.querySelector(focusedControl)?.focus({preventScroll: true});
     if (isLiveSession) renderPendingRequest(agent);
     else renderPendingRequest(null);
 
@@ -297,15 +308,14 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
       && capabilities.sendMessage
     );
     const canAttach = canMessage && Boolean(capabilities.attachments);
+    el.composer.hidden = !isLiveSession;
     el.message.setAttribute('aria-label', agent ? `Message ${agent.label}` : 'Message selected OMP');
     el.message.placeholder = agentLifecycle === 'history'
       ? 'History is read-only'
       : agent && !canMessage ? 'Messaging is unavailable for this session' : 'Message this OMP…';
     el.message.disabled = !canMessage;
     el.attach.disabled = !canAttach;
-    el.gallery.disabled = !canAttach;
     el.attach.title = canAttach ? '' : 'Attachments are unavailable for this session';
-    el.gallery.title = canAttach ? '' : 'Attachments are unavailable for this session';
     el.send.disabled = !canMessage;
   }
 
@@ -441,15 +451,6 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     renderFleet();
   }
 
-  el.detail.querySelector('[data-back-to-sessions]').addEventListener('click', () => {
-    const previousId = state.selectedId;
-    const url = new URL(location.href);
-    url.searchParams.delete('session');
-    history.replaceState({view: 'menu'}, '', url);
-    showMenu();
-    const card = el['agent-list'].querySelector(`[data-id="${CSS.escape(previousId || '')}"]`);
-    (card || el['history-toggle']).focus();
-  });
 
   return Object.freeze({
     markRead,

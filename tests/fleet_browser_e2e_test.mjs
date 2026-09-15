@@ -256,6 +256,7 @@ test('independent viewers route duplicate session IDs directly and survive one m
   });
   await phone.waitForFunction(() => typeof window.releaseRenewal === 'function');
   await phone.click('#overflow-button');
+  await phone.click('#session-menu [data-deck-settings]');
   await phone.click('[data-session-action="logout"]');
   await phone.waitForFunction(() => !document.getElementById('auth-screen').hidden);
   const postLogout = await phone.evaluate(async machineId => {

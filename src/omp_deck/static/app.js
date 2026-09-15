@@ -26,8 +26,9 @@ const el = Object.fromEntries([
   'idle-count', 'agent-list', 'history-toggle', 'history-count', 'session-scope-title',
   'app', 'workspace', 'detail', 'detail-chips', 'task-control', 'transport-status',
   'pending-request', 'activity', 'scroll-newest', 'composer', 'attachments', 'attach',
-  'gallery', 'attachment-input', 'gallery-input', 'message', 'send', 'send-state',
+  'attachment-input', 'command-menu', 'command-mode', 'message', 'send', 'send-state',
   'toast', 'overflow-button', 'session-menu', 'machine-panel', 'machine-select',
+  'session-info', 'session-metadata', 'deck-settings', 'settings-status',
   'machine-status-list', 'fleet-reload', 'fleet-reload-button', 'project-root-label',
   'project-select', 'project-new', 'project-launch', 'launch-state'
 ].map(id => [id, document.getElementById(id)]));
@@ -147,6 +148,8 @@ function renderMachineControls() {
     : machines[0]?.id || null;
   el['machine-select'].value = state.selectedMachineId || '';
   el['machine-select'].disabled = machines.length === 0;
+  const connectionTarget = machines.find(machine => machine.id === state.selectedMachineId);
+  document.getElementById('collab-label').textContent = `Writable Collab link${connectionTarget ? ` for ${connectionTarget.name}` : ''}`;
   el['machine-status-list'].innerHTML = machines.length
     ? machines.map(machine => `<span class="machine-status ${escapeHtml(machine.status)}" title="${escapeHtml(machine.error || `${machine.name} is ${machineStatusLabel(machine.status).toLowerCase()}`)}"><i aria-hidden="true"></i><strong>${escapeHtml(machine.name)}</strong> ${escapeHtml(machineStatusLabel(machine.status))}</span>`).join('')
     : '<span class="machine-empty">No machines are enrolled.</span>';
@@ -292,37 +295,17 @@ composer = createComposer({
   elements: el,
   selectedAgent,
   thinkingLevel,
+  thinkingChoices,
+  commandActions: agent => sessionActionOptions(agent),
+  executeAction: (action, agent) => runSessionAction(action, agent),
+  setThinkingLevel: (level, agent) => setThinkingLevel(level, agent),
   showToast,
   touchRender,
   renderDetail,
   refresh,
   escapeHtml,
 });
-el['session-menu'].addEventListener('click', async event => {
-  const clearButton = event.target.closest('[data-clear-local-data]');
-  const authButton = event.target.closest(
-    '[data-session-action="logout"], [data-session-action="revoke-all"]'
-  );
-  if (!clearButton && !authButton) return;
-  event.stopImmediatePropagation();
-  closeSessionMenu();
-  if (clearButton) {
-    if (!confirm('Clear drafts and other local browser data for OMP Deck?')) return;
-    await clearLocalData();
-    showToast('Local data cleared', 'success');
-    return;
-  }
-  const all = authButton.dataset.sessionAction === 'revoke-all';
-  if (all && !confirm('Revoke access for every paired device?')) return;
-  try {
-    await ompDeckApi.logout({all});
-    await clearLocalData();
-    authRecovery.requirePairing({clearToken: true});
-  } catch (error) {
-    showToast(error.message, 'error');
-  }
-});
-document.querySelector('.detail-header').addEventListener('click', async event => {
+document.querySelector('.detail-header').addEventListener('click', event => {
   const todoButton = event.target.closest('[data-toggle-todo]');
   if (todoButton) {
     state.showTodo = !state.showTodo;
@@ -333,9 +316,14 @@ document.querySelector('.detail-header').addEventListener('click', async event =
   const button = event.target.closest('[data-thinking-level]');
   const agent = selectedAgent();
   const choices = thinkingChoices(agent);
-  if (!button || !choices.length || agent?.nodeAvailable === false || !agent?.bridgeConnected || !agent?.capabilities?.setThinking) return;
+  if (!button || !choices.length) return;
   const current = thinkingLevel(agent);
-  const next = choices[(choices.indexOf(current) + 1) % choices.length];
+  void setThinkingLevel(choices[(choices.indexOf(current) + 1) % choices.length], agent);
+});
+
+async function setThinkingLevel(next, agent) {
+  if (!agent || agent.lifecycle !== 'ongoing' || agent.nodeAvailable === false || !agent.bridgeConnected
+      || !agent.capabilities?.setThinking || !thinkingChoices(agent).includes(next)) return false;
   const updates = thinkingUpdateTokens;
   const previous = updates.get(agent.id);
   let settle;
@@ -346,32 +334,34 @@ document.querySelector('.detail-header').addEventListener('click', async event =
   renderDetail();
   try {
     await previous?.done;
-    if (updates !== thinkingUpdateTokens) return;
+    if (updates !== thinkingUpdateTokens) return false;
     const response = await ompDeckApi.request(`/api/sessions/${encodeURIComponent(agent.id)}/thinking`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({requestId: requestId(), level: next}),
     });
     if (!response.ok) throw new Error(`Thinking update failed (${response.status})`);
-    if (updates.get(agent.id) !== updateToken) return;
+    if (updates.get(agent.id) !== updateToken) return false;
     await refresh(agent.machineId);
-    if (updates !== thinkingUpdateTokens || updates.get(agent.id) !== updateToken) return;
+    if (updates !== thinkingUpdateTokens || updates.get(agent.id) !== updateToken) return false;
     updates.delete(agent.id);
     thinkingOverrides.delete(agent.id);
     touchRender();
     renderDetail();
+    return true;
   } catch (error) {
-    if (!ompDeckApi.authenticated() || updates !== thinkingUpdateTokens || updates.get(agent.id) !== updateToken) return;
+    if (!ompDeckApi.authenticated() || updates !== thinkingUpdateTokens || updates.get(agent.id) !== updateToken) return false;
     updates.delete(agent.id);
     thinkingOverrides.delete(agent.id);
     touchRender();
     renderDetail();
     showToast(error.message, 'error');
     void refresh(agent.machineId);
+    return false;
   } finally {
     settle();
   }
-});
+}
 el.activity.addEventListener('click', event => {
   const button = event.target.closest('[data-toggle-archive]');
   if (!button) return;
@@ -415,7 +405,10 @@ function resetApplication() {
     else viewer.close();
   }
   el['agent-list'].replaceChildren();
-  el.detail.querySelectorAll('[data-session-identity], #detail-chips').forEach(node => node.replaceChildren());
+  document.querySelectorAll('[data-session-identity], #detail-chips').forEach(node => node.replaceChildren());
+  el.detail.setAttribute('aria-label', 'Conversation');
+  for (const dialog of document.querySelectorAll('.deck-dialog[open]')) dialog.close();
+  document.getElementById('settings-status').textContent = '';
   el['pending-request'].replaceChildren();
   el['pending-request'].hidden = true;
   el.activity.innerHTML = '<p class="activity-empty">Waiting for structured OMP events.</p>';

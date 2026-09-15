@@ -1346,12 +1346,15 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       await refresh('local');
       const readOnlyChip = [...document.querySelectorAll('#detail-chips .chip')]
         .find(chip => chip.textContent.startsWith('thinking:'));
+      document.querySelector('[data-session-info]').click();
+      const details = document.getElementById('session-metadata');
       const readOnly = {
         level: visibleLevel(readOnlyChip),
         editable: Boolean(document.querySelector('[data-thinking-level]')),
-        reasonVisible: readOnlyChip.textContent.includes(transportReason),
-        reasonEscaped: readOnlyChip.innerHTML.includes('&lt;terminal restart&gt;'),
+        reasonVisible: details.textContent.includes(transportReason),
+        reasonEscaped: details.querySelector('terminal') === null,
       };
+      document.querySelector('#session-info [data-close-dialog]').click();
       settable = true;
       transportReason = null;
       authoritative = 'xhigh';
@@ -1506,9 +1509,9 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     state.selectedId = agent.id;
     renderDetail({selectionChanged: true});
     const quit = el['session-menu'].querySelector('[data-session-action="quit"]');
-    return {disabled: quit.disabled, title: quit.title};
+    return {disabled: quit.disabled, hidden: quit.hidden};
   });
-  assert.deepEqual(disconnectedShutdown, {disabled: false, title: ''});
+  assert.deepEqual(disconnectedShutdown, {disabled: false, hidden: false});
   assert.deepEqual(cspProgress, {
     todo: {value: 1, max: 4, style: null},
     usage: [
@@ -1583,7 +1586,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     state.agents = [agent];
     state.selectedId = agent.id;
     renderDetail({selectionChanged: true});
-    const button = el['session-menu'].querySelector('[data-session-action="clear"]');
+    const button = el['session-menu'].querySelector('[data-session-action="compact"]');
     const ids = [];
     const waitForAttempt = async count => {
       const deadline = Date.now() + 1000;

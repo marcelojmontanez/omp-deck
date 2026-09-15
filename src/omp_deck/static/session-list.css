@@ -8,6 +8,8 @@
 }
 .session-scope h2 { font-size: 15px; letter-spacing: -.01em; }
 .session-scope button {
+  min-width: 44px;
+  min-height: 44px;
   padding: 5px 8px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -26,8 +28,11 @@
 .filters::-webkit-scrollbar { display: none; }
 .filter {
   border: 0;
+  min-width: 44px;
+  min-height: 44px;
+  flex: 1;
   border-radius: 9px;
-  padding: 7px 10px;
+  padding: 6px;
   background: transparent;
   color: var(--muted);
   cursor: pointer;
@@ -53,6 +58,7 @@
   text-align: left;
   cursor: pointer;
   transition: background .16s ease, border-color .16s ease, transform .16s ease;
+  min-width: 0;
 }
 .agent-card:hover {
   border-color: var(--line-bright);
@@ -103,12 +109,13 @@
 @media (max-width: 760px) {
   .rail { padding: 10px; overflow: visible; }
   .filters { padding-bottom: 10px; }
-  .agent-list { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); overflow: visible; }
+  .agent-list { grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: visible; }
   .agent-card { min-height: 88px; padding: 12px; }
   .agent-project { overflow-wrap: anywhere; }
 }
 
-@media (max-width: 430px) {
-  .agent-list { grid-template-columns: 1fr; }
-  .agent-card { min-height: 0; }
+.agent-list .empty-card { grid-column: 1 / -1; }
+@media (max-width: 360px) {
+  .filter { padding-inline: 4px; font-size: 11px; overflow-wrap: anywhere; }
+  .agent-card { padding: 10px; }
 }

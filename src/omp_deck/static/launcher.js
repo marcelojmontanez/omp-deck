@@ -39,9 +39,7 @@ async function loadLaunchableProjects() {
   el['project-new'].disabled = activeLaunches.has(machineId);
   select.disabled = true;
   select.replaceChildren(new Option(machine ? 'Loading project directories…' : 'No machine selected', ''));
-  el['project-root-label'].textContent = machine
-    ? `Start OMP on ${machine.name}`
-    : 'Start OMP on an enrolled machine';
+  el['project-root-label'].textContent = 'Start OMP';
   el['launch-state'].textContent = machine ? 'Loading directories…' : 'No machine is enrolled.';
   if (!machine) {
     syncProjectLauncher();
@@ -59,12 +57,10 @@ async function loadLaunchableProjects() {
     const payload = await response.json();
     if (generation !== projectLoadGeneration || machineId !== state.selectedMachineId) return;
     const projects = Array.isArray(payload.projects) ? payload.projects : [];
-    const depth = Number.isSafeInteger(payload.discoveryDepth) ? payload.discoveryDepth : 2;
-    el['project-root-label'].textContent =
-      `Start OMP on ${machine.name} · ${payload.rootLabel || 'configured project root'} · ${depth} ${depth === 1 ? 'level' : 'levels'}`;
+    const machineSuffix = ompDeckApi.machines().length > 1 ? ` on ${machine.name}` : '';
+    el['project-root-label'].textContent = `Start OMP in ${payload.rootLabel || 'configured project root'}${machineSuffix}`;
     renderProjectOptions(projects);
-    el['launch-state'].textContent =
-      `${projects.length} ${projects.length === 1 ? 'directory' : 'directories'} available`;
+    el['launch-state'].textContent = projects.length ? '' : 'No project directories yet. Create one below.';
   } catch (error) {
     if (generation !== projectLoadGeneration || machineId !== state.selectedMachineId) return;
     select.replaceChildren(new Option('Projects unavailable', ''));

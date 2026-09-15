@@ -99,7 +99,7 @@ omp-deck serve
 `serve` runs Deck in the foreground. In the browser:
 
 - choose a configured project and select **Start** for a managed RPC session;
-- open **Connect terminal via Collab** and paste a writable link to connect a terminal-owned session;
+- open **Deck settings → Connect a terminal** and paste a writable Collab link to connect a terminal-owned session on the selected machine;
 - use the session menu to compact, interrupt, shut down, or remove a terminal transport only when that capability is available;
 - answer pending RPC or Collab input requests in the request panel; extension-fallback requests remain terminal-only.
 
@@ -109,9 +109,15 @@ omp-deck serve
 
 Unread sessions appear first and only meaningful assistant content creates unread state. Tool-only, thinking-only, and whitespace-only records do not create empty conversation bubbles. Image-only replies and explicit errors remain visible. Running subagents appear beneath their parent session, and supported todo lists retain their phase grouping. Completed runs that report an error remain marked as failed.
 
-The conversation header identifies the selected session and its project, with a **Back** button to return to the session list. Existing session links can still open retained history. A direct connection identifies the machine by its Deck address (hostname and any non-default port); the multi-machine coordinator uses enrolled machine names.
+Session tiles put the project first and keep two columns on phones. The conversation toolbar stays compact: provider-qualified model, effective thinking level, tasks, connection light, and session menu. Use browser Back or **All sessions** in that menu to return to the list. **Session details** contains the full session name, project directory, machine, and availability details. Existing session links still open retained history. A direct connection identifies the machine by its Deck address; the multi-machine coordinator uses enrolled machine names.
+
+The session light is green for connected managed RPC, amber for connected terminal transports, red for an unavailable ongoing connection, and neutral for history. Its accessible label and **Session details** identify the connection without relying on color. Actual machine, transport, and history failures remain visible. **Deck settings**, available from the dashboard or session menu, holds terminal connection setup, local-draft clearing, logout, and device revocation.
 
 Drafts and selected images stay with their session when you switch conversations. Drafts and images remain memory-only: reloading, logging out, or clearing local data discards them.
+
+Use the image button to attach images and tap a thumbnail to preview it. The composer stays below the conversation; its text field grows to at most 130px. Enter inserts a newline on phones; desktop Enter sends, and Shift+Enter inserts a newline. History has a read-only notice instead of disabled composer controls.
+
+Type `/` to pick an available structured session action: `/compact`, `/interrupt`, `/quit`, or `/thinking <level>` using OMP's advertised choices. Arrow keys and Tab select a suggestion; Escape dismisses it. An exact action changes **Send** to **Run**. Compact and quit require confirmation. Cancelled or failed actions preserve the command draft, and delayed completion does not erase newer edits. Actions cannot be combined with image attachments. This is not a terminal command console and does not emulate unsupported OMP commands.
 
 The **thinking** control shows OMP's effective level. Tap it to cycle through the current model's supported choices when control is available. Missing state is shown as unavailable, not assumed to be `auto`. Changes are sent in order per session and reconcile to OMP's reported level. With the updated terminal extension, changes made directly in OMP also reach Deck on the next heartbeat, normally within 15 seconds. Already-running terminals need an idle restart and resume to load the updated extension.
 

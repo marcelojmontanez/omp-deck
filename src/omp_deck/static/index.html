@@ -43,13 +43,16 @@
           <h1 id="dashboard-title" tabindex="-1">OMP Deck</h1>
         </div>
       </div>
-      <div class="connection" id="connection"><span class="live-dot"></span><span id="connection-text">Deck connecting</span></div>
+      <div class="dashboard-actions">
+        <div class="connection" id="connection"><span class="live-dot"></span><span id="connection-text">Deck connecting</span></div>
+        <button class="settings-button" type="button" data-deck-settings aria-label="Deck settings" aria-haspopup="dialog" title="Deck settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"></path><circle cx="8" cy="6" r="2"></circle><circle cx="16" cy="12" r="2"></circle><circle cx="10" cy="18" r="2"></circle></svg></button>
+      </div>
     </header>
 
     <section class="overview" aria-live="polite">
       <div class="metric-row">
         <span class="metric working"><strong id="working-count">0</strong> working</span>
-        <span class="metric attention" title="Errors or agents waiting for your input"><strong id="attention-count">0</strong> attention</span>
+        <span class="metric attention" title="Sessions needing input or with connection or history problems"><strong id="attention-count">0</strong> need attention</span>
         <span class="metric unread"><strong id="unread-count">0</strong> unread</span>
         <span class="metric idle"><strong id="idle-count">0</strong> idle</span>
       </div>
@@ -80,15 +83,6 @@
         <button id="project-launch" type="button" disabled>Start</button>
       </div>
       <span id="launch-state" role="status" aria-live="polite"></span>
-      <details class="collab-connect">
-        <summary>Connect terminal via Collab</summary>
-        <label for="collab-link">Writable Collab link</label>
-        <div class="collab-controls">
-          <input id="collab-link" type="password" autocomplete="off" spellcheck="false" maxlength="8192" placeholder="Paste writable link">
-          <button id="collab-connect" type="button">Connect</button>
-        </div>
-        <span id="collab-state" role="status" aria-live="polite"></span>
-      </details>
     </section>
 
     <section class="workspace" id="workspace">
@@ -109,27 +103,20 @@
 
       <section class="detail" id="detail" aria-live="polite">
         <header class="detail-header">
-          <div class="detail-heading">
-            <button class="back-button" type="button" data-back-to-sessions aria-label="Back to sessions">Back</button>
-            <div class="detail-identity">
-              <h2 class="detail-title" data-session-identity></h2>
-              <p class="detail-path" data-session-identity></p>
-            </div>
-          </div>
           <div class="chips" id="detail-chips"></div>
           <div class="detail-actions">
             <div id="task-control"></div>
             <span class="transport-status disconnected" id="transport-status" role="status" title="Disconnected"><i aria-hidden="true"></i><span class="sr-only">Disconnected</span></span>
             <button class="overflow-button" id="overflow-button" type="button" aria-label="Session actions" aria-expanded="false" aria-controls="session-menu">⋮</button>
             <div class="session-menu" id="session-menu" role="menu" hidden>
-              <button type="button" role="menuitem" data-session-action="clear">Clear context</button>
+              <button type="button" role="menuitem" data-back-to-sessions>All sessions</button>
+              <button type="button" role="menuitem" data-session-info>Session details</button>
+              <button type="button" role="menuitem" data-session-action="compact">Compact context</button>
               <button type="button" role="menuitem" data-session-action="interrupt">Interrupt</button>
               <button type="button" role="menuitem" data-session-action="quit">Quit</button>
               <button type="button" role="menuitem" data-session-action="copy">Copy link</button>
               <button type="button" role="menuitem" data-session-action="remove" hidden>Remove from Deck</button>
-              <button type="button" role="menuitem" data-clear-local-data>Clear local data</button>
-              <button type="button" role="menuitem" data-session-action="logout">Log out this device</button>
-              <button type="button" role="menuitem" data-session-action="revoke-all">Revoke all devices</button>
+              <button type="button" role="menuitem" data-deck-settings>Deck settings</button>
             </div>
           </div>
           <div class="detail-notices" data-session-identity></div>
@@ -139,20 +126,41 @@
         <button class="scroll-newest" id="scroll-newest" type="button" hidden>↑ Newest</button>
         <form class="composer" id="composer">
           <div class="attachments" id="attachments"></div>
+            <div class="command-menu" id="command-menu" role="listbox" aria-label="Session actions" hidden></div>
           <div class="composer-shell">
-            <button class="attach" id="attach" type="button" aria-label="Attach images">＋</button>
+            <button class="attach" id="attach" type="button" aria-label="Attach images"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"></rect><circle cx="8.5" cy="9" r="1.5"></circle><path d="m5 17 4.5-4.5 3 3 2-2L19 18"></path></svg></button>
             <input id="attachment-input" type="file" accept="image/*" multiple hidden>
-            <button class="gallery" id="gallery" type="button" aria-label="Choose images from gallery"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"></rect><circle cx="8.5" cy="9" r="1.5"></circle><path d="m5 17 4.5-4.5 3 3 2-2L19 18"></path></svg></button>
-            <input id="gallery-input" type="file" accept="image/*" multiple hidden>
             <textarea id="message" rows="1" maxlength="4000" placeholder="Message this OMP…" aria-label="Message selected OMP"></textarea>
             <button class="send" id="send" type="submit">Send</button>
           </div>
-          <div class="composer-actions"><span class="send-state" id="send-state" role="status" aria-live="polite"></span></div>
+          <div class="composer-actions"><span class="command-mode" id="command-mode" hidden>Session action</span><span class="send-state" id="send-state" role="status" aria-live="polite"></span></div>
         </form>
         <div class="toast" id="toast" role="alert" hidden></div>
       </section>
     </section>
   </main>
+  <dialog class="deck-dialog" id="session-info" aria-labelledby="session-info-title">
+    <header><h2 id="session-info-title">Session details</h2><button type="button" data-close-dialog aria-label="Close session details">×</button></header>
+    <dl id="session-metadata" data-session-identity></dl>
+  </dialog>
+  <dialog class="deck-dialog" id="deck-settings" aria-labelledby="deck-settings-title">
+    <header><h2 id="deck-settings-title">Deck settings</h2><button type="button" data-close-dialog aria-label="Close Deck settings">×</button></header>
+      <details class="collab-connect">
+        <summary>Connect a terminal</summary>
+        <label id="collab-label" for="collab-link">Writable Collab link</label>
+        <div class="collab-controls">
+          <input id="collab-link" type="password" autocomplete="off" spellcheck="false" maxlength="8192" placeholder="Paste writable link">
+          <button id="collab-connect" type="button">Connect</button>
+        </div>
+        <span id="collab-state" role="status" aria-live="polite"></span>
+      </details>
+    <div class="settings-actions">
+      <button type="button" data-clear-local-data>Clear local drafts</button>
+      <button type="button" data-session-action="logout">Log out this device</button>
+      <button class="danger" type="button" data-session-action="revoke-all">Revoke all devices</button>
+    </div>
+    <p id="settings-status" role="status" aria-live="polite"></p>
+  </dialog>
   <dialog class="image-viewer" id="image-viewer" aria-label="Image preview">
     <button class="image-viewer-close" type="button" aria-label="Close image preview">×</button>
     <img id="image-viewer-image" alt="Enlarged attachment">
@@ -170,6 +178,7 @@
   <script src="/sse-parser.js"></script>
   <script src="/live-events.js"></script>
   <script src="/ui-helpers.js"></script>
+  <script src="/composer-commands.js"></script>
   <script src="/composer.js"></script>
   <script src="/deck-rendering.js"></script>
   <script src="/auth-bootstrap.js"></script>

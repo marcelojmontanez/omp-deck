@@ -2,6 +2,10 @@ function createComposer({
   elements,
   selectedAgent,
   thinkingLevel,
+  commandActions,
+  executeAction,
+  setThinkingLevel,
+  thinkingChoices,
   showToast,
   touchRender,
   renderDetail,
@@ -21,6 +25,17 @@ function createComposer({
   const attachmentReservations = new Map();
   let sessionId = null;
   let dataGeneration = 0;
+  const commands = createComposerCommands({
+    elements,
+    selectedAgent,
+    commandActions,
+    executeAction,
+    setThinkingLevel,
+    thinkingChoices,
+    thinkingLevel,
+    showToast,
+    hasAttachments: () => attachmentsFor(sessionId).length > 0,
+  });
 
   function queueToken(id) {
     if (!queueTokens.has(id)) queueTokens.set(id, {});
@@ -61,8 +76,10 @@ function createComposer({
     queueTokens.clear();
     reconciledMessageIds.clear();
     elements.message.value = '';
+    elements.message.blur();
     elements['send-state'].textContent = '';
     renderAttachments();
+    commands.clear();
     touchRender();
   }
 
@@ -98,19 +115,20 @@ function createComposer({
 
   function renderAttachments() {
     elements.attachments.innerHTML = attachmentsFor(sessionId).map((attachment, index) =>
-      `<span class="attachment ${attachment.type.startsWith('image/') ? '' : 'file'}">
-        ${attachment.type.startsWith('image/')
-          ? `<button class="attachment-preview" type="button" data-view-image="${attachment.url}" aria-label="Enlarge ${escapeHtml(attachment.name)}"><img src="${attachment.url}" alt="${escapeHtml(attachment.name)}"></button>`
-          : `<span class="file-name">${escapeHtml(attachment.name)}</span>`}
+      `<span class="attachment">
+        <button class="attachment-preview" type="button" data-view-image="${attachment.url}" aria-label="Enlarge ${escapeHtml(attachment.name)}"><img src="${attachment.url}" alt="${escapeHtml(attachment.name)}"></button>
         <button type="button" data-remove-attachment="${index}" aria-label="Remove attachment">×</button>
       </span>`
     ).join('');
+    commands.sync({showSuggestions: false});
   }
 
   function select(id) {
     sessionId = id || null;
     elements.message.value = loadDraft(sessionId);
+    if (!sessionId) elements.message.blur();
     renderAttachments();
+    commands.reset();
   }
 
   function readAttachment(file) {
@@ -318,13 +336,37 @@ function createComposer({
     }
   }
 
-  function submit(event) {
+  async function submit(event) {
     event.preventDefault();
     const agent = selectedAgent();
     const id = agent?.id;
     if (!agent) return;
     const outgoingAttachments = [...attachmentsFor(id)];
-    const typedMessage = elements.message.value.trim();
+    const commandDraft = elements.message.value;
+    const commandRevision = commands.revision(agent);
+    const command = commands.exactChoice(commandDraft, agent);
+    if (command) {
+      if (outgoingAttachments.length) {
+        showToast('Remove image attachments before running a command.', 'error');
+        commands.sync({showSuggestions: false});
+        elements.message.focus();
+        return;
+      }
+      commands.reset();
+      const accepted = await commands.run(command, agent);
+      const unchanged = commands.unchanged(agent, commandRevision);
+      if (accepted && unchanged && loadDraft(id) === commandDraft) saveDraft(id, '');
+      if (unchanged && sessionId === id && elements.message.value === commandDraft) {
+        if (accepted) {
+          elements.message.value = '';
+          elements.message.dispatchEvent(new Event('input', {bubbles: true}));
+        }
+        commands.reset();
+        elements.message.focus();
+      }
+      return;
+    }
+    const typedMessage = commandDraft.trim();
     const message = typedMessage || (outgoingAttachments.length ? 'Files attached.' : '');
     if (!message) return;
     const retry = retryBatches.get(id);
@@ -392,15 +434,13 @@ function createComposer({
 
   elements.message.addEventListener('input', () => {
     saveDraft(sessionId, elements.message.value);
+    commands.inputChanged();
   });
   elements.attach.addEventListener('click', () => elements['attachment-input'].click());
-  elements.gallery.addEventListener('click', () => elements['gallery-input'].click());
-  for (const input of [elements['gallery-input'], elements['attachment-input']]) {
-    input.addEventListener('change', async event => {
-      await addAttachments(event.target.files);
-      event.target.value = '';
-    });
-  }
+  elements['attachment-input'].addEventListener('change', async event => {
+    await addAttachments(event.target.files);
+    event.target.value = '';
+  });
   elements.attachments.addEventListener('click', event => {
     const button = event.target.closest('[data-remove-attachment]');
     if (!button) return;
@@ -420,6 +460,7 @@ function createComposer({
     await addAttachments(images);
   });
   elements.message.addEventListener('keydown', event => {
+    if (commands.handleKeydown(event)) return;
     const mobile = window.matchMedia('(max-width: 760px)').matches;
     if (!mobile && event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
@@ -430,6 +471,7 @@ function createComposer({
 
   function prune(validIds) {
     const valid = new Set(validIds);
+    commands.prune(validIds);
     for (const id of new Set([
       ...drafts.keys(), ...attachments.keys(), ...pendingMessages.keys(), ...outboundQueues.keys(),
       ...reconciledMessageIds.keys(),

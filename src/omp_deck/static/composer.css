@@ -9,11 +9,11 @@
 .attachments { display: flex; gap: 9px; padding: 7px 7px 11px; overflow-x: auto; }
 .attachments:empty { display: none; }
 .attachment {
-  position: relative;
+  display: grid;
+  grid-template-columns: 60px 44px;
   flex: 0 0 auto;
-  width: 58px;
-  height: 58px;
-  padding: 4px;
+  width: 104px;
+  height: 60px;
 }
 .attachment img {
   width: 100%;
@@ -23,16 +23,6 @@
   border-radius: 9px;
   border: 1px solid var(--line-bright);
 }
-.attachment.file {
-  width: 112px;
-  display: grid;
-  place-items: center;
-  overflow: hidden;
-  border: 1px solid var(--line-bright);
-  border-radius: 9px;
-  background: #151b27;
-}
-.file-name { max-width: 100%; padding: 7px; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .attachment-preview {
   width: 100%;
   height: 100%;
@@ -42,34 +32,33 @@
   cursor: zoom-in;
 }
 .attachment [data-remove-attachment] {
-  position: absolute;
-  top: 0;
-  right: 0;
-  width: 19px;
-  height: 19px;
+  width: 44px;
+  min-height: 44px;
   padding: 0;
   border: 0;
-  border-radius: 50%;
-  background: var(--red);
-  color: white;
-  line-height: 19px;
+  border-radius: 0 9px 9px 0;
+  background: rgba(255, 113, 133, .16);
+  color: #ff8da0;
+  font-size: 22px;
+  cursor: pointer;
 }
 .composer-shell {
   position: relative;
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
   align-items: end;
-  gap: 9px;
-  padding: 7px 7px 7px 13px;
+  gap: 7px;
+  padding: 7px;
   border: 1px solid var(--line-bright);
   border-radius: 15px;
   background: #090d15;
   transition: border-color .16s ease, box-shadow .16s ease;
 }
 .composer-shell:focus-within { border-color: rgba(84,216,255,.58); box-shadow: 0 0 0 3px rgba(84,216,255,.08); }
-.attach, .gallery {
-  width: 38px;
-  height: 38px;
+.attach {
+  width: 44px;
+  height: 44px;
+  padding: 0;
   border: 0;
   border-radius: 10px;
   background: #171e2b;
@@ -77,20 +66,10 @@
   font-size: 22px;
   cursor: pointer;
 }
-.gallery { padding: 9px; }
-.gallery svg {
-  display: block;
-  width: 20px;
-  height: 20px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.8;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
+.attach svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.6; vertical-align: middle; }
 textarea {
   width: 100%;
-  min-height: 38px;
+  min-height: 44px;
   max-height: 130px;
   resize: none;
   field-sizing: content;
@@ -104,10 +83,11 @@ textarea {
 }
 textarea::placeholder { color: #667187; }
 .send {
-  height: 40px;
+  min-width: 58px;
+  height: 44px;
   border: 0;
   border-radius: 11px;
-  padding: 0 16px;
+  padding: 0 12px;
   background: linear-gradient(135deg, #5bcff0, #8573ff);
   color: #071018;
   font-size: 13px;
@@ -116,10 +96,51 @@ textarea::placeholder { color: #667187; }
   box-shadow: 0 8px 24px rgba(77,112,255,.2);
 }
 .send:disabled { opacity: .48; cursor: wait; }
-.composer-actions { justify-content: flex-end; margin-top: 5px; padding: 0 3px; color: var(--muted); font-size: 10px; }
-.composer-actions:has(.send-state:empty) { display: none; }
+.composer-actions { justify-content: flex-end; gap: 8px; margin-top: 5px; padding: 0 3px; color: var(--muted); font-size: 10px; }
+.composer-actions:has(.send-state:empty):not(:has(.command-mode:not([hidden]))) { display: none; }
 .send-state.error { color: var(--red); }
 .send-state.ok { color: var(--green); }
+.command-menu {
+  position: absolute;
+  z-index: 4;
+  right: 18px;
+  bottom: calc(100% - 5px);
+  left: 18px;
+  max-height: min(280px, calc(var(--app-height) - var(--composer-height, 78px) - 70px));
+  padding: 5px;
+  overflow-y: auto;
+  border: 1px solid var(--line-bright);
+  border-radius: 12px;
+  background: #111724;
+  box-shadow: 0 16px 42px rgba(0, 0, 0, .42);
+}
+.command-menu[hidden] { display: none; }
+.command-menu button {
+  display: grid;
+  grid-template-columns: minmax(92px, auto) minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.command-menu button:hover,
+.command-menu button:focus,
+.command-menu button[aria-selected="true"] { background: #252e40; outline: none; }
+.command-name { color: var(--cyan); font-weight: 800; }
+.command-label { min-width: 0; overflow-wrap: anywhere; color: var(--muted); font-size: 11px; }
+.command-mode { color: var(--cyan); }
+.command-mode[hidden] { display: none; }
+@media (max-width: 760px) {
+  .detail .composer { position: relative; bottom: auto; }
+  .command-menu { right: 10px; bottom: calc(100% - 4px); left: 10px; }
+}
 .toast {
   position: absolute;
   z-index: 5;

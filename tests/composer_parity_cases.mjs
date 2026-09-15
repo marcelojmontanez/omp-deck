@@ -28,6 +28,7 @@ export async function verifyComposerParity(page) {
       lifecycle: 'ongoing',
       project: 'parity-fixture',
       label: 'Composer parity fixture',
+      cwd: '/projects/parity-fixture/<private-directory>',
       machineName: 'Fixture machine',
       machineId: 'local',
       nodeAvailable: true,
@@ -35,11 +36,14 @@ export async function verifyComposerParity(page) {
       executionState: 'idle',
       inboxState: 'read',
       bridgeConnected: true,
-      capabilities: {sendMessage: true, attachments: true},
+      capabilities: {sendMessage: true, attachments: true, compact: true, shutdown: true, setThinking: true},
       transport: {kind: 'rpc', status: 'connected', label: 'RPC'},
       pendingUiRequest: null,
       subagents: [],
       session: {
+        model: 'openai/gpt-model-with-a-long-provider-qualified-name',
+        thinking: 'high',
+        thinkingLevels: ['off', 'medium', 'high'],
         activity: [
           {
             id: 'composer-parity-older',
@@ -61,7 +65,11 @@ export async function verifyComposerParity(page) {
         updatedMs: Date.parse('2026-09-15T10:01:00.000Z'),
       },
     };
-    state.agents = [agent];
+    state.agents = [
+      agent,
+      {...agent, id: `${fixtureId}-second`, project: 'second-project', label: 'A different conversation'},
+      {...agent, id: `${fixtureId}-history`, lifecycle: 'history', project: 'saved-project'},
+    ];
     state.selectedId = null;
     state.pendingSelection = null;
     state.filter = 'all';
@@ -106,6 +114,114 @@ export async function verifyComposerParity(page) {
     const explicitSend = await page.evaluate(() => globalThis.__composerParityRequests[0]);
     assert.equal(explicitSend.path, `/api/sessions/${FIXTURE_ID}/messages`);
     assert.equal(explicitSend.body.message, 'Mobile draft');
+
+    await page.click('#overflow-button');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('#session-info[open]', {visible: true});
+    assert((await page.$eval('#session-metadata', node => node.textContent))
+      .includes('/projects/parity-fixture/<private-directory>'));
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => document.activeElement.id === 'overflow-button');
+    await page.click('#overflow-button');
+    await page.keyboard.press('End');
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('#deck-settings[open]', {visible: true});
+    await page.keyboard.press('Escape');
+
+    for (const width of [320, 390, 1440]) {
+      await page.setViewport({width, height: 844, deviceScaleFactor: 1});
+      await nextPaint(page);
+      const toolbar = await page.evaluate(() => {
+        const rect = selector => {
+          const {x, y, width, height} = document.querySelector(selector).getBoundingClientRect();
+          return {x, y, width, height};
+        };
+        return {
+          model: rect('.model-chip'), thinking: rect('[data-thinking-level]'),
+          menu: rect('#overflow-button'), attach: rect('#attach'), send: rect('#send'),
+          header: rect('.detail-header'),
+          overflow: document.documentElement.scrollWidth > innerWidth,
+        };
+      });
+      assert.equal(toolbar.overflow, false, `no page overflow at ${width}px`);
+      for (const control of [toolbar.thinking, toolbar.menu, toolbar.attach, toolbar.send]) {
+        assert(control.width >= 44 && control.height >= 44, `touch target at ${width}px`);
+      }
+      assert(toolbar.model.width > 0, `model remains visible at ${width}px`);
+      assert(Math.abs(toolbar.thinking.y - toolbar.menu.y) <= 1, 'chat controls share one row');
+      assert(toolbar.header.height < 72, 'routine identity metadata must not add header rows');
+
+      await page.click('#overflow-button');
+      await page.keyboard.press('Enter');
+      const cards = await page.$$eval('.agent-card', nodes => nodes.map(node => {
+        const {x, y, width} = node.getBoundingClientRect();
+        return {x, y, width, project: node.querySelector('.agent-name').textContent};
+      }));
+      assert.deepEqual(cards.map(card => card.project).sort(), ['parity-fixture', 'second-project']);
+      if (width <= 390) {
+        assert.equal(cards[0].y, cards[1].y, 'phone sessions remain two-column tiles');
+        assert(cards[0].x + cards[0].width <= cards[1].x);
+      }
+      await page.click('.appbar [data-deck-settings]');
+      await page.waitForSelector('#deck-settings[open]', {visible: true});
+      await page.keyboard.press('Escape');
+      await page.click(`[data-id="${FIXTURE_ID}"]`);
+    }
+
+    await page.focus('#message');
+    await page.type('#message', '/co');
+    await page.waitForSelector('#command-menu:not([hidden])');
+    await page.keyboard.press('Tab');
+    assert.equal(await page.$eval('#message', node => node.value), '/compact');
+    assert.equal(await page.$eval('#send', node => node.textContent), 'Run');
+    page.once('dialog', dialog => { void dialog.dismiss(); });
+    await page.click('#send');
+    await nextPaint(page);
+    assert.equal(await page.$eval('#message', node => node.value), '/compact', 'cancel keeps draft');
+    assert.equal(await page.evaluate(() => __composerParityRequests.length), 1);
+
+    await page.evaluate(() => {
+      const request = ompDeckApi.request;
+      ompDeckApi.request = (path, options) => path.endsWith('/compact')
+        ? new Promise(resolve => { globalThis.__finishCommand = resolve; })
+        : request(path, options);
+    });
+    page.once('dialog', dialog => { void dialog.accept(); });
+    await page.click('#send');
+    await page.waitForFunction(() => typeof globalThis.__finishCommand === 'function');
+    await page.focus('#message');
+    await page.keyboard.press('End');
+    await page.keyboard.type('x');
+    await page.keyboard.press('Backspace');
+    await page.evaluate(() => globalThis.__finishCommand({ok: true, status: 202}));
+    await nextPaint(page);
+    assert.equal(await page.$eval('#message', node => node.value), '/compact',
+      'delayed acceptance must not clear a newer edit, even when its text matches');
+
+    await page.evaluate(() => {
+      el.message.value = '/thinking high';
+      el.message.dispatchEvent(new Event('input', {bubbles: true}));
+      selectedAgent().capabilities.setThinking = false;
+      selectedAgent().session.thinkingLevels = [];
+      touchRender();
+      renderDetail();
+    });
+    await page.click('#send');
+    await nextPaint(page);
+    assert.equal(await page.$eval('#message', node => node.value), '/thinking high');
+    assert.equal(await page.evaluate(() => __composerParityRequests.length), 1,
+      'withdrawn thinking capability must not turn a command into a prompt');
+    assert(await page.$eval('#toast', node => !node.hidden && node.classList.contains('error')));
+
+    await page.evaluate(fixtureId => selectAgent(`${fixtureId}-second`, {pushHistory: false}), FIXTURE_ID);
+    await page.type('#message', 'Another session draft');
+    await page.evaluate(fixtureId => selectAgent(fixtureId, {pushHistory: false}), FIXTURE_ID);
+    assert.equal(await page.$eval('#message', node => node.value), '/thinking high');
+    await page.evaluate(fixtureId => selectAgent(`${fixtureId}-history`, {pushHistory: false}), FIXTURE_ID);
+    assert.equal(await page.$eval('#composer', node => node.hidden), true, 'history has no dead composer');
+    await page.evaluate(fixtureId => selectAgent(`${fixtureId}-second`, {pushHistory: false}), FIXTURE_ID);
+    assert.equal(await page.$eval('#message', node => node.value), 'Another session draft');
   } finally {
     if (originalViewport) await page.setViewport(originalViewport);
     await page.evaluate(() => {
@@ -128,6 +244,7 @@ export async function verifyComposerParity(page) {
         window.scrollTo(saved.documentScroll.left, saved.documentScroll.top);
       });
       delete globalThis.__composerParityRequests;
+      delete globalThis.__finishCommand;
       delete globalThis.__composerParityRestore;
     });
     await nextPaint(page);

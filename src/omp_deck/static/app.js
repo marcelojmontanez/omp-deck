@@ -198,7 +198,7 @@ window.addEventListener('omp-deck-machines-changed', event => {
     el['fleet-reload'].hidden = false;
   }
   renderMachineControls();
-  if (!appRoot.hidden && ompDeckApi.authenticated()) {
+  if (!el.app.hidden && ompDeckApi.authenticated()) {
     if (
       state.selectedMachineId !== previousSelection
       || addedIds.includes(state.selectedMachineId)

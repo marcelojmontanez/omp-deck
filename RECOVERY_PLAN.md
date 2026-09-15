@@ -41,6 +41,7 @@ The previous checks covered authentication within an existing browser context, n
 - Exercised a bounded JSON read against a real open HTTP response: it received headers, timed out while waiting for the body to finish, and left the device paired.
 - A real TCP reset before request headers failed the new regression before the correction, then closed quietly and released its connection slot afterward. Backend failures after headers are not swallowed.
 - The complete release gate passed: 405 Python tests (13 platform/opt-in skips), both real Chromium scenarios, TypeScript checking, and 11 plugin cases (one Windows-only skip). Ruff, formatting, compilation, text checks, metrics, and JavaScript syntax checks also passed.
+- A built-wheel smoke on an isolated Linux installation caught an uncaught fleet-refresh exception: one handler still referenced a DOM binding moved with authentication handling. The browser continued far enough for the earlier visibility-only checks to pass. Both browser suites now reject uncaught JavaScript errors. After correcting the handler, the same packaged-service check passed pairing, persistent-cookie issuance, cursor-bearing reconnect after a real tab hide/resume, and narrow-screen containment.
 
 ## Limits of the evidence
 

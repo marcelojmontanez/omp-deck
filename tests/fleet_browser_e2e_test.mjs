@@ -152,7 +152,9 @@ test('independent viewers route duplicate session IDs directly and survive one m
   await computer.setViewport({width: 1440, height: 900});
   const nodeRequests = [];
   const coordinatorRequests = [];
+  const pageErrors = [];
   for (const page of [phone, computer]) {
+    page.on('pageerror', error => pageErrors.push(error.message));
     page.on('request', request => {
       const url = new URL(request.url());
       if (!url.pathname.startsWith('/api/')) return;
@@ -269,4 +271,5 @@ test('independent viewers route duplicate session IDs directly and survive one m
   await computer.type('#message', 'Second device stays authorized');
   await computer.click('#send');
   await computer.waitForFunction(() => document.getElementById('activity').textContent.includes('Second device stays authorized'));
+  assert.deepEqual(pageErrors, [], 'fleet lifecycles must not raise uncaught JavaScript errors');
 });

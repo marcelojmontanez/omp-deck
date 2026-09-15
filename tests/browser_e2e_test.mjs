@@ -105,6 +105,8 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   await waitForHealth(url, () => serviceError);
   const token = pairingCode(environment);
   const profile = path.join(sandbox, 'chromium-profile');
+  const pageErrors = [];
+  const recordPageError = error => pageErrors.push(error.message);
   let browser = await puppeteer.launch({
     headless: true,
     args: ['--no-sandbox'],
@@ -114,6 +116,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     if (browser) await browser.close();
   });
   let page = await browser.newPage();
+  page.on('pageerror', recordPageError);
   await page.setViewport({width: 390, height: 844, deviceScaleFactor: 1});
   await page.setRequestInterception(true);
   let failInitialSession = true;
@@ -1719,6 +1722,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     userDataDir: profile,
   });
   page = await browser.newPage();
+  page.on('pageerror', recordPageError);
   await page.setViewport({width: 390, height: 844, deviceScaleFactor: 1});
   await page.goto(url, {waitUntil: 'domcontentloaded'});
   await page.waitForSelector('#app:not([hidden])', {visible: true});
@@ -1734,4 +1738,5 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   assert.equal(relaunched.appVisible, true);
   assert.equal(relaunched.pairingVisible, false);
   assert(relaunched.projects.includes('demo'));
+  assert.deepEqual(pageErrors, [], 'browser recovery must not raise uncaught JavaScript errors');
 });

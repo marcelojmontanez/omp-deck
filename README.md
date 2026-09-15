@@ -275,6 +275,10 @@ Both layers are required. Keep the listener on `127.0.0.1`, use Tailscale Serve 
 
 Pairing uses a six-digit code that expires after one minute. The code is single-use, and the first failed submission invalidates it; run `omp-deck pair` again after a typo or failed attempt.
 
+Paired-device cookies persist for the existing 90-day server-side lifetime; checking a session does not extend that expiry. A still-valid cookie from an older version becomes persistent on the next successful connection without a new code. Expired, revoked, or already-lost cookies still require pairing. Private browsing or settings that delete site data can remove even a persistent cookie.
+
+A failed connection check shows **Retry connection**, not the PIN form. Returning to a tab or restoring connectivity replaces stale reads and event streams while preserving in-memory drafts and attachments; reconnecting does not replay accepted actions or actions with an uncertain outcome. Drafts are not persisted across a full page reload or browser-process loss.
+
 Every private API, SSE, and blob request requires a paired device cookie, or an explicitly enrolled coordinator's short-lived machine-specific access ticket. Cookie-authenticated mutations require an exact trusted Origin and session-bound CSRF token; fleet tickets require the exact pinned coordinator Origin and never use ambient node cookies. Devices can log out individually or revoke all paired devices from the session menu.
 
 ## Retained data
@@ -379,16 +383,19 @@ uv tool uninstall omp-deck
 
 ## Regression verification
 
-Run the Python/JavaScript repository gate, actual Chromium scenarios, and extension socket tests separately:
+In a development virtual environment, install the prerequisites and run the complete release gate:
 
 ```bash
-python3 tools/check.py
+python3 -m pip install '.[dev]'
 npm ci
 npx puppeteer browsers install chrome
-npm run test:browser
 npm --prefix src/omp_deck/plugin ci
-npm --prefix src/omp_deck/plugin run check
+python3 tools/check.py --release
 ```
+
+`--release` requires the repository checks, actual Chromium scenarios, and extension checks to pass. Missing browser or plugin prerequisites fail the command; they are not silently skipped. `python3 tools/check.py` alone remains the repository-only gate. CI uses the complete release command.
+
+Browser regressions exercise persistent-cookie expiry and process restart, failed and superseded startup reads, resume-time stream replacement, stale responses, forbidden mutations without logout or resend, per-machine outage isolation, fragmented events, newest-first messages, and mobile Enter as newline. These contracts protect the tested behaviors; they do not certify every Android/Brave eviction policy or every historical UX request.
 
 Browser and extension scenarios use temporary state and local listeners. Native Windows tests exercise process containment and named pipes; native macOS LaunchAgent lifecycle tests require a graphical login and `OMP_DECK_MACOS_LAUNCHD_SMOKE=1`. Run native gates on their actual operating systems; skipped native tests do not establish portability.
 

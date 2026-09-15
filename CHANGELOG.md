@@ -46,6 +46,10 @@
 - Keep a verified live terminal manageable through a bounded control-only reconnect when an older extension cannot synchronize history, with a visible history warning instead of hiding it as an old session.
 - Restore visible session identity and back navigation, keep connection warnings readable on narrow screens, and show the correct connected-state indicator.
 - Restore tappable thinking-level control for updated terminal extensions and show OMP's effective level instead of assuming missing state means `auto`. Offer only model-supported levels and refresh terminal-side changes on the next heartbeat. Already-running terminals need an idle restart and resume to load the updated extension.
+- Keep paired devices authenticated with persistent cookies bounded by the existing 90-day expiry, and upgrade still-valid older cookies without requiring another code.
+- Show connection retry instead of a misleading PIN prompt after network failures; forbidden actions no longer log out a paired device or discard its draft.
+- Replace stale reads and event streams when returning to the browser or restoring connectivity, without resending actions.
+- Reduce reopening work with parallel connection checks, revalidated public assets, and incremental processing of fragmented event streams. These connection fixes do not require restarting OMP terminals already using the 1.3.1 extension.
 
 ## 1.1.0 — 2026-09-09
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import socket
 import threading
@@ -62,6 +64,8 @@ class DeckHttpHandler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(_STATIC_ROOT), **kwargs)
 
     def handle_one_request(self):
+        self._public_asset = False
+        self._headers_complete = False
         # A socket idle timeout alone lets a trickling header hold a worker
         # forever. End this absolute deadline before dispatching SSE or actions.
         self._header_timer = threading.Timer(self.server.header_timeout, self._expire_headers)
@@ -69,12 +73,19 @@ class DeckHttpHandler(SimpleHTTPRequestHandler):
         self._header_timer.start()
         try:
             super().handle_one_request()
+        except ConnectionResetError:
+            if self._headers_complete:
+                raise
+            # A suspended browser can reset an idle socket before sending a request.
+            self.close_connection = True
         finally:
             self._header_timer.cancel()
 
     def parse_request(self):
         try:
-            return super().parse_request()
+            parsed = super().parse_request()
+            self._headers_complete = parsed
+            return parsed
         finally:
             self._header_timer.cancel()
 
@@ -85,10 +96,38 @@ class DeckHttpHandler(SimpleHTTPRequestHandler):
             pass
 
     def send_head(self):
-        # A rollback can restore older package mtimes. They cannot validate
-        # cached assets from a different release of this unversioned app.
+        # Only content identity can validate an unversioned asset across rollback.
         del self.headers["If-Modified-Since"]
-        return super().send_head()
+        path = Path(self.translate_path(self.path))
+        if path.parent != Path(self.directory) or path.suffix not in {".js", ".css"} or not path.is_file():
+            return super().send_head()
+        return self._send_public_asset(path)
+
+    def _send_public_asset(self, path):
+        try:
+            source = path.open("rb")
+        except OSError:
+            self.send_error(404, "File not found")
+            return None
+        try:
+            etag = f'"{hashlib.file_digest(source, "sha256").hexdigest()}"'
+            candidates = self.headers.get("If-None-Match", "").split(",")
+            unchanged = any(value.strip().removeprefix("W/") in {etag, "*"} for value in candidates)
+            self._public_asset = True
+            self.send_response(304 if unchanged else 200)
+            self.send_header("ETag", etag)
+            if unchanged:
+                self.end_headers()
+                source.close()
+                return None
+            self.send_header("Content-Type", self.guess_type(str(path)))
+            self.send_header("Content-Length", str(os.fstat(source.fileno()).st_size))
+            self.end_headers()
+            source.seek(0)
+            return source
+        except BaseException:
+            source.close()
+            raise
 
     def auth_backend(self) -> AuthManager:
         raise NotImplementedError
@@ -153,6 +192,14 @@ class DeckHttpHandler(SimpleHTTPRequestHandler):
                     "deviceId": device.device_id,
                     "csrfToken": device.csrf_token,
                 },
+                headers=(
+                    (
+                        "Set-Cookie",
+                        self.auth_backend().cookie_header(
+                            cookie_credential(self.headers, self.cookie_name()), device.expires_at
+                        ),
+                    ),
+                ),
             )
         return True
 
@@ -241,7 +288,7 @@ class DeckHttpHandler(SimpleHTTPRequestHandler):
             "Permissions-Policy",
             "camera=(), geolocation=(), microphone=(), payment=(), usb=()",
         )
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", "public, no-cache" if getattr(self, "_public_asset", False) else "no-store")
         origin = self.cors_origin()
         if origin is not None:
             self.send_header("Access-Control-Allow-Origin", origin)

@@ -19,6 +19,7 @@ from collections import OrderedDict, deque
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
+from email.utils import formatdate
 from pathlib import Path
 
 from . import _auth_state
@@ -64,6 +65,7 @@ class AuthenticatedDevice:
     device_id: str
     csrf_token: str
     created_at: int
+    expires_at: int
 
 
 @dataclass(frozen=True)
@@ -192,8 +194,9 @@ class AuthManager:
                 device_id=device_id,
                 csrf_token=self._csrf(credential, device_id, self._state["epoch"]),
                 created_at=created,
+                expires_at=expires,
             )
-            return PairedDevice(device, credential, self.cookie_header(credential, self.cookie_name))
+            return PairedDevice(device, credential, self.cookie_header(credential, expires))
 
     def authenticate(self, credential: str | None) -> AuthenticatedDevice:
         """Validate an opaque cookie credential using timing-safe comparison."""
@@ -228,9 +231,10 @@ class AuthManager:
             self._write_state()
         return self.clear_cookie_header(self.cookie_name)
 
-    @staticmethod
-    def cookie_header(credential: str, name: str = COOKIE_NAME) -> str:
-        return f"{name}={credential}; {COOKIE_ATTRIBUTES}"
+    def cookie_header(self, credential: str, expires_at: int) -> str:
+        remaining = max(0, int(expires_at - self._now()))
+        expires = formatdate(expires_at, usegmt=True)
+        return f"{self.cookie_name}={credential}; Max-Age={remaining}; Expires={expires}; {COOKIE_ATTRIBUTES}"
 
     @staticmethod
     def clear_cookie_header(name: str = COOKIE_NAME) -> str:
@@ -258,13 +262,14 @@ class AuthManager:
         if (
             matched_record is None
             or matched_record["epoch"] != self._state["epoch"]
-            or matched_record["expiresAt"] < now
+            or matched_record["expiresAt"] <= now
         ):
             raise AuthenticationFailed("invalid or expired device credential")
         return AuthenticatedDevice(
             device_id=matched_id,
             csrf_token=self._csrf(credential, matched_id, self._state["epoch"]),
             created_at=matched_record["createdAt"],
+            expires_at=matched_record["expiresAt"],
         )
 
     @contextmanager
@@ -322,7 +327,7 @@ class AuthManager:
         self._state["devices"] = {
             key: value
             for key, value in self._state["devices"].items()
-            if value["expiresAt"] >= now and value["epoch"] == self._state["epoch"]
+            if value["expiresAt"] > now and value["epoch"] == self._state["epoch"]
         }
 
     def _write_state(self) -> None:

@@ -21,13 +21,17 @@
     <form class="auth-card" id="pair-form">
       <div class="mark" aria-hidden="true">π</div>
       <div class="eyebrow">Private control surface</div>
-      <h1 id="auth-title">Pair this device</h1>
-      <p>Enter the one-time code shown by <code id="pair-command">omp-deck pair</code>.</p>
-      <label for="pair-token">Pairing code</label>
-      <input id="pair-token" name="token" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required>
-      <button id="pair-submit" type="submit">Pair device</button>
+      <h1 id="auth-title">Connecting to OMP Deck</h1>
+      <p id="auth-description">Checking this device’s secure session…</p>
+      <div class="pairing-fields" id="pairing-fields" hidden>
+        <p>Run <code id="pair-command">omp-deck pair</code> and enter its one-time code.</p>
+        <label for="pair-token">Pairing code</label>
+        <input id="pair-token" name="token" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required>
+        <button id="pair-submit" type="submit">Pair device</button>
+      </div>
+      <button id="auth-retry" type="button" hidden>Retry connection</button>
       <p class="auth-error" id="auth-error" role="alert" hidden></p>
-      <p id="auth-status" role="status" aria-live="polite"></p>
+      <p id="auth-status" role="status" aria-live="polite">Checking connection…</p>
     </form>
   </section>
   <main class="app" id="app" hidden>
@@ -154,6 +158,8 @@
     <img id="image-viewer-image" alt="Enlarged attachment">
   </dialog>
 
+  <script src="/browser-network.js"></script>
+  <script src="/session-routing.js"></script>
   <script src="/api.js"></script>
   <script src="/image-loader.js"></script>
   <script src="/markdown.js"></script>
@@ -161,10 +167,12 @@
   <script src="/todo-ui.js"></script>
   <script src="/fleet-projection.js"></script>
   <script src="/pending-request.js"></script>
+  <script src="/sse-parser.js"></script>
   <script src="/live-events.js"></script>
   <script src="/ui-helpers.js"></script>
   <script src="/composer.js"></script>
   <script src="/deck-rendering.js"></script>
+  <script src="/auth-bootstrap.js"></script>
   <script src="/app.js"></script>
   <script src="/session-controls.js"></script>
   <script src="/launcher.js"></script>

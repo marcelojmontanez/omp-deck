@@ -96,7 +96,7 @@ async function pair(page, coordinator) {
   page.on('request', intercept);
   try {
     await page.goto(coordinator.origin, {waitUntil: 'domcontentloaded'});
-    await page.waitForSelector('#auth-screen:not([hidden])');
+    await page.waitForSelector('#pair-token', {visible: true});
     await page.type('#pair-token', token);
     await page.click('#pair-submit');
     await page.waitForFunction(() => (

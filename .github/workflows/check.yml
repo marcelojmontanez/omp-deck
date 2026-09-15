@@ -167,7 +167,9 @@ jobs:
           node-version: "22.14.0"
           cache: npm
       - run: npm ci
-      - run: python3 -m pip install .
+      - run: python3 -m pip install '.[dev]'
+      - working-directory: src/omp_deck/plugin
+        run: npm ci
       - run: npx puppeteer browsers install chrome
       - run: node --test --test-concurrency=1 tests/browser_behavior_test.mjs
-      - run: npm run test:browser
+      - run: python3 tools/check.py --release

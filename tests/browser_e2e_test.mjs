@@ -7,6 +7,7 @@ import {spawn, spawnSync} from 'node:child_process';
 import net from 'node:net';
 import test from 'node:test';
 import puppeteer from 'puppeteer';
+import {verifyComposerParity} from './composer_parity_cases.mjs';
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const PYTHON = process.env.PYTHON || (
@@ -103,11 +104,55 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   const url = `http://localhost:${port}`;
   await waitForHealth(url, () => serviceError);
   const token = pairingCode(environment);
-  const browser = await puppeteer.launch({headless: true, args: ['--no-sandbox']});
-  t.after(() => browser.close());
-  const page = await browser.newPage();
+  const profile = path.join(sandbox, 'chromium-profile');
+  let browser = await puppeteer.launch({
+    headless: true,
+    args: ['--no-sandbox'],
+    userDataDir: profile,
+  });
+  t.after(async () => {
+    if (browser) await browser.close();
+  });
+  let page = await browser.newPage();
   await page.setViewport({width: 390, height: 844, deviceScaleFactor: 1});
+  await page.setRequestInterception(true);
+  let failInitialSession = true;
+  let heldClientConfig = null;
+  let sessionStartedBeforeModeCompleted = false;
+  const failSessionRequest = request => {
+    const pathname = new URL(request.url()).pathname;
+    if (pathname === '/api/client-config' && !heldClientConfig) {
+      heldClientConfig = request;
+      return;
+    }
+    if (failInitialSession && pathname === '/api/auth/session') {
+      failInitialSession = false;
+      sessionStartedBeforeModeCompleted = Boolean(heldClientConfig);
+      void request.abort('failed');
+      void heldClientConfig?.continue();
+      heldClientConfig = null;
+      return;
+    }
+    void request.continue();
+  };
+  page.on('request', failSessionRequest);
   await page.goto(url, {waitUntil: 'domcontentloaded'});
+  await page.waitForSelector('#auth-retry:not([hidden])', {visible: true});
+  const offlineBootstrap = await page.evaluate(() => ({
+    retryVisible: !document.getElementById('auth-retry').hidden,
+    pairingVisible: !document.getElementById('pairing-fields').hidden,
+    appVisible: !document.getElementById('app').hidden,
+  }));
+  assert.deepEqual(offlineBootstrap, {
+    retryVisible: true,
+    pairingVisible: false,
+    appVisible: false,
+  });
+  assert.equal(sessionStartedBeforeModeCompleted, true);
+  page.off('request', failSessionRequest);
+  await page.setRequestInterception(false);
+  await page.click('#auth-retry');
+  await page.waitForSelector('#pairing-fields:not([hidden]) #pair-token', {visible: true});
   await page.type('#pair-token', token);
   await page.click('#pair-form button[type="submit"]');
   await page.waitForFunction(() => (
@@ -146,6 +191,157 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   const cookies = await page.cookies();
   const device = cookies.find(cookie => cookie.name === 'omp_deck_device');
   assert(device, `secure device cookie missing; service stderr: ${serviceError}`);
+  await page.setRequestInterception(true);
+  let failPairedSession = true;
+  const failPairedSessionRequest = request => {
+    if (failPairedSession && new URL(request.url()).pathname === '/api/auth/session') {
+      failPairedSession = false;
+      void request.abort('failed');
+      return;
+    }
+    void request.continue();
+  };
+  page.on('request', failPairedSessionRequest);
+  await page.reload({waitUntil: 'domcontentloaded'});
+  await page.waitForSelector('#auth-retry:not([hidden])', {visible: true});
+  const pairedOffline = await page.evaluate(() => ({
+    retryVisible: !document.getElementById('auth-retry').hidden,
+    pinVisible: !document.getElementById('auth-screen').hidden
+      && !document.getElementById('pairing-fields').hidden,
+  }));
+  assert.deepEqual(pairedOffline, {retryVisible: true, pinVisible: false});
+  page.off('request', failPairedSessionRequest);
+  await page.setRequestInterception(false);
+  await page.click('#auth-retry');
+  await page.waitForSelector('#app:not([hidden])', {visible: true});
+  await page.waitForFunction(() => document.getElementById('project-select').options.length > 2);
+  assert((await page.cookies()).some(cookie => cookie.name === 'omp_deck_device'));
+
+  await page.setRequestInterception(true);
+  const bootstrapPaths = new Set(['/api/client-config', '/api/auth/session']);
+  const heldBootstrapRequests = [];
+  const pendingBootstrap = Promise.all([...bootstrapPaths].map(pathname =>
+    page.waitForRequest(request => new URL(request.url()).pathname === pathname)
+  ));
+  const holdBootstrap = request => {
+    const pathname = new URL(request.url()).pathname;
+    if (bootstrapPaths.delete(pathname)) heldBootstrapRequests.push(request);
+    else void request.continue();
+  };
+  page.on('request', holdBootstrap);
+  try {
+    await page.reload({waitUntil: 'domcontentloaded'});
+    await pendingBootstrap;
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await page.waitForSelector('#app:not([hidden])', {visible: true});
+    await page.waitForFunction(() => document.getElementById('project-select').options.length > 2);
+  } finally {
+    page.off('request', holdBootstrap);
+    await Promise.allSettled(heldBootstrapRequests.map(request => request.continue()));
+    await page.setRequestInterception(false);
+  }
+
+  await verifyComposerParity(page);
+
+  const forbiddenRecovery = await page.evaluate(async () => {
+    const originalFetch = window.fetch;
+    let calls = 0;
+    document.getElementById('message').value = 'draft survives forbidden response';
+    window.fetch = async (input, options) => {
+      const pathname = new URL(
+        typeof input === 'string' ? input : input.url,
+        location.href,
+      ).pathname;
+      if (pathname === '/api/projects/demo/sessions' && options?.method === 'POST') {
+        calls += 1;
+        return new Response(JSON.stringify({error: 'forbidden'}), {
+          status: 403,
+          headers: {'Content-Type': 'application/json'},
+        });
+      }
+      return originalFetch(input, options);
+    };
+    try {
+      const response = await ompDeckApi.request('/api/projects/demo/sessions', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: '{}',
+      });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      return {
+        status: response.status,
+        calls,
+        authenticated: ompDeckApi.authenticated(),
+        appVisible: !document.getElementById('app').hidden,
+        pairingVisible: !document.getElementById('auth-screen').hidden
+          && !document.getElementById('pairing-fields').hidden,
+        draft: document.getElementById('message').value,
+      };
+    } finally {
+      window.fetch = originalFetch;
+      document.getElementById('message').value = '';
+    }
+  });
+  assert.deepEqual(forbiddenRecovery, {
+    status: 403,
+    calls: 1,
+    authenticated: true,
+    appVisible: true,
+    pairingVisible: false,
+    draft: 'draft survives forbidden response',
+  });
+
+  const authOrdering = await page.evaluate(async () => {
+    const originalFetch = window.fetch;
+    let releaseStale;
+    let sessionCalls = 0;
+    window.fetch = (input, options) => {
+      const pathname = new URL(
+        typeof input === 'string' ? input : input.url,
+        location.href,
+      ).pathname;
+      if (pathname !== '/api/auth/session') return originalFetch(input, options);
+      sessionCalls += 1;
+      if (sessionCalls === 1) {
+        return new Promise(resolve => { releaseStale = resolve; });
+      }
+      if (sessionCalls === 3) {
+        return Promise.resolve(new Response('{}', {headers: {'Content-Type': 'application/json'}}));
+      }
+      return Promise.resolve(new Response(JSON.stringify({
+        authenticated: true,
+        csrfToken: 'newest-session',
+      }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+    };
+    try {
+      const stale = ompDeckApi.session().then(
+        () => 'accepted',
+        caught => caught.name,
+      );
+      while (!releaseStale) await new Promise(resolve => setTimeout(resolve, 0));
+      const latest = await ompDeckApi.session();
+      const invalidOutcome = await ompDeckApi.session().then(() => 'accepted', () => 'rejected');
+      releaseStale(new Response(JSON.stringify({authenticated: false}), {
+        status: 200,
+        headers: {'Content-Type': 'application/json'},
+      }));
+      return {
+        staleOutcome: await stale,
+        latestAuthenticated: latest.authenticated,
+        remainsAuthenticated: ompDeckApi.authenticated(),
+        invalidOutcome,
+      };
+    } finally {
+      window.fetch = originalFetch;
+      await ompDeckApi.session();
+    }
+  });
+  assert.deepEqual(authOrdering, {
+    staleOutcome: 'AbortError',
+    latestAuthenticated: true,
+    remainsAuthenticated: true,
+    invalidOutcome: 'rejected',
+  });
   const rendering = await page.evaluate(() => {
     const markdown = document.createElement('div');
     markdown.innerHTML = renderMarkdown([
@@ -211,7 +407,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   assert.equal(rendering.removeVisible, true);
   assert.equal(rendering.removeDenied, true);
   assert.equal(rendering.metricOverflow, false);
-  await page.waitForFunction(() => [...state.nodes.values()].every(node => !node.refreshPromise));
+  await page.waitForFunction(() => [...state.nodes.values()].every(node => !node.refreshRequest));
   const recovery = await page.evaluate(async () => {
     stopEventStreams();
     const originalFetch = window.fetch;
@@ -266,6 +462,9 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       const liveTitle = state.agents.find(agent => agent.id === 'recovery-session')?.label;
       releaseFirst();
       await activeRefresh;
+      while (nodeState('local').refreshRequest) {
+        await nodeState('local').refreshRequest.promise;
+      }
       const recoveredTitle = state.agents.find(agent => agent.id === 'recovery-session')?.label;
       const staleRequestGeneration = nodeState('local').snapshotGeneration;
       applyFleetSession(rawSession('Newest event'), baseGeneration + 3);
@@ -300,6 +499,120 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   assert.equal(recovery.staleIgnoredTitle, 'Newest event');
   assert.equal(recovery.restartedTitle, 'Restarted server');
   assert.equal(recovery.snapshotGeneration > 0, true);
+
+  const resumedRecovery = await page.evaluate(async () => {
+    stopEventStreams();
+    const originalRequest = ompDeckApi.request;
+    const node = nodeState('local');
+    node.lastEventId = 'resume-cursor';
+    const baseGeneration = node.snapshotGeneration + 10;
+    let sessionCalls = 0;
+    let eventCalls = 0;
+    let resolveStaleRefresh;
+    let resolveStaleStream;
+    const sessionPayload = title => ({
+      snapshotGeneration: baseGeneration,
+      sessions: [{
+        id: 'resume-session',
+        lifecycle: 'ongoing',
+        ompSessionId: 'omp-resume',
+        title,
+        project: {name: 'demo', path: '/work/demo'},
+        state: 'idle',
+        transport: {kind: 'rpc', status: 'connected', label: 'RPC'},
+        capabilities: {},
+        messages: [],
+        todos: [],
+        subagents: [],
+        pendingUiRequest: null,
+        unread: false,
+        updatedAt: '2026-08-20T12:34:56.789Z',
+        workingOn: null,
+        model: null,
+        thinking: null,
+      }],
+    });
+    const response = payload => ({
+      ok: true,
+      status: 200,
+      json: async () => payload,
+    });
+    const eventHeaders = [];
+    try {
+      ompDeckApi.request = (path, options = {}) => {
+        if (path === '/api/sessions') {
+          sessionCalls += 1;
+          if (sessionCalls === 1) {
+            return new Promise(resolve => { resolveStaleRefresh = resolve; });
+          }
+          return Promise.resolve(response(sessionPayload('Resumed snapshot')));
+        }
+        if (path === '/api/events') {
+          eventCalls += 1;
+          eventHeaders.push(new Headers(options.headers).get('Last-Event-ID'));
+          if (eventCalls === 1) {
+            return new Promise(resolve => { resolveStaleStream = resolve; });
+          }
+          return new Promise((resolve, reject) => {
+            options.signal.addEventListener('abort', () => {
+              reject(new DOMException('Stream replaced', 'AbortError'));
+            }, {once: true});
+          });
+        }
+        return originalRequest(path, options);
+      };
+      const staleRefresh = refresh();
+      startNodeEventStream('local');
+      while (!resolveStaleRefresh || !resolveStaleStream) {
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+      document.getElementById('message').value = 'resume draft';
+      document.dispatchEvent(new Event('visibilitychange'));
+      while (sessionCalls < 2 || eventCalls < 2 || node.refreshRequest) {
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+      const titleAfterResume = state.agents.find(agent => agent.id === 'resume-session')?.label;
+      resolveStaleRefresh(response({
+        ...sessionPayload('Obsolete snapshot'),
+        snapshotGeneration: baseGeneration + 1,
+      }));
+      const staleFrame = [
+        'id: obsolete-event',
+        'event: fleet',
+        `data: ${JSON.stringify({
+          type: 'snapshot',
+          payload: {
+            ...sessionPayload('Obsolete stream'),
+            snapshotGeneration: baseGeneration + 2,
+          },
+        })}`,
+        '',
+        '',
+      ].join('\n');
+      resolveStaleStream(new Response(staleFrame, {
+        status: 200,
+        headers: {'Content-Type': 'text/event-stream'},
+      }));
+      await staleRefresh;
+      await new Promise(resolve => setTimeout(resolve, 0));
+      return {
+        titleAfterResume,
+        titleAfterStale: state.agents.find(agent => agent.id === 'resume-session')?.label,
+        eventHeaders,
+        draft: document.getElementById('message').value,
+      };
+    } finally {
+      stopEventStreams();
+      ompDeckApi.request = originalRequest;
+      document.getElementById('message').value = '';
+    }
+  });
+  assert.deepEqual(resumedRecovery, {
+    titleAfterResume: 'Resumed snapshot',
+    titleAfterStale: 'Resumed snapshot',
+    eventHeaders: ['resume-cursor', 'resume-cursor'],
+    draft: 'resume draft',
+  });
 
   const normalizedEventOrdering = await page.evaluate(async () => {
     const machineId = 'local';
@@ -362,13 +675,13 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     clearTimeout(node.recoveryTimer);
     node.recoveryTimer = null;
 
-    const largeText = `supported-snapshot-start ${'x'.repeat(224 * 1024)} supported-snapshot-end`;
+    const largeText = `supported-snapshot-start 雪 ${'x'.repeat(224 * 1024)} supported-snapshot-end`;
     const snapshotData = JSON.stringify({
       id: baseGeneration + 3,
       type: 'snapshot',
       payload: {
         snapshotGeneration: baseGeneration + 3,
-        sessions: [rawSession('Large transcript', [{
+        sessions: [rawSession('Large 雪 transcript', [{
           id: 'large-message',
           role: 'assistant',
           content: [{type: 'text', text: largeText}],
@@ -376,16 +689,34 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
         }])],
       },
     });
-    const frame = `id: browser-regression:${baseGeneration + 3}\nevent: fleet\ndata: ${snapshotData}\n\n`;
+    const frame = `id: browser-regression:${baseGeneration + 3}\r\nevent: fleet\r\ndata:\r\ndata: ${snapshotData}\r\n\r\n`;
+    const encodedFrame = new TextEncoder().encode(frame);
+    const fragmentedBody = new ReadableStream({
+      start(controller) {
+        let offset = 0;
+        while (offset < encodedFrame.length) {
+          const width = offset < 1024 ? 1 : 2048;
+          controller.enqueue(encodedFrame.slice(offset, offset + width));
+          offset += width;
+        }
+        controller.close();
+      },
+    });
     const stream = {
       controller: new AbortController(),
       failures: 4,
       lastEventId: '',
     };
-    await consumeSse(new Response(new Blob([frame]).stream(), {
-      status: 200,
-      headers: {'Content-Type': 'text/event-stream'},
-    }), machineId, stream);
+    const previousStream = node.stream;
+    node.stream = stream;
+    try {
+      await consumeSse(new Response(fragmentedBody, {
+        status: 200,
+        headers: {'Content-Type': 'text/event-stream'},
+      }), machineId, stream);
+    } finally {
+      node.stream = previousStream;
+    }
     selectAgent(projectedId, {pushHistory: false});
 
     return {
@@ -397,14 +728,16 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       largeTranscriptVisible: document.getElementById('activity').textContent.includes(
         'supported-snapshot-end'
       ),
+      replayCursor: stream.lastEventId,
     };
   });
   assert.match(normalizedEventOrdering.firstVisible, /First normalized update/);
   assert.match(normalizedEventOrdering.secondVisible, /Second normalized update/);
   assert.match(normalizedEventOrdering.afterStale, /Second normalized update/);
   assert.match(normalizedEventOrdering.afterGap, /Second normalized update/);
-  assert.match(normalizedEventOrdering.largeTitleVisible, /Large transcript/);
+  assert.match(normalizedEventOrdering.largeTitleVisible, /Large 雪 transcript/);
   assert.equal(normalizedEventOrdering.largeTranscriptVisible, true);
+  assert.match(normalizedEventOrdering.replayCursor, /^browser-regression:\d+$/);
 
   const lifecycleDashboard = await page.evaluate(async () => {
     const makeAgent = (id, lifecycle, executionState, overrides = {}) => ({
@@ -1376,4 +1709,29 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   assert.equal(device.httpOnly, true);
   assert.equal(device.secure, true);
   assert.equal(device.sameSite, 'Strict');
+
+  assert(device.expires > Date.now() / 1000);
+  await browser.close();
+  browser = null;
+  browser = await puppeteer.launch({
+    headless: true,
+    args: ['--no-sandbox'],
+    userDataDir: profile,
+  });
+  page = await browser.newPage();
+  await page.setViewport({width: 390, height: 844, deviceScaleFactor: 1});
+  await page.goto(url, {waitUntil: 'domcontentloaded'});
+  await page.waitForSelector('#app:not([hidden])', {visible: true});
+  await page.waitForFunction(() => document.getElementById('project-select').options.length > 2);
+  const relaunched = await page.evaluate(() => ({
+    authenticated: ompDeckApi.authenticated(),
+    appVisible: !document.getElementById('app').hidden,
+    pairingVisible: !document.getElementById('auth-screen').hidden
+      && !document.getElementById('pairing-fields').hidden,
+    projects: [...document.getElementById('project-select').options].map(option => option.value),
+  }));
+  assert.equal(relaunched.authenticated, true);
+  assert.equal(relaunched.appVisible, true);
+  assert.equal(relaunched.pairingVisible, false);
+  assert(relaunched.projects.includes('demo'));
 });

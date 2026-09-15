@@ -283,7 +283,56 @@ class CoordinatorHTTPTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(delivered, current)
-        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(headers["Cache-Control"], "public, no-cache")
+
+    def test_public_assets_revalidate_by_content_across_upgrade_and_rollback(self):
+        assets = Path(self.temp.name) / "assets"
+        assets.mkdir()
+        script = assets / "app.js"
+        script.write_bytes(b"old()")
+        with patch("omp_deck._http_common._STATIC_ROOT", assets):
+            status, first_headers, body = self.request("GET", "/app.js", parse_json=False)
+            self.assertEqual((status, body), (200, b"old()"))
+            first_etag = first_headers["ETag"]
+            status, headers, body = self.request(
+                "GET", "/app.js", headers={"If-None-Match": f'W/{first_etag}, "other"'}, parse_json=False
+            )
+            self.assertEqual((status, body), (304, b""))
+            self.assertEqual(headers["ETag"], first_etag)
+            self.assertEqual(headers["Cache-Control"], "public, no-cache")
+
+            script.write_bytes(b"new()")
+            os.utime(script, (2, 2))
+            status, upgraded_headers, body = self.request(
+                "GET", "/app.js", headers={"If-None-Match": first_etag}, parse_json=False
+            )
+            self.assertEqual((status, body), (200, b"new()"))
+            self.assertNotEqual(upgraded_headers["ETag"], first_etag)
+
+            script.write_bytes(b"old()")
+            os.utime(script, (1, 1))
+            status, restored_headers, body = self.request(
+                "GET",
+                "/app.js",
+                headers={
+                    "If-None-Match": upgraded_headers["ETag"],
+                    "If-Modified-Since": "Thu, 31 Dec 2099 23:59:59 GMT",
+                },
+                parse_json=False,
+            )
+            self.assertEqual((status, body), (200, b"old()"))
+            self.assertEqual(restored_headers["ETag"], first_etag)
+
+    def test_html_and_authentication_never_use_public_asset_cache(self):
+        cookie, _ = self.pair()
+        for path in ("/", "/api/auth/session"):
+            with self.subTest(path=path):
+                status, headers, _ = self.request(
+                    "GET", path, headers={"Cookie": cookie, "If-None-Match": "*"}, parse_json=False
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(headers["Cache-Control"], "no-store")
+                self.assertIsNone(headers.get("ETag"))
 
     def test_authenticated_roster_and_access_require_same_origin_csrf(self):
         cookie, csrf = self.pair()

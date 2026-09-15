@@ -1,10 +1,13 @@
 import contextlib
 import http.client
+import os
 import queue
 import socket
+import struct
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from omp_deck._http_common import DeckHttpHandler, ThreadingHTTPServer
 
@@ -30,6 +33,12 @@ class HttpLimitTests(unittest.TestCase):
             max_connections = limit
             header_timeout = deadline
 
+            def process_request_thread(self, request, client_address):
+                try:
+                    super().process_request_thread(request, client_address)
+                finally:
+                    started.put("finished")
+
         server = LimitedServer(("127.0.0.1", 0), Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -41,6 +50,25 @@ class HttpLimitTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(2)
+
+    def test_reset_before_headers_is_a_disconnect_not_a_server_error(self):
+        with (
+            patch.object(ThreadingHTTPServer, "handle_error") as report_error,
+            self.running_server(limit=1, deadline=2) as (address, started),
+        ):
+            client = socket.create_connection(address, timeout=2)
+            self.assertIs(started.get(timeout=2), True)
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("HH" if os.name == "nt" else "ii", 1, 0))
+            client.close()
+            self.assertEqual(started.get(timeout=2), "finished")
+            report_error.assert_not_called()
+            connection = http.client.HTTPConnection(*address, timeout=2)
+            try:
+                connection.request("GET", "/")
+                response = connection.getresponse()
+                self.assertEqual((response.status, response.read()), (200, b'{"ok": true}'))
+            finally:
+                connection.close()
 
     def test_partial_headers_expire_even_while_bytes_keep_arriving(self):
         with self.running_server() as (address, started), socket.create_connection(address, timeout=2) as client:

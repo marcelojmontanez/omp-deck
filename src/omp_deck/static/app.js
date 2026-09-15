@@ -54,6 +54,7 @@ async function clearLocalData() {
 
 window.ompDeckLocalData = Object.freeze({clear: clearLocalData});
 let composer;
+let authRecovery;
 const {
   markRead,
   selectedAgent,
@@ -75,41 +76,54 @@ const {
   getComposer: () => composer,
 });
 
-async function refreshNode(machineId) {
+async function refreshNode(machineId, {replace = false} = {}) {
   const node = nodeState(machineId);
-  if (node.refreshPromise) {
-    node.refreshPending = true;
-    return node.refreshPromise;
+  if (node.refreshRequest && !replace) {
+    node.refreshRequest.pending = true;
+    return node.refreshRequest.promise;
   }
-  node.refreshPromise = (async () => {
-    do {
-      const requestedRevision = node.presentationRevision;
-      node.refreshPending = false;
-      const requestedGeneration = node.snapshotGeneration;
-      try {
-        const response = await ompDeckApi.request('/api/sessions', {
-          machineId,
-          cache: 'no-store',
-        });
-        if (!response.ok) throw new Error(`Sessions returned ${response.status}`);
-        applyFleetSnapshot(await response.json(), requestedGeneration, machineId, requestedRevision);
-      } catch (error) {
-        const machine = ompDeckApi.machine(machineId);
-        if (machine?.status !== 'unavailable') {
-          ompDeckApi.setMachineStatus(machineId, 'offline', error.message);
-        }
+  if (node.refreshRequest) node.refreshRequest.controller.abort();
+  const request = {
+    controller: new AbortController(),
+    pending: false,
+    promise: null,
+  };
+  node.refreshRequest = request;
+  request.promise = (async () => {
+    const requestedRevision = node.presentationRevision;
+    const requestedGeneration = node.snapshotGeneration;
+    try {
+      const response = await ompDeckApi.request('/api/sessions', {
+        machineId,
+        cache: 'no-store',
+        signal: request.controller.signal,
+      });
+      if (!response.ok) throw new Error(`Sessions returned ${response.status}`);
+      const snapshot = await response.json();
+      if (request.controller.signal.aborted || node.refreshRequest !== request) return;
+      applyFleetSnapshot(snapshot, requestedGeneration, machineId, requestedRevision);
+    } catch (error) {
+      if (request.controller.signal.aborted || node.refreshRequest !== request) return;
+      const machine = ompDeckApi.machine(machineId);
+      if (machine?.status !== 'unavailable') {
+        ompDeckApi.setMachineStatus(machineId, 'offline', error.message);
       }
-    } while (node.refreshPending);
-  })().finally(() => { node.refreshPromise = null; });
-  return node.refreshPromise;
+    } finally {
+      if (node.refreshRequest === request) {
+        node.refreshRequest = null;
+        if (request.pending && ompDeckApi.authenticated()) void refreshNode(machineId);
+      }
+    }
+  })();
+  return request.promise;
 }
 
-async function refresh(machineId = null) {
+async function refresh(machineId = null, options = {}) {
   const targets = (machineId
     ? [machineId]
     : ompDeckApi.machines().map(machine => machine.id))
     .filter(id => !state.reloadRequiredMachines.has(id));
-  await Promise.allSettled(targets.map(refreshNode));
+  await Promise.allSettled(targets.map(id => refreshNode(id, options)));
 }
 function machineStatusLabel(status) {
   return {
@@ -246,15 +260,23 @@ el['agent-list'].addEventListener('click', event => {
   const card = event.target.closest('[data-id]');
   if (card) selectAgent(card.dataset.id);
 });
+function recoverLiveConnections() {
+  if (!ompDeckApi.authenticated()) return;
+  void ompDeckApi.recoverAccess().catch(() => {});
+  restartEventStreams();
+  void refresh(null, {replace: true});
+}
+
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
-  refresh();
+  recoverLiveConnections();
   if (!state.selectedId) return;
   renderDetail();
   markRead(selectedAgent());
   renderSummary();
   renderList();
 });
+window.addEventListener('online', recoverLiveConnections);
 window.addEventListener('popstate', event => {
   const session = event.state?.view === 'chat'
     ? event.state.session
@@ -295,7 +317,7 @@ el['session-menu'].addEventListener('click', async event => {
   try {
     await ompDeckApi.logout({all});
     await clearLocalData();
-    showAuthentication();
+    authRecovery.requirePairing({clearToken: true});
   } catch (error) {
     showToast(error.message, 'error');
   }
@@ -377,16 +399,12 @@ el['scroll-newest'].addEventListener('click', () => {
 });
 
 
-const appRoot = document.getElementById('app');
-const authScreen = document.getElementById('auth-screen');
-const pairForm = document.getElementById('pair-form');
-const pairToken = document.getElementById('pair-token');
-const authError = document.getElementById('auth-error');
-const authStatus = document.getElementById('auth-status');
-const pairSubmit = document.getElementById('pair-submit');
-
-function showAuthentication({clearToken = false} = {}) {
+function resetApplication() {
   stopEventStreams();
+  for (const node of state.nodes.values()) {
+    node.refreshRequest?.controller.abort();
+    node.refreshRequest = null;
+  }
   state.reloadRequiredMachines.clear();
   el['fleet-reload'].hidden = true;
   clearInterval(state.recoveryTimer);
@@ -417,18 +435,11 @@ function showAuthentication({clearToken = false} = {}) {
   document.body.classList.remove('chat-open');
   el.workspace.classList.remove('chat-open');
   ompDeckImages.clear();
-  appRoot.hidden = true;
-  document.getElementById('pair-command').textContent = ompDeckApi.mode() === 'coordinator'
-    ? 'omp-deck coordinator pair --config FILE'
-    : 'omp-deck pair';
-  authScreen.hidden = false;
-  if (clearToken) pairToken.value = '';
-  pairToken.focus();
 }
 
 async function showApplication() {
-  authScreen.hidden = true;
-  appRoot.hidden = false;
+  document.getElementById('auth-screen').hidden = true;
+  el.app.hidden = false;
   document.getElementById('dashboard-title').focus();
   const requestedSession = new URL(location.href).searchParams.get('session');
   state.pendingSelection = requestedSession;
@@ -454,47 +465,9 @@ async function showApplication() {
   if (!state.recoveryTimer) state.recoveryTimer = setInterval(refresh, 5 * 60_000);
 }
 
-pairForm.addEventListener('submit', async event => {
-  event.preventDefault();
-  authError.hidden = true;
-  authStatus.textContent = 'Pairing…';
-  pairSubmit.disabled = true;
-  try {
-    await ompDeckApi.pair(pairToken.value.trim());
-    authStatus.textContent = 'Paired. Verifying secure session…';
-    const session = await ompDeckApi.session();
-    if (!session.authenticated) {
-      throw new Error('Pairing succeeded, but the secure session was not retained. Open OMP Deck over HTTPS.');
-    }
-    if (ompDeckApi.mode() === 'coordinator') {
-      authStatus.textContent = 'Paired. Reloading the authenticated dashboard…';
-      location.reload();
-      return;
-    }
-    await showApplication();
-  } catch (error) {
-    authStatus.textContent = '';
-    authError.textContent = error.message;
-    authError.hidden = false;
-    pairToken.select();
-  } finally {
-    pairSubmit.disabled = false;
-  }
+authRecovery = createAuthRecovery({
+  api: ompDeckApi,
+  showApplication,
+  resetApplication,
+  clearLocalData,
 });
-
-window.addEventListener('omp-deck-auth-required', () => {
-  void clearLocalData();
-  showAuthentication();
-});
-
-document.addEventListener('DOMContentLoaded', async () => {
-  try {
-    const session = await ompDeckApi.session();
-    if (session.authenticated) await showApplication();
-    else showAuthentication({clearToken: true});
-  } catch (error) {
-    authError.textContent = error.message;
-    authError.hidden = false;
-    showAuthentication();
-  }
-}, {once: true});

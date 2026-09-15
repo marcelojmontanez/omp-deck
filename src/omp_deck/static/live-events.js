@@ -1,9 +1,6 @@
 'use strict';
 
-// Python retains 2 MiB of normalized messages per session. A 32 MiB data cap
-// admits a multi-session replacement snapshot while still bounding one frame.
-const MAX_SSE_DATA = 32 * 1024 * 1024;
-const MAX_SSE_BUFFER = MAX_SSE_DATA + (4 * 1024);
+const {createParser: createSseParser} = window.ompDeckSse;
 
 function nodeState(machineId) {
   if (!state.nodes.has(machineId)) {
@@ -11,8 +8,7 @@ function nodeState(machineId) {
       presentationRevision: 0,
       snapshotGeneration: 0,
       hasSnapshot: false,
-      refreshPromise: null,
-      refreshPending: false,
+      refreshRequest: null,
       stream: null,
       lastEventId: '',
     });
@@ -29,24 +25,6 @@ function scheduleEventRecovery(machineId) {
   }, 100);
 }
 
-function parseSseFrame(frame) {
-  let event = 'message';
-  let id = null;
-  const data = [];
-  for (const line of frame.split(/\r?\n/)) {
-    if (!line || line.startsWith(':')) continue;
-    const separator = line.indexOf(':');
-    const field = separator < 0 ? line : line.slice(0, separator);
-    let value = separator < 0 ? '' : line.slice(separator + 1);
-    if (value.startsWith(' ')) value = value.slice(1);
-    if (field === 'event') event = value;
-    else if (field === 'id' && !value.includes('\0') && value.length <= 256) id = value;
-    else if (field === 'data') data.push(value);
-  }
-  const joined = data.join('\n');
-  if (joined.length > MAX_SSE_DATA) throw new Error('Event data is too large');
-  return {event, id, data: joined};
-}
 
 function applyNodeEvent(machineId, raw) {
   const node = nodeState(machineId);
@@ -76,32 +54,36 @@ async function consumeSse(response, machineId, stream) {
   if (!response.body) throw new Error('Event stream has no body');
   const reader = response.body.getReader();
   const decoder = new TextDecoder('utf-8', {fatal: true});
-  let buffer = '';
+  const isCurrent = () => (
+    !stream.controller.signal.aborted
+    && nodeState(machineId).stream === stream
+  );
+  const parser = createSseParser(parsed => {
+    if (!isCurrent()) throw new DOMException('Event stream is stale', 'AbortError');
+    if (parsed.event !== 'fleet' || !parsed.data) return;
+    applyNodeEvent(machineId, parsed.data);
+    if (parsed.id !== null) {
+      stream.lastEventId = parsed.id;
+      nodeState(machineId).lastEventId = parsed.id;
+    }
+    stream.failures = 0;
+    ompDeckApi.setMachineStatus(machineId, 'live');
+  });
+  const abortRead = () => { void reader.cancel().catch(() => {}); };
+  stream.controller.signal.addEventListener('abort', abortRead, {once: true});
   try {
-    while (!stream.controller.signal.aborted) {
+    while (isCurrent()) {
       const {value, done} = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, {stream: true});
-      while (true) {
-        const match = /\r?\n\r?\n/.exec(buffer);
-        if (!match) break;
-        if (match.index > MAX_SSE_BUFFER) throw new Error('Event frame is too large');
-        const frame = buffer.slice(0, match.index);
-        buffer = buffer.slice(match.index + match[0].length);
-        const parsed = parseSseFrame(frame);
-        if (parsed.event !== 'fleet' || !parsed.data) continue;
-        applyNodeEvent(machineId, parsed.data);
-        if (parsed.id !== null) {
-          stream.lastEventId = parsed.id;
-          nodeState(machineId).lastEventId = parsed.id;
-        }
-        stream.failures = 0;
-        ompDeckApi.setMachineStatus(machineId, 'live');
-      }
-      if (buffer.length > MAX_SSE_BUFFER) throw new Error('Event frame is too large');
+      parser.push(decoder.decode(value, {stream: true}));
     }
-    buffer += decoder.decode();
+    if (isCurrent()) {
+      parser.push(decoder.decode());
+      parser.finish();
+    }
   } finally {
+    stream.controller.signal.removeEventListener('abort', abortRead);
+    await reader.cancel().catch(() => {});
     reader.releaseLock();
   }
 }
@@ -117,7 +99,11 @@ function scheduleStreamReconnect(machineId, stream) {
 }
 
 async function connectEventStream(machineId, stream) {
-  if (stream.controller.signal.aborted || nodeState(machineId).stream !== stream) return;
+  const isCurrent = () => (
+    !stream.controller.signal.aborted
+    && nodeState(machineId).stream === stream
+  );
+  if (!isCurrent()) return;
   const machine = ompDeckApi.machine(machineId);
   if (!machine) return;
   if (machine.status !== 'live') ompDeckApi.setMachineStatus(machineId, 'connecting');
@@ -130,11 +116,12 @@ async function connectEventStream(machineId, stream) {
       headers,
       signal: stream.controller.signal,
     });
+    if (!isCurrent()) return;
     if (!response.ok) throw new Error(`Event stream returned ${response.status}`);
     await consumeSse(response, machineId, stream);
-    if (!stream.controller.signal.aborted) throw new Error('Event stream ended');
+    if (isCurrent()) throw new Error('Event stream ended');
   } catch (error) {
-    if (stream.controller.signal.aborted) return;
+    if (!isCurrent()) return;
     const current = ompDeckApi.machine(machineId);
     if (current?.status !== 'unavailable') {
       ompDeckApi.setMachineStatus(machineId, 'offline', error.message || 'Direct event stream failed');
@@ -180,4 +167,10 @@ function startEventStreams() {
 
 function stopEventStreams() {
   for (const machineId of state.nodes.keys()) stopNodeEventStream(machineId);
+}
+
+function restartEventStreams() {
+  const machineIds = ompDeckApi.machines().map(machine => machine.id);
+  for (const machineId of machineIds) stopNodeEventStream(machineId);
+  startEventStreams();
 }

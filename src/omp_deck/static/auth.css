@@ -39,6 +39,11 @@
 }
 .auth-card code { overflow-wrap: anywhere; }
 
+.pairing-fields {
+  display: grid;
+  gap: 14px;
+}
+
 .auth-card label {
   font-weight: 650;
 }
@@ -64,6 +69,16 @@
   background: #2563eb;
   color: white;
   font-weight: 700;
+}
+
+.auth-card button:focus-visible,
+.auth-card input:focus-visible {
+  outline: 3px solid #93c5fd;
+  outline-offset: 2px;
+}
+
+.auth-card button:disabled {
+  opacity: .65;
 }
 
 .auth-error {

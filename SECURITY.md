@@ -24,6 +24,17 @@ is exchanged by POST and never stored in a URL or browser storage. Device
 credentials are opaque, stored server-side only as verifiers, and can be logged
 out individually or revoked together.
 
+Device cookies are Secure, HttpOnly, SameSite=Strict, and persistent only until
+their existing server-side expiry (90 days by default). Successful session
+verification upgrades an older session-only cookie without rotating its
+credential or extending that expiry. Logout and revocation take effect
+server-side even if a browser retains an old cookie. Deleting site data or
+losing an earlier session-only cookie still requires explicit pairing.
+
+Connection errors and generic forbidden responses do not establish that a
+device is unpaired. The browser offers connection recovery until the server
+confirms authentication status; it does not bypass authentication to reconnect.
+
 For remote access:
 
 - use Tailscale Serve to terminate authenticated HTTPS and proxy to Deck's
@@ -164,6 +175,8 @@ sequences, and transport peer identity are validated at ingress. Windows blob
 reads bind ACL, owner, reparse-point, size, and final-path validation to the
 opened handles. Private responses use `no-store`, a restrictive CSP, and browser
 hardening headers.
+Only packaged public JavaScript and CSS use content-based cache revalidation.
+HTML, authentication, API, SSE, and blob responses remain `no-store`.
 
 Each HTTP listener admits at most 64 simultaneous connections and closes
 connections whose request headers do not complete within ten seconds, including

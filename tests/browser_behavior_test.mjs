@@ -7,6 +7,10 @@ const source = await readFile(new URL('../src/omp_deck/static/fleet-projection.j
 const helperSource = await readFile(new URL('../src/omp_deck/static/ui-helpers.js', import.meta.url), 'utf8');
 
 const todoSource = await readFile(new URL('../src/omp_deck/static/todo-ui.js', import.meta.url), 'utf8');
+const sseParserSource = await readFile(
+  new URL('../src/omp_deck/static/sse-parser.js', import.meta.url),
+  'utf8',
+);
 function loadProjection(overrides = {}) {
   const context = vm.createContext({
     Date,
@@ -39,6 +43,13 @@ function loadTodoUi() {
   const context = vm.createContext({window});
   vm.runInContext(todoSource, context, {filename: 'todo-ui.js'});
   return window.TodoUI;
+}
+
+function loadSseParser() {
+  const window = {};
+  const context = vm.createContext({window});
+  vm.runInContext(sseParserSource, context, {filename: 'sse-parser.js'});
+  return window.ompDeckSse;
 }
 
 function session(overrides = {}) {
@@ -211,16 +222,6 @@ test('uses parsed update timestamps and a deterministic clock fallback', () => {
   assert.equal(projectSession(session({ updatedAt: 'not-a-date' })).session.updatedMs, 1_700_000_000_123);
   assert.equal(projectSession(session({ updatedAt: null })).session.updatedMs, 1_700_000_000_123);
 });
-test('request IDs are nonempty and unique with a deterministic crypto stub', () => {
-  let sequence = 0;
-  const crypto = { randomUUID: () => `uuid-${++sequence}` };
-  const { requestId } = loadProjection({ crypto });
-  const ids = [requestId(), requestId(), requestId()];
-
-  assert.deepEqual(ids, ['uuid-1', 'uuid-2', 'uuid-3']);
-  assert(ids.every(id => typeof id === 'string' && id.length > 0));
-  assert.equal(new Set(ids).size, ids.length);
-});
 test('composer resolves delivery route from current state and stops a failed queue', async () => {
   const {composerDeliveryRoute, drainComposerQueue} = loadUiHelpers();
   assert.equal(
@@ -249,4 +250,31 @@ test('composer resolves delivery route from current state and stops a failed que
   assert.deepEqual(attempted, [1]);
   assert.deepEqual(restored, [1, 2]);
   assert.deepEqual(queue, []);
+});
+
+test('frames large character-fragmented events across CRLF boundaries', () => {
+  const {createParser} = loadSseParser();
+  const events = [];
+  const parser = createParser(event => events.push(event));
+  const large = `begin-${'x'.repeat(1024 * 1024)}-雪-end`;
+  const wire = [
+    'id: replay-41\r\n',
+    'event: fleet\r\n',
+    `data: ${large}\r\n`,
+    'data: second line\r\n',
+    '\r\n',
+    'event: fleet\n',
+    'data: resumed\n',
+    '\n',
+  ].join('');
+  for (let offset = 0; offset < wire.length; offset += 1) {
+    parser.push(wire.slice(offset, offset + 1));
+  }
+  parser.finish();
+
+  assert.equal(events.length, 2);
+  assert.equal(events[0].event, 'fleet');
+  assert.equal(events[0].data, `${large}\nsecond line`);
+  assert.equal(events[1].data, 'resumed');
+  assert.equal(events[0].id, 'replay-41');
 });

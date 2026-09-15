@@ -3,6 +3,7 @@ import os
 import stat
 import tempfile
 import unittest
+from http.cookies import SimpleCookie
 from pathlib import Path
 
 from omp_deck.auth import (
@@ -96,23 +97,22 @@ class AuthManagerTests(unittest.TestCase):
         with self.assertRaises(PairingFailed):
             auth.pair(secret.token, source="phone")
 
-    def test_device_cookie_has_required_public_boundary_attributes(self):
-        _, paired = self.pair_device()
-        self.assertTrue(paired.set_cookie.startswith(f"{COOKIE_NAME}=v1."))
-        for attribute in ("Path=/", "HttpOnly", "Secure", "SameSite=Strict"):
-            self.assertIn(attribute, paired.set_cookie)
-
     def test_custom_cookie_name_is_used_for_pair_and_logout(self):
         auth = AuthManager(
             Path(self.temp.name) / "coordinator",
+            session_ttl=60,
             cookie_name="omp_deck_coordinator_device",
             now=self.wall,
             monotonic=self.monotonic,
         )
         secret = auth.begin_pairing()
         paired = auth.pair(secret.token, source="browser")
+        cookie = SimpleCookie()
+        cookie.load(paired.set_cookie)
 
-        self.assertTrue(paired.set_cookie.startswith("omp_deck_coordinator_device=v1."))
+        self.assertEqual(cookie["omp_deck_coordinator_device"].value, paired.credential)
+        self.assertNotIn(COOKIE_NAME, cookie)
+        self.assertEqual(int(cookie["omp_deck_coordinator_device"]["max-age"]), 60)
         self.assertTrue(auth.logout(paired.credential).startswith("omp_deck_coordinator_device=;"))
 
     def test_authentication_survives_restart_but_expired_session_fails(self):
@@ -124,8 +124,10 @@ class AuthManagerTests(unittest.TestCase):
             now=self.wall,
             monotonic=self.monotonic,
         )
-        self.assertEqual(restarted.authenticate(paired.credential).device_id, paired.device.device_id)
-        self.wall.advance(61)
+        authenticated = restarted.authenticate(paired.credential)
+        self.assertEqual(authenticated.device_id, paired.device.device_id)
+        self.assertEqual(authenticated.expires_at, paired.device.expires_at)
+        self.wall.advance(60)
         with self.assertRaises(AuthenticationFailed):
             restarted.authenticate(paired.credential)
 

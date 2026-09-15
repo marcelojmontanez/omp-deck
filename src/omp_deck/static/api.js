@@ -7,14 +7,14 @@
   const RETRY_RENEW_MS = 5_000;
   const machines = new Map();
   let csrfToken = null;
-  let authGeneration = 0;
+  let authGeneration = 0, sessionGeneration = 0;
   let mode = null;
-  let modePromise = null;
-  let renewalPromise = null;
-  let renewalTimer = null;
-  let expiryTimer = null;
+  let modeRequest = null;
+  let renewalPromise = null, renewalController = null;
+  let renewalTimer = null, expiryTimer = null;
   let rosterInitialized = false;
   let coordinatorAvailable = true;
+  const {sessionKey, splitSessionKey, routeRequest} = createSessionRouting(() => mode === 'local');
 
   function emit(name, detail = {}) {
     window.dispatchEvent(new CustomEvent(name, {detail}));
@@ -93,37 +93,50 @@
     return {id, name, origin, accessToken: value.accessToken || null, expiresAt: value.expiresAt || 0};
   }
 
-  async function ensureMode() {
+  function initializeLocalMachine() {
+    if (mode !== 'local') return;
+    machines.set(LOCAL_MACHINE_ID, {
+      id: LOCAL_MACHINE_ID,
+      name: location.host,
+      origin: location.origin,
+      local: true,
+      accessToken: null,
+      expiresAt: Number.MAX_SAFE_INTEGER,
+      status: 'connecting',
+      error: '',
+    });
+  }
+
+  async function ensureMode(options = {}) {
     if (mode) return mode;
-    if (!modePromise) {
-      modePromise = (async () => {
-        const response = await fetch('/api/client-config', {cache: 'no-store', credentials: 'same-origin'});
+    if (!modeRequest || modeRequest.signal?.aborted) {
+      const request = {signal: options.signal, promise: null};
+      modeRequest = request;
+      request.promise = (async () => {
+        const {response, payload} = await ompDeckNetwork.fetchJsonBounded('/api/client-config', {
+          cache: 'no-store',
+          credentials: 'same-origin',
+          signal: options.signal,
+        });
         if (!response.ok) throw new Error(`Client configuration returned ${response.status}`);
-        const payload = await response.json();
+        if (request.signal?.aborted || modeRequest !== request) {
+          throw new DOMException('Client configuration request is stale', 'AbortError');
+        }
         if (!payload || !['local', 'coordinator'].includes(payload.mode)) {
           throw new Error('Invalid client configuration');
         }
         mode = payload.mode;
         if (mode === 'local') {
-          machines.set(LOCAL_MACHINE_ID, {
-            id: LOCAL_MACHINE_ID,
-            name: location.host,
-            origin: location.origin,
-            local: true,
-            accessToken: null,
-            expiresAt: Number.MAX_SAFE_INTEGER,
-            status: 'connecting',
-            error: '',
-          });
+          initializeLocalMachine();
           notifyMachines();
         }
         return mode;
       })().catch(error => {
-        modePromise = null;
+        if (modeRequest === request) modeRequest = null;
         throw error;
       });
     }
-    return modePromise;
+    return modeRequest.promise;
   }
 
   function authRequired(requestGeneration) {
@@ -145,6 +158,7 @@
     let response;
     try {
       response = await fetch(path, {...options, headers, credentials: 'same-origin'});
+      if (options.signal?.aborted) throw new DOMException('Request is stale', 'AbortError');
       coordinatorAvailable = true;
       emit('omp-deck-coordinator-status', {available: true});
     } catch (error) {
@@ -153,36 +167,44 @@
       emit('omp-deck-coordinator-status', {available: false, error: 'Coordinator is unreachable'});
       throw new Error(`Coordinator is unreachable: ${error.message}`);
     }
-    if (
-      response.status === 401
-      || (response.status === 403 && path !== '/api/auth/pair')
-    ) authRequired(requestGeneration);
+    if (response.status === 401) authRequired(requestGeneration);
     return response;
   }
 
-  async function session() {
-    await ensureMode();
+  async function session(options = {}) {
     const requestGeneration = authGeneration;
-    const response = await fetch('/api/auth/session', {cache: 'no-store', credentials: 'same-origin'});
+    const requestSessionGeneration = ++sessionGeneration;
+    const modeRequest = ensureMode(options);
+    const sessionRequest = ompDeckNetwork.fetchJsonBounded('/api/auth/session', {
+      cache: 'no-store',
+      credentials: 'same-origin',
+      signal: options.signal,
+    });
+    const [, {response, payload}] = await Promise.all([modeRequest, sessionRequest]);
     if (!response.ok) throw new Error(`Authentication returned ${response.status}`);
-    const payload = await response.json();
-    if (requestGeneration === authGeneration) {
-      authenticated = payload.authenticated === true;
-      csrfToken = authenticated ? payload.csrfToken : null;
+    if (options.signal?.aborted || requestSessionGeneration !== sessionGeneration || requestGeneration !== authGeneration) {
+      throw new DOMException('Authentication request is stale', 'AbortError');
     }
+    if (typeof payload?.authenticated !== 'boolean'
+      || (payload.authenticated && (typeof payload.csrfToken !== 'string' || !payload.csrfToken))) {
+      throw new Error('Invalid authentication response');
+    }
+    authenticated = payload.authenticated === true;
+    csrfToken = authenticated ? payload.csrfToken : null;
     return payload;
   }
 
-  async function pair(token) {
-    await ensureMode();
-    const response = await fetch('/api/auth/pair', {
+  async function pair(token, options = {}) {
+    await ensureMode(options);
+    const {response, payload} = await ompDeckNetwork.fetchJsonBounded('/api/auth/pair', {
       method: 'POST',
       credentials: 'same-origin',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({token}),
+      signal: options.signal,
     });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || `Pairing returned ${response.status}`);
+    if (!response.ok) throw new Error(payload?.error || `Pairing returned ${response.status}`);
+    if (options.signal?.aborted) throw new DOMException('Pairing request is stale', 'AbortError');
     authenticated = true;
     authGeneration += 1;
     csrfToken = payload.csrfToken;
@@ -214,11 +236,14 @@
     }, Math.max(250, earliest - Date.now() + 25));
   }
 
-  async function renewAccess() {
+  async function renewAccess(options = {}) {
     await ensureMode();
     if (mode !== 'coordinator') return machineList();
     if (!authenticated) throw new Error('Authentication required');
-    if (renewalPromise) return renewalPromise;
+    if (renewalPromise && !options.replace) return renewalPromise;
+    renewalController?.abort();
+    const controller = new AbortController();
+    renewalController = controller;
     const requestGeneration = authGeneration;
     renewalPromise = (async () => {
       let response;
@@ -228,10 +253,11 @@
           cache: 'no-store',
           headers: {'Content-Type': 'application/json'},
           body: '{}',
+          signal: controller.signal,
         });
         if (!response.ok) throw new Error(`Fleet access returned ${response.status}`);
         const payload = await response.json();
-        if (!authenticated || requestGeneration !== authGeneration) {
+        if (controller.signal.aborted || !authenticated || requestGeneration !== authGeneration) {
           throw new DOMException('Machine access request is stale', 'AbortError');
         }
         if (payload?.version !== 1 || !Array.isArray(payload.machines) || payload.machines.length > 32) {
@@ -268,7 +294,7 @@
         scheduleAccessTimers();
         return machineList();
       } catch (error) {
-        if (requestGeneration !== authGeneration) throw error;
+        if (controller.signal.aborted || requestGeneration !== authGeneration) throw error;
         if (authenticated) {
           coordinatorAvailable = false;
           emit('omp-deck-coordinator-status', {available: false, error: error.message});
@@ -283,7 +309,12 @@
         }
         throw error;
       }
-    })().finally(() => { renewalPromise = null; });
+    })().finally(() => {
+      if (renewalController === controller) {
+        renewalPromise = null;
+        renewalController = null;
+      }
+    });
     return renewalPromise;
   }
 
@@ -293,61 +324,6 @@
     return machineList();
   }
 
-  function encodeBase64Url(value) {
-    const bytes = new TextEncoder().encode(value);
-    let binary = '';
-    for (const byte of bytes) binary += String.fromCharCode(byte);
-    return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
-  }
-
-  function decodeBase64Url(value) {
-    if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error('Invalid session route');
-    const padded = value.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - value.length % 4) % 4);
-    const binary = atob(padded);
-    const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
-    return new TextDecoder('utf-8', {fatal: true}).decode(bytes);
-  }
-
-  function sessionKey(machineId, localId) {
-    if (mode === 'local' || machineId === LOCAL_MACHINE_ID) return localId;
-    return `fleet-${encodeBase64Url(JSON.stringify([machineId, localId]))}`;
-  }
-
-  function splitSessionKey(key) {
-    if (typeof key !== 'string') throw new Error('Invalid session route');
-    if (!key.startsWith('fleet-')) return {machineId: LOCAL_MACHINE_ID, localId: key};
-    let decoded;
-    try {
-      decoded = JSON.parse(decodeBase64Url(key.slice(6)));
-    } catch {
-      throw new Error('Invalid session route');
-    }
-    if (
-      !Array.isArray(decoded) || decoded.length !== 2
-      || typeof decoded[0] !== 'string' || typeof decoded[1] !== 'string' || !decoded[1]
-    ) throw new Error('Invalid session route');
-    return {machineId: decoded[0], localId: decoded[1]};
-  }
-
-  function routeRequest(path, requestedMachineId) {
-    if (typeof path !== 'string' || !path.startsWith('/api/')) throw new Error('Invalid API route');
-    const match = /^\/api\/sessions\/([^/]+)(\/.*)?$/.exec(path);
-    if (!match) return {machineId: requestedMachineId, path};
-    let key;
-    try {
-      key = decodeURIComponent(match[1]);
-    } catch {
-      throw new Error('Invalid session route');
-    }
-    const route = mode === 'local'
-      ? {machineId: LOCAL_MACHINE_ID, localId: key}
-      : splitSessionKey(key);
-    if (requestedMachineId && requestedMachineId !== route.machineId) throw new Error('Conflicting machine route');
-    return {
-      machineId: route.machineId,
-      path: `/api/sessions/${encodeURIComponent(route.localId)}${match[2] || ''}`,
-    };
-  }
 
   async function directRequest(path, options, allowRenew = true) {
     if (!authenticated) throw new Error('Authentication required');
@@ -385,7 +361,8 @@
       setMachineStatus(machines.get(machineId), 'offline', `Direct connection failed: ${error.message}`);
       throw new Error(`Cannot reach ${machine.name} directly. Check network, CORS, HTTPS, and private-network access.`);
     }
-    if (requestGeneration !== authGeneration || machines.get(machineId)?.origin !== machine.origin) {
+    if (fetchOptions.signal?.aborted
+      || requestGeneration !== authGeneration || machines.get(machineId)?.origin !== machine.origin) {
       throw new DOMException('Machine request is stale', 'AbortError');
     }
     if (response.status === 401 && allowRenew) {
@@ -434,25 +411,15 @@
   }
 
   function clearFleet() {
-    clearTimeout(renewalTimer);
-    clearTimeout(expiryTimer);
+    renewalController?.abort();
+    renewalController = renewalPromise = null;
+    clearTimeout(renewalTimer); clearTimeout(expiryTimer);
     renewalTimer = null;
     expiryTimer = null;
     rosterInitialized = false;
     const removedIds = [...machines.keys()];
     machines.clear();
-    if (mode === 'local') {
-      machines.set(LOCAL_MACHINE_ID, {
-        id: LOCAL_MACHINE_ID,
-        name: location.host,
-        origin: location.origin,
-        local: true,
-        accessToken: null,
-        expiresAt: Number.MAX_SAFE_INTEGER,
-        status: 'connecting',
-        error: '',
-      });
-    }
+    initializeLocalMachine();
     notifyMachines(removedIds);
   }
 
@@ -468,6 +435,7 @@
     initializeFleet,
     authenticated: () => authenticated,
     renewAccess,
+    recoverAccess: () => renewalPromise ? renewAccess({replace: true}) : Promise.resolve(machineList()),
     machines: machineList,
     machine: id => machines.has(id) ? publicMachine(machines.get(id)) : null,
     setMachineStatus: (id, status, error) => setMachineStatus(machines.get(id), status, error),

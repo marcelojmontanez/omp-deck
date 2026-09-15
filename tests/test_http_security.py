@@ -4,11 +4,25 @@ import json
 import tempfile
 import threading
 import unittest
+from email.utils import parsedate_to_datetime
+from http.cookies import SimpleCookie
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from omp_deck import attachments, server
+from omp_deck.auth import AuthManager
+
+
+class Clock:
+    def __init__(self, value=1_700_000_000):
+        self.value = value
+
+    def __call__(self):
+        return self.value
+
+    def advance(self, seconds):
+        self.value += seconds
 
 
 class HttpSecurityTests(unittest.TestCase):
@@ -19,6 +33,7 @@ class HttpSecurityTests(unittest.TestCase):
             allowed_hosts=("127.0.0.1",),
             state_root=Path(self.directory.name),
         )
+        self.settings = settings
         self.settings_patch = patch.object(server, "SETTINGS", settings)
         self.settings_patch.start()
         self.addCleanup(self.settings_patch.stop)
@@ -31,7 +46,8 @@ class HttpSecurityTests(unittest.TestCase):
         )
         self.blob_patch.start()
         self.addCleanup(self.blob_patch.stop)
-        server._auth_manager = None
+        self.wall = Clock()
+        server._auth_manager = AuthManager(settings.state_root, session_ttl=60, now=self.wall)
         self.addCleanup(setattr, server, "_auth_manager", None)
         self.httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
@@ -125,7 +141,8 @@ class HttpSecurityTests(unittest.TestCase):
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
 
-    def test_pairing_requires_same_origin_and_issues_secure_cookie(self):
+    def test_pairing_requires_same_origin_and_issues_persistent_secure_cookie(self):
+        self.wall.advance(0.75)
         secret = server.auth_manager().begin_pairing()
         status, _, _ = self.request("POST", "/api/auth/pair", {"token": secret.token})
         self.assertEqual(status, 403)
@@ -139,9 +156,41 @@ class HttpSecurityTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertTrue(payload["authenticated"])
-        self.assertIn("HttpOnly", headers["Set-Cookie"])
-        self.assertIn("Secure", headers["Set-Cookie"])
-        self.assertIn("SameSite=Strict", headers["Set-Cookie"])
+        cookie = SimpleCookie()
+        cookie.load(headers["Set-Cookie"])
+        morsel = cookie["omp_deck_device"]
+        self.assertEqual(int(morsel["max-age"]), 59)
+        self.assertEqual(
+            int(parsedate_to_datetime(morsel["expires"]).timestamp()),
+            int(self.wall.value) + 60,
+        )
+        self.assertTrue(morsel["httponly"])
+        self.assertTrue(morsel["secure"])
+        self.assertEqual(morsel["samesite"], "Strict")
+
+    def test_session_check_adopts_cookie_without_renewing_expiry_across_restart(self):
+        cookie, _ = self.pair()
+        credential = cookie.split("=", 1)[1]
+        original_expiry = server.auth_manager().authenticate(credential).expires_at
+        self.wall.advance(19)
+        server._auth_manager = AuthManager(self.settings.state_root, session_ttl=60, now=self.wall)
+
+        status, headers, payload = self.request("GET", "/api/auth/session", headers={"Cookie": cookie})
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["authenticated"])
+        adopted = SimpleCookie()
+        adopted.load(headers["Set-Cookie"])
+        morsel = adopted["omp_deck_device"]
+        self.assertEqual(morsel.value, credential)
+        self.assertEqual(int(morsel["max-age"]), 41)
+        self.assertEqual(int(parsedate_to_datetime(morsel["expires"]).timestamp()), original_expiry)
+        self.assertEqual(server.auth_manager().authenticate(credential).expires_at, original_expiry)
+
+        self.wall.advance(41)
+        status, headers, payload = self.request("GET", "/api/auth/session", headers={"Cookie": cookie})
+        self.assertEqual((status, payload), (200, {"authenticated": False}))
+        self.assertIsNone(headers.get("Set-Cookie"))
 
     def test_mutations_require_session_bound_csrf(self):
         cookie, csrf = self.pair()
@@ -165,6 +214,31 @@ class HttpSecurityTests(unittest.TestCase):
 
         status, _, _ = self.request("GET", "/api/sessions", headers={"Cookie": cookie})
         self.assertEqual(status, 401)
+
+    def test_revoke_all_rejects_every_cookie_and_clears_the_present_cookie(self):
+        first_cookie, first_csrf = self.pair()
+        second_cookie, _ = self.pair()
+        request_headers = {
+            "Cookie": first_cookie,
+            "Origin": self.origin,
+            "Sec-Fetch-Site": "same-origin",
+            "X-OMP-Deck-CSRF": first_csrf,
+        }
+
+        status, headers, payload = self.request("POST", "/api/auth/revoke-all", {}, request_headers)
+
+        self.assertEqual((status, payload), (200, {"ok": True}))
+        cleared = SimpleCookie()
+        cleared.load(headers["Set-Cookie"])
+        self.assertEqual(cleared["omp_deck_device"]["max-age"], "0")
+        for cookie in (first_cookie, second_cookie):
+            status, session_headers, payload = self.request(
+                "GET",
+                "/api/auth/session",
+                headers={"Cookie": cookie},
+            )
+            self.assertEqual((status, payload), (200, {"authenticated": False}))
+            self.assertIsNone(session_headers.get("Set-Cookie"))
 
     def test_invalid_host_is_rejected_before_static_or_api_access(self):
         connection = http.client.HTTPConnection("127.0.0.1", self.httpd.server_port)

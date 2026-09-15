@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import os
 import subprocess
 import sys
@@ -8,6 +9,7 @@ from metrics import MAINTAINED_SOURCES
 
 ROOT = Path(__file__).resolve().parents[1]
 NODE_BIN = os.environ.get("NODE_BIN", "node")
+NPM_BIN = os.environ.get("NPM_BIN", "npm.cmd" if os.name == "nt" else "npm")
 EXCLUDED_PARTS = {
     ".git",
     ".mypy_cache",
@@ -86,6 +88,9 @@ def check_javascript():
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Check repository contracts and optional release behavior")
+    parser.add_argument("--release", action="store_true", help="also require real-browser and OMP plugin checks")
+    arguments = parser.parse_args()
     failures = check_text_files()
     if failures:
         print("\n".join(failures), file=sys.stderr)
@@ -101,7 +106,16 @@ def main():
     for command in checks:
         if run(command):
             return 1
-    return check_javascript()
+    status = check_javascript()
+    if status or not arguments.release:
+        return status
+    for command in (
+        [NPM_BIN, "run", "test:browser"],
+        [NPM_BIN, "--prefix", "src/omp_deck/plugin", "run", "check"],
+    ):
+        if run(command):
+            return 1
+    return 0
 
 
 if __name__ == "__main__":

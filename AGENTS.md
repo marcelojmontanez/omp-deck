@@ -234,6 +234,8 @@ Production cutover is one final operation with a prepared rollback. If health or
 
 ## Git and change discipline
 
+- Keep completed work on `main` unless the user requests another branch. Do not create audit or rollback branches for the user to manage.
+- Rollback is handled by reverting the relevant focused commits when requested, preserving unrelated work and history.
 - Commit completed, verified feature and bug-fix work when it forms a coherent change; explicit user permission is not required. Do not commit exploratory or incomplete work.
 - Never publish, push, open an issue, or open a pull request unless explicitly requested.
 - Preserve user changes and untracked files.

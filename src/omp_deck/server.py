@@ -389,6 +389,10 @@ class Handler(DeckHttpHandler):
         data = self._read_post_body(request_path)
         if data is None:
             return
+        # Authentication can expire or be revoked while a bounded body is read.
+        # Revalidate at the action boundary rather than dispatching stale authority.
+        if not self._authorize_mutation():
+            return
         self._normalized_action(request_path, data)
 
     def _authorize_mutation(self):

@@ -440,6 +440,25 @@ class NormalizedHttpTests(unittest.TestCase):
         self.assertEqual(payload, {"error": "authentication and CSRF token required"})
         self.assertEqual(self.rpc.calls, [])
 
+    def test_revocation_during_body_read_stops_mutation_before_dispatch(self):
+        read_post_body = server.Handler._read_post_body
+        credential = self.cookie.split("=", 1)[1]
+
+        def revoke_after_read(handler, request_path):
+            data = read_post_body(handler, request_path)
+            server.auth_manager().logout(credential)
+            return data
+
+        with patch.object(server.Handler, "_read_post_body", new=revoke_after_read):
+            status, _, payload = self.post(
+                "/api/sessions/rpc-1/interrupt",
+                {"requestId": "revoked-in-flight"},
+            )
+
+        self.assertEqual(status, 403)
+        self.assertEqual(payload, {"error": "authentication and CSRF token required"})
+        self.assertEqual(self.rpc.calls, [])
+
     def test_stop_runtime_closes_rpc_after_terminal_failure(self):
         calls = []
 

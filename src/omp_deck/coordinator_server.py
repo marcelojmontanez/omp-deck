@@ -166,11 +166,8 @@ class CoordinatorHandler(DeckHttpHandler):
         if not self.browser_origin_valid():
             self.reply(403, {"error": "request origin is not allowed"})
             return
-        # Tie every grant to the authorization attempt, not delayed signing.
-        # A concurrent revocation cannot gain an extra lifetime from that delay.
-        issued_at = int(time.time())
         try:
-            device = self.request_authenticated()
+            self.request_authenticated()
         except AuthenticationFailed:
             self.reply(401, {"error": "authentication required"})
             return
@@ -195,6 +192,17 @@ class CoordinatorHandler(DeckHttpHandler):
             return
         if data:
             self.reply(400, {"error": "request body must be empty"})
+            return
+        # Revalidate after the body read, anchoring the ticket lifetime before
+        # that authorization attempt so delayed signing cannot extend access.
+        issued_at = int(time.time())
+        try:
+            device = self.request_authenticated(csrf=True)
+        except AuthenticationFailed:
+            self.reply(403, {"error": "valid CSRF token required"})
+            return
+        except AuthError:
+            self.reply(503, {"error": "authentication state unavailable"})
             return
         try:
             private_key, machines = self.context.store.access_material()

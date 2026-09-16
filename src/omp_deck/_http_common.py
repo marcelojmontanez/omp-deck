@@ -23,6 +23,7 @@ class ThreadingHTTPServer(_ThreadingHTTPServer):
     block_on_close = False
     max_connections = 64
     header_timeout = 10.0
+    body_timeout = 30.0
 
     def __init__(self, server_address, handler, bind_and_activate=True):
         self._connections = threading.BoundedSemaphore(self.max_connections)

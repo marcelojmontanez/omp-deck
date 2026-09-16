@@ -2,6 +2,8 @@ import base64
 import binascii
 import json
 import re
+import socket
+import threading
 from http.cookies import SimpleCookie
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -18,12 +20,20 @@ def read_json_request(handler, max_bytes=64 * 1024):
     length = int(header)
     if length > max_bytes:
         raise ValueError(f"request exceeds the {max_bytes}-byte limit")
+    timeout = handler.server.body_timeout
     previous_timeout = handler.connection.gettimeout()
-    handler.connection.settimeout(10)
+    expired = threading.Event()
+    deadline = threading.Timer(timeout, _expire_body, (handler.connection, expired))
+    deadline.daemon = True
+    handler.connection.settimeout(min(10.0, timeout))
+    deadline.start()
     try:
         body = handler.rfile.read(length)
     finally:
+        deadline.cancel()
         handler.connection.settimeout(previous_timeout)
+    if expired.is_set():
+        raise TimeoutError("request body timed out")
     if len(body) != length:
         raise ValueError("incomplete request body")
     try:
@@ -33,6 +43,14 @@ def read_json_request(handler, max_bytes=64 * 1024):
     if not isinstance(value, dict):
         raise ValueError("request body must be a JSON object")
     return value
+
+
+def _expire_body(connection, expired):
+    expired.set()
+    try:
+        connection.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
 
 
 def decoded_segment(value, name):

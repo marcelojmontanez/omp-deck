@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from omp_deck.auth import AuthenticationFailed
 from omp_deck.coordinator_cli import run as run_coordinator
-from omp_deck.coordinator_server import CoordinatorContext, CoordinatorHTTPServer
+from omp_deck.coordinator_server import CoordinatorContext, CoordinatorHandler, CoordinatorHTTPServer
 from omp_deck.coordinator_settings import CoordinatorSettings, load_coordinator_settings
 from omp_deck.coordinator_store import CoordinatorStateError, CoordinatorStore
 from omp_deck.fleet_protocol import verify_ticket
@@ -416,6 +416,32 @@ class CoordinatorHTTPTests(unittest.TestCase):
             {**base, "Origin": "https://attacker.example", "X-OMP-Deck-CSRF": csrf},
         )
         self.assertEqual(status, 403)
+
+    def test_revocation_during_body_read_stops_ticket_issuance(self):
+        cookie, csrf = self.pair()
+        credential = cookie.split("=", 1)[1]
+        read_json = CoordinatorHandler.read_json
+
+        def revoke_after_read(handler, max_bytes):
+            data = read_json(handler, max_bytes)
+            self.context.auth.revoke_all(credential, csrf)
+            return data
+
+        with patch.object(CoordinatorHandler, "read_json", new=revoke_after_read):
+            status, _, payload = self.request(
+                "POST",
+                "/api/fleet/access",
+                {},
+                {
+                    "Cookie": cookie,
+                    "Origin": self.origin,
+                    "Sec-Fetch-Site": "same-origin",
+                    "X-OMP-Deck-CSRF": csrf,
+                },
+            )
+
+        self.assertEqual(status, 403)
+        self.assertEqual(payload, {"error": "valid CSRF token required"})
 
     def test_removal_stops_renewal_while_existing_ticket_has_bounded_lifetime(self):
         cookie, csrf = self.pair()

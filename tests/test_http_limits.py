@@ -29,9 +29,18 @@ class HttpLimitTests(unittest.TestCase):
                 time.sleep(response_delay)
                 self.reply(200, {"ok": True})
 
+            def do_POST(self):
+                try:
+                    self.read_json()
+                except TimeoutError:
+                    self.close_connection = True
+                    return
+                self.reply(200, {"ok": True})
+
         class LimitedServer(ThreadingHTTPServer):
             max_connections = limit
             header_timeout = deadline
+            body_timeout = deadline
 
             def process_request_thread(self, request, client_address):
                 try:
@@ -80,6 +89,38 @@ class HttpLimitTests(unittest.TestCase):
                 while not stop.wait(0.03):
                     try:
                         client.sendall(b"x")
+                    except OSError:
+                        return
+
+            sender = threading.Thread(target=trickle)
+            sender.start()
+            try:
+                client.settimeout(1)
+                try:
+                    received = client.recv(4096)
+                except ConnectionResetError:
+                    received = b""
+                self.assertEqual(received, b"")
+            finally:
+                stop.set()
+                sender.join(2)
+
+    def test_partial_body_expires_even_while_bytes_keep_arriving(self):
+        with self.running_server() as (address, started), socket.create_connection(address, timeout=2) as client:
+            started.get(timeout=2)
+            client.sendall(
+                b"POST / HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"Content-Length: 10000\r\n"
+                b"Content-Type: application/json\r\n\r\n"
+                b"{"
+            )
+            stop = threading.Event()
+
+            def trickle():
+                while not stop.wait(0.03):
+                    try:
+                        client.sendall(b" ")
                     except OSError:
                         return
 

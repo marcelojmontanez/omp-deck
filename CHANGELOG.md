@@ -10,6 +10,7 @@
 - Make ongoing sessions the default dashboard, with a quiet secondary History view for retained unattached records and ongoing-only summary counts.
 - Add optional owner-account sign-in through Tailscale Serve for standalone nodes and shared dashboards. Pairing remains the default; opting in replaces codes with an explicit account allowlist while retaining browser cookies, CSRF protection, and fleet ticket checks.
 - Add server-persisted Deck display names and pinning for managed RPC, Collab, and extension sessions, with explicit machine/project labels and duplicate-session disambiguation.
+- Display standalone assistant Markdown references to existing private OMP image blobs through the authenticated, tap-to-enlarge image viewer. Local paths, external image URLs, user text, and code examples do not become image attachments.
 
 ### Changed
 

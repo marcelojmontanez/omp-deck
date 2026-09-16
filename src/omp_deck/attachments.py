@@ -10,6 +10,39 @@ _DIGEST = re.compile(r"[a-f0-9]{64}")
 _PROFILE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 _MAX_BLOB_BYTES = 16 * 1024 * 1024
 _CANDIDATE_SUFFIXES = ("", ".png", ".jpg", ".jpeg", ".gif", ".webp")
+_ASSISTANT_IMAGE = re.compile(r"!\[[^\]\r\n]{0,256}\]\(blob:sha256:([a-f0-9]{64})\)[ \t]*")
+_CODE_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
+
+
+def assistant_image_content(text):
+    """Project standalone private image references, never code examples or local paths."""
+    if "](blob:sha256:" not in text:
+        return [{"type": "text", "text": text}]
+    result = []
+    pending = []
+    fence = None
+    for line in text.splitlines(keepends=True):
+        value = line.rstrip("\r\n")
+        marker = _CODE_FENCE.fullmatch(value)
+        if marker:
+            token, remainder = marker.groups()
+            if fence is None:
+                fence = token
+            elif token[0] == fence[0] and len(token) >= len(fence) and not remainder.strip():
+                fence = None
+            pending.append(line)
+            continue
+        image = _ASSISTANT_IMAGE.fullmatch(value) if fence is None else None
+        if image is None:
+            pending.append(line)
+            continue
+        if pending:
+            result.append({"type": "text", "text": "".join(pending)})
+            pending.clear()
+        result.append({"type": "image", "url": f"/api/blob/{image[1]}"})
+    if pending:
+        result.append({"type": "text", "text": "".join(pending)})
+    return result
 
 
 def blob_root():

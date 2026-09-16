@@ -9,6 +9,7 @@ from typing import Any
 
 from ._session_activity import completion_state
 from ._thinking import normalized_thinking, thinking_levels_for_model
+from .attachments import assistant_image_content
 from .rpc_adapter import AdapterSnapshot, PendingUiRequest
 
 CAPABILITIES: dict[str, dict[str, bool]] = {
@@ -123,7 +124,10 @@ def _message_content(message: Mapping[str, Any]) -> list[Any]:
         if not isinstance(value, Mapping):
             continue
         if value.get("type") == "text" and isinstance(value.get("text"), str):
-            result.append({"type": "text", "text": value["text"]})
+            if message.get("role") == "assistant":
+                result.extend(assistant_image_content(value["text"]))
+            else:
+                result.append({"type": "text", "text": value["text"]})
         elif value.get("type") == "image":
             data = value.get("data")
             digest = data.removeprefix("blob:sha256:") if isinstance(data, str) else ""

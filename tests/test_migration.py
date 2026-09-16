@@ -5,6 +5,7 @@ from pathlib import Path
 
 from omp_deck._terminal_discovery import terminal_id
 from omp_deck.migration import apply_migration, migration_plan
+from omp_deck.projects import resolve_project_path
 from omp_deck.read_cursors import CursorStore
 from omp_deck.registry_store import RegistryStore
 from omp_deck.settings import Settings
@@ -87,6 +88,20 @@ class MigrationTests(unittest.TestCase):
         )
         self.assertEqual(repeated["sessionsImported"], 0)
         self.assertEqual(len(RegistryStore(self.state / "registry.json").load()), 1)
+
+    def test_nested_project_migrates_with_restartable_relative_identity(self):
+        self.project = self.projects / "group" / "deck"
+        self.project.mkdir(parents=True)
+        self.write_legacy_state()
+
+        apply_migration(self.settings)
+
+        record = RegistryStore(self.state / "registry.json").load()[0]
+        self.assertEqual(record["project"]["name"], "group/deck")
+        self.assertEqual(
+            resolve_project_path(self.settings.project_root, record["project"]["name"]),
+            self.project,
+        )
 
     def test_rerun_does_not_replace_a_newer_read_cursor(self):
         self.write_legacy_state()

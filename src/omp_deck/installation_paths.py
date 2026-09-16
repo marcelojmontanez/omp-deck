@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ._platform_paths import (
+    _has_link_like_component,
+    _is_link_like,
     config_home,
     data_home,
     default_config_path,
@@ -21,15 +23,6 @@ if os.name == "nt":
 MANIFEST_NAME = ".install-manifest.json"
 OWNERSHIP_MARKER = ".omp-deck-owned"
 MANIFEST_VERSION = 3
-_FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
-
-
-def _is_link_like(path):
-    try:
-        info = path.lstat()
-    except OSError:
-        return False
-    return path.is_symlink() or bool(getattr(info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 @dataclass(frozen=True)
@@ -129,8 +122,8 @@ def validate_manifest(paths):
 
 
 def validate_ownership_claim(root, allowed_existing=()):
-    if _is_link_like(root):
-        raise RuntimeError(f"refusing to mark symlink or reparse point as owned: {root}")
+    if _has_link_like_component(root):
+        raise RuntimeError(f"refusing to mark path containing a symlink or reparse point as owned: {root}")
     if not root.exists():
         return
     info = root.stat(follow_symlinks=False)
@@ -157,8 +150,8 @@ def validate_ownership_claim(root, allowed_existing=()):
 
 def mark_owned(root, allowed_existing=(), *, mode=None):
     validate_ownership_claim(root, allowed_existing)
-    if _is_link_like(root):
-        raise RuntimeError(f"refusing to mark symlink or reparse point as owned: {root}")
+    if _has_link_like_component(root):
+        raise RuntimeError(f"refusing to mark path containing a symlink or reparse point as owned: {root}")
     created = False
     if root.exists():
         info = root.stat(follow_symlinks=False)
@@ -227,17 +220,22 @@ def validate_owned_root(root, approved_roots):
         absolute_path(data_home()).resolve(),
         absolute_path(state_home()).resolve(),
     }
-    if _is_link_like(root):
-        raise RuntimeError(f"refusing to purge symlink or reparse point: {root}")
+    if _has_link_like_component(root):
+        raise RuntimeError(f"refusing to purge path containing a symlink or reparse point: {root}")
     try:
         resolved = root.resolve(strict=True)
     except FileNotFoundError:
         return None
     if resolved in forbidden or len(resolved.parts) < 4:
         raise RuntimeError(f"refusing to purge unsafe path: {root}")
-    if os.name == "nt" and (not owned_by_current_user(resolved) or not is_private_path(resolved)):
+    info = resolved.stat(follow_symlinks=False)
+    if os.name == "nt":
+        unsafe_owner = not owned_by_current_user(resolved) or not is_private_path(resolved)
+    else:
+        unsafe_owner = info.st_uid != os.geteuid() or bool(info.st_mode & 0o022)
+    if unsafe_owner:
         raise RuntimeError(f"refusing to purge unsafe path: {root}")
-    if not resolved.is_dir() or not has_ownership_marker(resolved):
+    if not stat.S_ISDIR(info.st_mode) or not has_ownership_marker(resolved):
         raise RuntimeError(f"refusing to purge unowned path: {root}")
     return resolved
 

@@ -172,6 +172,18 @@ class BlobDirectoryResolutionTests(unittest.TestCase):
         ):
             self.assertIsNone(attachments.read_blob(self.digest))
 
+    @unittest.skipIf(os.name == "nt", "POSIX symlink confinement")
+    def test_rejects_blob_root_beneath_symlinked_profile_parent(self):
+        actual = self.root / "actual-profile"
+        self._write_blob(actual / "agent" / "blobs")
+        (self.root / ".omp").symlink_to(actual, target_is_directory=True)
+        with (
+            patch.object(attachments, "BLOB_ROOT", None),
+            patch.object(attachments.Path, "home", return_value=self.root),
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            self.assertIsNone(attachments.read_blob(self.digest))
+
 
 if __name__ == "__main__":
     unittest.main()

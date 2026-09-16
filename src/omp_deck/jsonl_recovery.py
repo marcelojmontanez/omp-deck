@@ -117,6 +117,7 @@ class JsonlRecoveryReader:
         nofollow = getattr(os, "O_NOFOLLOW", 0)
         directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow
         directory_fd = os.open(self._root, directory_flags)
+        file_fd: int | None = None
         try:
             root_now = os.fstat(directory_fd)
             if (root_now.st_dev, root_now.st_ino) != self._root_identity:
@@ -128,7 +129,6 @@ class JsonlRecoveryReader:
             file_fd = os.open(self._parts[-1], os.O_RDONLY | nofollow, dir_fd=directory_fd)
             file_stat = os.fstat(file_fd)
             if not stat.S_ISREG(file_stat.st_mode):
-                os.close(file_fd)
                 raise _NotRegularFile
             # Revalidate the directory entry after open.  This detects a replace
             # race rather than silently reading an unlinked or different file.
@@ -137,10 +137,13 @@ class JsonlRecoveryReader:
                 file_stat.st_dev,
                 file_stat.st_ino,
             ):
-                os.close(file_fd)
                 raise _UnsafePath
-            return file_fd, file_stat
+            result = file_fd, file_stat
+            file_fd = None
+            return result
         finally:
+            if file_fd is not None:
+                os.close(file_fd)
             os.close(directory_fd)
 
     def _reset_for_new_file(self, identity: tuple[int, int]) -> None:

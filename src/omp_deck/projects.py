@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+from ._platform_paths import _has_link_like_component, _is_link_like
+
 PROJECT_MARKERS = {
     ".git",
     "AGENTS.md",
@@ -17,20 +19,11 @@ IGNORED_PROJECT_DIRS = {
     "target",
     "vendor",
 }
-_FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
-
-
-def _is_link_like(path):
-    try:
-        info = path.lstat()
-    except OSError:
-        return False
-    return path.is_symlink() or bool(getattr(info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 def _resolved_project_root(root):
     root = Path(root).expanduser()
-    if _is_link_like(root):
+    if _has_link_like_component(root):
         raise ValueError("invalid project root")
     try:
         resolved = root.resolve(strict=True)

@@ -189,6 +189,36 @@ class JsonlRecoveryReaderTests(unittest.TestCase):
         self.assertEqual(result.offset, 0)
         self.assertEqual(result.entries, ())
 
+    def test_path_revalidation_error_closes_every_open_descriptor(self):
+        self.path.write_bytes(b'{"value":1}\n')
+        reader = self.reader()
+        opened = []
+        real_open = os.open
+
+        def tracked_open(*args, **kwargs):
+            descriptor = real_open(*args, **kwargs)
+            opened.append(descriptor)
+            return descriptor
+
+        try:
+            with (
+                mock.patch("omp_deck.jsonl_recovery.os.open", side_effect=tracked_open),
+                mock.patch("omp_deck.jsonl_recovery.os.stat", side_effect=OSError("path unavailable")),
+            ):
+                result = reader.poll()
+
+            self.assertEqual(result.status, RecoveryStatus.UNSAFE_PATH)
+            self.assertEqual(result.issues, (RecoveryIssue.IO_ERROR,))
+            for descriptor in opened:
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
+        finally:
+            for descriptor in opened:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
     def test_non_regular_file_is_rejected(self):
         self.path.mkdir()
         result = self.reader().poll()

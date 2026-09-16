@@ -7,6 +7,7 @@ from typing import Any
 
 from ._terminal_discovery import terminal_id
 from .installation_paths import OWNERSHIP_MARKER, has_ownership_marker, installation_paths
+from .projects import resolve_project_path
 from .read_cursors import CursorStore
 from .registry_store import RegistryStore
 
@@ -54,9 +55,15 @@ def apply_migration(settings) -> dict[str, int | bool]:
         project_path = _validated_project(metadata.get("cwd"), settings.project_root)
         if project_path is None:
             continue
+        try:
+            project_name = project_path.relative_to(settings.project_root.resolve(strict=True)).as_posix()
+            if resolve_project_path(settings.project_root, project_name) != project_path:
+                continue
+        except (OSError, ValueError):
+            continue
         registry.create(
             adapter_kind="extension",
-            project_name=project_path.name,
+            project_name=project_name,
             project_path=str(project_path),
             title=_title(metadata, project_path.name),
             omp_session_id=omp_session_id,

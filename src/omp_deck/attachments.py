@@ -45,6 +45,35 @@ def blob_root():
     return agent_root / "blobs"
 
 
+def _open_blob_directory(path):
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    absolute = Path(os.path.abspath(Path(path).expanduser()))
+    current = Path(absolute.anchor)
+    owned_index = None
+    for index, part in enumerate(absolute.parts[1:], start=1):
+        current /= part
+        info = current.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            if owned_index is not None or info.st_uid != 0:
+                raise OSError("blob directory contains a symlink")
+            continue
+        if owned_index is None and info.st_uid == os.geteuid():
+            owned_index = index
+    if owned_index is None:
+        raise OSError("blob directory is not user-owned")
+    prefix = Path(absolute.anchor).joinpath(*absolute.parts[1 : owned_index + 1])
+    descriptor = os.open(prefix, flags)
+    try:
+        for part in absolute.parts[owned_index + 1 :]:
+            child = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def read_blob(digest):
     if not isinstance(digest, str) or _DIGEST.fullmatch(digest) is None:
         return None
@@ -58,9 +87,8 @@ def read_blob(digest):
             if payload is not None and hashlib.sha256(payload).hexdigest() == digest:
                 return name, payload
         return None
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        directory_fd = os.open(blob_root(), flags)
+        directory_fd = _open_blob_directory(blob_root())
     except OSError:
         return None
     try:

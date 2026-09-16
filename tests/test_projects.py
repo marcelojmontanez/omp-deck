@@ -30,6 +30,14 @@ class ProjectPathTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "invalid project root"):
                 resolve_project_path(linked_root, "new", must_exist=False)
 
+            actual_parent = base / "actual"
+            nested_root = actual_parent / "projects"
+            nested_root.mkdir(parents=True)
+            alias = base / "alias"
+            alias.symlink_to(actual_parent, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "invalid project root"):
+                resolve_project_path(alias / "projects", "new", must_exist=False)
+
     @unittest.skipIf(os.name == "nt", "creating symlinks requires Windows developer mode")
     def test_rejects_broken_links_and_files(self):
         with tempfile.TemporaryDirectory() as directory:

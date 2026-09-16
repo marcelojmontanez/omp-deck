@@ -122,6 +122,8 @@ Drafts and selected images stay with their session when you switch conversations
 
 Use the image button to attach images and tap a thumbnail to preview it. The composer stays below the conversation; its text field grows to at most 130px. Enter inserts a newline on phones; desktop Enter sends, and Shift+Enter inserts a newline. History has a read-only notice instead of disabled composer controls.
 
+Image downloads have an eight-second deadline, including the response body. A failed thumbnail offers **Retry**; returning to the browser or reconnecting also retries unavailable images. Downloaded images remain previewable in the selected conversation during a temporary outage. The local photo picker and supported draft attachments remain available offline, while sending waits for reconnection.
+
 Assistant replies can display an existing private OMP image blob with a standalone Markdown line, `![Portrait](blob:sha256:<64 lowercase hex digest>)`. The image must already exist in that machine's active OMP blob store. Deck uses its authenticated image viewer; local file paths and external image URLs are not loaded. References inside code blocks or user text remain text.
 
 Type `/` to pick an available structured session action: `/compact`, `/interrupt`, `/quit`, or `/thinking <level>` using OMP's advertised choices. Arrow keys and Tab select a suggestion; Escape dismisses it. An exact action changes **Send** to **Run**. Compact and quit require confirmation. Cancelled or failed actions preserve the command draft, and delayed completion does not erase newer edits. Actions cannot be combined with image attachments. This is not a terminal command console and does not emulate unsupported OMP commands.

@@ -313,7 +313,8 @@ button.chip:active { background: #283247; }
   max-height: min(70vh, 680px);
   object-fit: contain;
 }
-.message-image.image-loading, .message-image.image-failed { padding: 12px; cursor: default; }
+.message-image.image-loading, .message-image.image-failed { padding: 12px; }
+.message-image.image-loading, .message-image:disabled { cursor: default; }
 .activity-empty { margin: auto; color: var(--muted); text-align: center; }
 .event {
   --event-color: var(--muted);

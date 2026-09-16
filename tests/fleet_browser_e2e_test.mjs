@@ -10,6 +10,7 @@ import {once} from 'node:events';
 import test from 'node:test';
 import puppeteer from 'puppeteer';
 import {verifyConnectionRecovery} from './connection_recovery_cases.mjs';
+import {verifyMobileImages} from './image_recovery_cases.mjs';
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const PYTHON = process.env.PYTHON || (
@@ -188,7 +189,7 @@ test('independent viewers route duplicate session IDs directly and survive one m
   chrome = await puppeteer.launch({headless: true, args: ['--no-sandbox']});
   const viewers = await Promise.all([chrome.createBrowserContext(), chrome.createBrowserContext()]);
   const [phone, computer] = await Promise.all(viewers.map(context => context.newPage()));
-  await phone.setViewport({width: 390, height: 844});
+  await phone.setViewport({width: 390, height: 844, isMobile: true, hasTouch: true});
   await computer.setViewport({width: 1440, height: 900});
   const nodeRequests = [];
   const coordinatorRequests = [];
@@ -217,6 +218,7 @@ test('independent viewers route duplicate session IDs directly and survive one m
   }
   const desktopId = await selectMachineSession(phone, 'Desktop');
   await verifyConnectionRecovery(phone);
+  await verifyMobileImages(phone, root);
   await phone.click('#overflow-button');
   await phone.click('[data-session-action="rename"]');
   await phone.type('#session-name-input', 'Desktop release work');

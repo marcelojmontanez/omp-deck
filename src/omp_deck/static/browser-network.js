@@ -45,6 +45,7 @@
   window.ompDeckNetwork = Object.freeze({
     fetchJsonBounded,
     fetchResponseBounded,
+    runBounded,
     STARTUP_TIMEOUT_MS,
   });
 })();

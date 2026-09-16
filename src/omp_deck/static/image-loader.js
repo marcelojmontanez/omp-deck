@@ -64,6 +64,8 @@
   function showLoaded(element, url) {
     if (!element.isConnected) return;
     element.dataset.viewImage = url;
+    element.disabled = false;
+    element.setAttribute('aria-label', 'Enlarge attached image');
     element.classList.remove('image-loading', 'image-failed');
     element.replaceChildren(Object.assign(document.createElement('img'), {
       src: url,
@@ -72,12 +74,27 @@
     }));
   }
 
-  function showFailure(element, message) {
+  function showFailure(element, message, retry = true) {
     if (!element.isConnected) return;
+    delete element.dataset.viewImage;
+    element.disabled = !retry;
+    element.setAttribute('aria-label', retry ? 'Retry attached image' : message);
     element.classList.remove('image-loading');
     element.classList.add('image-failed');
     element.replaceChildren(Object.assign(document.createElement('span'), {
-      textContent: message,
+      textContent: retry ? `${message} · Retry` : message,
+    }));
+  }
+
+  function showLoading(element) {
+    if (!element.isConnected) return;
+    delete element.dataset.viewImage;
+    element.disabled = false;
+    element.setAttribute('aria-label', 'Loading attached image');
+    element.classList.remove('image-failed');
+    element.classList.add('image-loading');
+    element.replaceChildren(Object.assign(document.createElement('span'), {
+      textContent: 'Loading image…',
     }));
   }
 
@@ -110,47 +127,71 @@
 
   async function load(record) {
     const currentGeneration = generation;
+    const controller = record.controller;
     try {
-      const blob = await fetchImage(record.machineId, record.path, record.controller.signal);
-      if (generation !== currentGeneration || records.get(record.key) !== record || !record.owners.size) return;
+      const blob = await ompDeckNetwork.runBounded(
+        signal => fetchImage(record.machineId, record.path, signal),
+        controller.signal,
+        ompDeckNetwork.STARTUP_TIMEOUT_MS,
+      );
+      if (
+        generation !== currentGeneration
+        || records.get(record.key) !== record
+        || record.controller !== controller
+        || controller.signal.aborted
+        || !record.owners.size
+      ) return;
       if (retainedBytes + blob.size > MAX_RETAINED_BYTES) {
         throw new Error('Image display memory limit reached');
       }
+      record.url = URL.createObjectURL(blob);
       record.size = blob.size;
       retainedBytes += blob.size;
-      record.url = URL.createObjectURL(blob);
-      record.controller = null;
       for (const element of record.elements) showLoaded(element, record.url);
     } catch (error) {
-      if (record.controller?.signal.aborted || records.get(record.key) !== record) return;
-      record.controller = null;
+      if (
+        controller.signal.aborted
+        || records.get(record.key) !== record
+        || record.controller !== controller
+      ) return;
       record.error = error.message;
       for (const element of record.elements) showFailure(element, 'Image unavailable');
     } finally {
-      record.elements.clear();
+      if (record.controller === controller) record.controller = null;
+    }
+  }
+
+  function retry(record) {
+    record.controller?.abort();
+    record.controller = new AbortController();
+    record.error = '';
+    for (const element of record.elements) showLoading(element);
+    void load(record);
+  }
+
+  function recover(machineId = null, {replacePending = true} = {}) {
+    for (const record of records.values()) {
+      if (machineId !== null && record.machineId !== machineId) continue;
+      if (!record.url && record.owners.size && (record.error || (replacePending && record.controller))) {
+        retry(record);
+      }
     }
   }
 
   function hydrate(container, owner) {
+    for (const record of records.values()) {
+      for (const element of record.elements) {
+        if (!element.isConnected) record.elements.delete(element);
+      }
+    }
     const nextKeys = new Set();
     const elements = [...container.querySelectorAll('[data-image-path][data-image-machine]')];
     for (const element of elements) {
       const machineId = element.dataset.imageMachine;
       const path = element.dataset.imagePath;
       const key = keyFor(machineId, path);
-      if (nextKeys.has(key)) {
-        const existing = records.get(key);
-        if (existing?.url) showLoaded(element, existing.url);
-        else if (existing?.error) showFailure(element, 'Image unavailable');
-        else existing?.elements.add(element);
-        continue;
-      }
       nextKeys.add(key);
       let record = records.get(key);
-      if (record?.error && ompDeckApi.machine(machineId)?.status === 'live') {
-        revoke(record);
-        record = null;
-      }
       if (!record && records.size < MAX_OBJECT_URLS) {
         record = {
           key,
@@ -159,21 +200,22 @@
           owners: new Set(),
           elements: new Set(),
           size: 0,
-          controller: new AbortController(),
+          controller: null,
           url: null,
           error: '',
         };
         records.set(key, record);
-        void load(record);
       }
       if (!record) {
-        showFailure(element, 'Image not loaded');
+        showFailure(element, 'Image display limit reached', false);
         continue;
       }
       record.owners.add(owner);
+      record.elements.add(element);
       if (record.url) showLoaded(element, record.url);
       else if (record.error) showFailure(element, 'Image unavailable');
-      else record.elements.add(element);
+      else if (record.controller) showLoading(element);
+      else retry(record);
     }
     const previousKeys = owners.get(owner) || new Set();
     owners.set(owner, nextKeys);
@@ -185,5 +227,14 @@
     }
   }
 
-  window.ompDeckImages = Object.freeze({hydrate, releaseOwner, releaseMachine, clear});
+  document.addEventListener('click', event => {
+    const element = event.target.closest('.image-failed[data-image-path][data-image-machine]');
+    if (!element || element.disabled) return;
+    const record = records.get(keyFor(element.dataset.imageMachine, element.dataset.imagePath));
+    if (!record || record.url || record.controller) return;
+    event.preventDefault();
+    retry(record);
+  });
+
+  window.ompDeckImages = Object.freeze({hydrate, recover, releaseOwner, releaseMachine, clear});
 })();

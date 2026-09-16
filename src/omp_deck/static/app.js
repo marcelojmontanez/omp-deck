@@ -221,6 +221,7 @@ window.addEventListener('omp-deck-node-status', event => {
   for (const agent of state.agents) {
     if (agent.machineId === machine.id) agent.nodeAvailable = available;
   }
+  if (available) ompDeckImages.recover(machine.id, {replacePending: false});
   touchRender();
   renderMachineControls();
   renderFleet();
@@ -269,6 +270,7 @@ function recoverLiveConnections() {
   restartEventStreams();
   void refresh(null, {replace: true});
   if (state.selectedMachineId) recoverLaunchableProjects();
+  ompDeckImages.recover();
 }
 
 document.addEventListener('visibilitychange', () => {

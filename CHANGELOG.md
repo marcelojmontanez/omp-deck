@@ -21,6 +21,7 @@
 
 ### Fixed
 
+- Keep writable-session drafts and supported image attachments editable while disconnected, without sending automatically on reconnect.
 - Let the project dropdown create directories inside listed folders and retain a newly created directory for starting or retrying, including below the configured discovery depth.
 - Prevent dashboard refreshes from interrupting a managed OMP while it starts, which could report a failed launch and replace the process even though a session later appeared connected.
 - Escape quotes in rendered Markdown and session metadata without changing their displayed text, and preserve keyboard focus on session tiles during live updates.

@@ -288,12 +288,49 @@ test('independent viewers route duplicate session IDs directly and survive one m
   await selectMachineSession(phone, 'Desktop');
   assert.equal(await phone.$eval('#message', input => input.value), 'Keep this desktop draft');
   assert.equal(await phone.$$eval('#attachments img', images => images.length), 1);
+  assert.equal(await phone.$eval('#send', button => button.disabled), true);
+  assert.equal(await phone.$eval('#message', input => input.disabled), false);
+  assert.equal(await phone.$eval('#attach', button => button.disabled), false);
+  await phone.$eval('#message', input => input.setSelectionRange(input.value.length, input.value.length));
+  await phone.type('#message', ' — continued while offline');
+  await attachment.uploadFile(image);
+  await phone.waitForFunction(() => document.querySelectorAll('#attachments img').length === 2);
+  const offlineDraft = 'Keep this desktop draft — continued while offline';
+  const messageRequests = () => nodeRequests.filter(request =>
+    request.origin === desktop.origin && request.path.endsWith('/messages')).length;
+  const beforeOfflineSubmit = messageRequests();
+  await phone.evaluate(() => document.getElementById('composer').requestSubmit());
+  assert.equal(await phone.$eval('#message', input => input.value), offlineDraft);
+  assert.equal(await phone.$$eval('#attachments img', images => images.length), 2);
+  await computer.goBack();
+  await selectMachineSession(computer, 'Desktop');
+  await computer.type('#message', 'Offline computer draft');
+  await computer.keyboard.press('Enter');
+  await computer.type('#message', 'Another line');
+  assert.equal(await computer.$eval('#message', input => input.value), 'Offline computer draft\nAnother line');
+  assert.equal(messageRequests(), beforeOfflineSubmit);
+  await phone.goBack();
+  await selectMachineSession(phone, 'Mac');
+  assert.equal(await phone.$eval('#message', input => input.value), '');
+  await phone.goBack();
+  await selectMachineSession(phone, 'Desktop');
+  assert.equal(await phone.$eval('#message', input => input.value), offlineDraft);
+  assert.equal(await phone.$$eval('#attachments img', images => images.length), 2);
   await start(desktop, ['-m', 'tests.fixtures.fleet_browser_server', 'Desktop']);
   await phone.waitForFunction(() => !document.getElementById('send').disabled, {timeout: 30_000});
   await phone.waitForFunction(id => {
     const session = state.agents.find(agent => agent.id === id);
     return session?.label === 'Desktop release work' && session.pinned;
   }, {}, desktopId);
+  assert.equal(await phone.$eval('#message', input => input.value), offlineDraft);
+  assert.equal(messageRequests(), beforeOfflineSubmit, 'reconnection must not send the draft automatically');
+  await phone.click('#send');
+  await computer.waitForFunction((id, text) =>
+    state.agents.find(agent => agent.id === id)?.session.activity.some(event =>
+      event.kind === 'user' && event.detail === text),
+  {}, desktopId, offlineDraft);
+  assert.equal(await phone.$eval('#message', input => input.value), '');
+  assert.equal(await phone.$$eval('#attachments img', images => images.length), 0);
   for (const page of [phone, computer]) {
     assert.deepEqual(await page.evaluate(() => ({
       local: localStorage.length, session: sessionStorage.length,

@@ -328,19 +328,20 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
       getComposer().select(agent?.id);
       requestAnimationFrame(() => { el.activity.scrollTop = 0; });
     }
+    const canCompose = Boolean(isLiveSession && capabilities.sendMessage);
     const canMessage = Boolean(
-      isLiveSession
+      canCompose
       && agent?.nodeAvailable !== false
       && agent?.bridgeConnected
-      && capabilities.sendMessage
     );
-    const canAttach = canMessage && Boolean(capabilities.attachments);
+    const canAttach = canCompose && Boolean(capabilities.attachments);
     el.composer.hidden = !isLiveSession;
     el.message.setAttribute('aria-label', agent ? `Message ${agent.label}` : 'Message selected OMP');
     el.message.placeholder = agentLifecycle === 'history'
       ? 'History is read-only'
-      : agent && !canMessage ? 'Messaging is unavailable for this session' : 'Message this OMP…';
-    el.message.disabled = !canMessage;
+      : canCompose && !canMessage ? 'Draft now; send when reconnected…'
+        : agent && !canCompose ? 'Messaging is unavailable for this session' : 'Message this OMP…';
+    el.message.disabled = !canCompose;
     el.attach.disabled = !canAttach;
     el.attach.title = canAttach ? '' : 'Attachments are unavailable for this session';
     el.send.disabled = !canMessage;

@@ -995,8 +995,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       session: {activity: [], todo: '', updatedMs: Date.now()},
     };
     state.agents = [agent];
-    state.selectedId = agent.id;
-    composer.select(agent.id);
+    selectAgent(agent.id, {pushHistory: false});
     const response = {ok: true, status: 202, json: async () => ({})};
     const submit = message => {
       document.getElementById('message').value = message;

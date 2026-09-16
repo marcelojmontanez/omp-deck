@@ -340,7 +340,7 @@ function createComposer({
     event.preventDefault();
     const agent = selectedAgent();
     const id = agent?.id;
-    if (!agent) return;
+    if (!agent || elements.send.disabled) return;
     const outgoingAttachments = [...attachmentsFor(id)];
     const commandDraft = elements.message.value;
     const commandRevision = commands.revision(agent);
@@ -460,7 +460,7 @@ function createComposer({
     await addAttachments(images);
   });
   elements.message.addEventListener('keydown', event => {
-    if (commands.handleKeydown(event)) return;
+    if (commands.handleKeydown(event) || elements.send.disabled) return;
     const mobile = window.matchMedia('(max-width: 760px)').matches;
     if (!mobile && event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
       event.preventDefault();

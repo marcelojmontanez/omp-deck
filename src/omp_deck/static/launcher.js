@@ -1,10 +1,17 @@
 'use strict';
 
+function newDirectoryOption(parent) {
+  const label = parent ? `＋ New directory in ${parent}/…` : '＋ New directory in project root…';
+  const option = new Option(label, `/new/${parent}`);
+  option.dataset.createParent = parent;
+  return option;
+}
+
 function renderProjectOptions(projects) {
   const select = el['project-select'];
   select.replaceChildren(
     new Option('Choose project…', ''),
-    new Option('＋ New directory…', '__new__'),
+    newDirectoryOption(''),
   );
   const sections = new Map();
   for (const project of projects) {
@@ -14,15 +21,11 @@ function renderProjectOptions(projects) {
     sections.get(section).push(project);
   }
   for (const [section, entries] of sections) {
-    if (entries.length === 1 && entries[0] === section) {
-      select.append(new Option(`${section}/`, section));
-      continue;
-    }
     const group = document.createElement('optgroup');
     group.label = `${section}/`;
     for (const project of entries) {
       const label = project === section ? `Use ${section}/` : project.slice(section.length + 1);
-      group.append(new Option(label, project));
+      group.append(new Option(label, project), newDirectoryOption(project));
     }
     select.append(group);
   }
@@ -31,7 +34,7 @@ function renderProjectOptions(projects) {
 const activeLaunches = new Set();
 let launcherGeneration = 0;
 let projectLoadGeneration = 0;
-async function loadLaunchableProjects() {
+async function loadLaunchableProjects(createdProject = '') {
   const generation = ++projectLoadGeneration;
   const machineId = state.selectedMachineId;
   const machine = ompDeckApi.machine(machineId);
@@ -57,9 +60,12 @@ async function loadLaunchableProjects() {
     const payload = await response.json();
     if (generation !== projectLoadGeneration || machineId !== state.selectedMachineId) return;
     const projects = Array.isArray(payload.projects) ? payload.projects : [];
+    // Keep a just-created directory selectable even beyond discovery depth.
+    if (createdProject && !projects.includes(createdProject)) projects.push(createdProject);
     const machineSuffix = ompDeckApi.machines().length > 1 ? ` on ${machine.name}` : '';
     el['project-root-label'].textContent = `Start OMP in ${payload.rootLabel || 'configured project root'}${machineSuffix}`;
     renderProjectOptions(projects);
+    if (createdProject) select.value = createdProject;
     el['launch-state'].textContent = projects.length ? '' : 'No project directories yet. Create one below.';
   } catch (error) {
     if (generation !== projectLoadGeneration || machineId !== state.selectedMachineId) return;
@@ -73,24 +79,35 @@ async function loadLaunchableProjects() {
   }
 }
 
+function selectedProjectParent() {
+  return el['project-select'].selectedOptions[0]?.dataset.createParent;
+}
+
 function selectedLaunchProject() {
-  return el['project-select'].value === '__new__'
-    ? el['project-new'].value.trim()
-    : el['project-select'].value;
+  const parent = selectedProjectParent();
+  if (parent === undefined) return el['project-select'].value;
+  const name = el['project-new'].value.trim();
+  return name && parent ? `${parent}/${name}` : name;
 }
 
 function syncProjectLauncher() {
-  const creating = el['project-select'].value === '__new__';
+  const parent = selectedProjectParent();
+  const creating = parent !== undefined;
   const launching = activeLaunches.has(state.selectedMachineId);
   el['project-new'].hidden = !creating;
   el['project-new'].disabled = launching;
+  el['project-new'].setAttribute('aria-label', `New directory name in ${parent ? `${parent}/` : 'project root'}`);
+  el['project-launch'].textContent = creating ? 'Create & start' : 'Start';
   el['project-launch'].disabled = launching || !state.selectedMachineId || !selectedLaunchProject();
 }
 
 el['project-select'].addEventListener('change', () => {
   syncProjectLauncher();
-  if (el['project-select'].value === '__new__') el['project-new'].focus();
-  el['launch-state'].textContent = '';
+  const parent = selectedProjectParent();
+  if (parent !== undefined) el['project-new'].focus();
+  el['launch-state'].textContent = parent === undefined
+    ? ''
+    : `Create inside ${parent ? `${parent}/` : 'the configured project root'}.`;
 });
 el['project-new'].addEventListener('input', syncProjectLauncher);
 const pendingLaunches = new Map();
@@ -98,7 +115,7 @@ const pendingLaunches = new Map();
 el['project-launch'].addEventListener('click', async () => {
   const machineId = state.selectedMachineId;
   const machine = ompDeckApi.machine(machineId);
-  const creating = el['project-select'].value === '__new__';
+  const creating = selectedProjectParent() !== undefined;
   const project = selectedLaunchProject();
   if (activeLaunches.has(machineId)) return;
   if (!machine || !project) return;
@@ -135,12 +152,12 @@ el['project-launch'].addEventListener('click', async () => {
     applyFleetSession(payload.session, undefined, machineId);
     if (machineId === state.selectedMachineId) el['launch-state'].textContent = '';
     showToast(`Started OMP in ${project} on ${machine.name}`, 'success');
-    if (creating && machineId === state.selectedMachineId) await loadLaunchableProjects();
+    if (creating && machineId === state.selectedMachineId) await loadLaunchableProjects(project);
     selectAgent(ompDeckApi.sessionKey(machineId, payload.session.id));
   } catch (error) {
     if (generation !== launcherGeneration) return;
     if (error.reuseRequestId === false) pendingLaunches.delete(machineId);
-    if (error.projectCreated && machineId === state.selectedMachineId) await loadLaunchableProjects();
+    if (error.projectCreated && machineId === state.selectedMachineId) await loadLaunchableProjects(project);
     if (machineId === state.selectedMachineId) el['launch-state'].textContent = error.message;
     else showToast(`${machine.name}: ${error.message}`, 'error');
   } finally {

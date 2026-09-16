@@ -20,6 +20,8 @@
 
 ### Fixed
 
+- Let the project dropdown create directories inside listed folders and retain a newly created directory for starting or retrying, including below the configured discovery depth.
+- Prevent dashboard refreshes from interrupting a managed OMP while it starts, which could report a failed launch and replace the process even though a session later appeared connected.
 - Escape quotes in rendered Markdown and session metadata without changing their displayed text, and preserve keyboard focus on session tiles during live updates.
 - Recheck authorization after reading mutation bodies and bound slow body uploads so revoked access cannot dispatch a delayed action and trickling requests cannot occupy HTTP workers indefinitely.
 - Reject user-controlled filesystem aliases in project roots, image-blob paths, and purge targets; refuse purging directories whose ownership or write permissions are no longer safe.

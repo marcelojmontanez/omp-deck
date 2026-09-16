@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {existsSync} from 'node:fs';
-import {mkdtemp, mkdir, rm, writeFile} from 'node:fs/promises';
+import {mkdtemp, mkdir, rm, stat, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {spawn, spawnSync} from 'node:child_process';
@@ -197,6 +197,55 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   assert(result.overflow <= 0);
   assert.equal(result.cookiesEnabled, true);
   assert.equal(result.machineName, result.browserHost);
+
+  // Use the real creation route; this fixture deliberately cannot launch OMP.
+  // Creation must survive that failure and remain selectable below discovery depth.
+  for (const [parent, name] of [['', 'created root'], ['group/nested', 'created child']]) {
+    await page.select('#project-select', `/new/${parent}`);
+    await page.waitForSelector('#project-new', {visible: true});
+    await page.$eval('#project-new', input => { input.focus(); input.select(); });
+    await page.keyboard.press('Backspace');
+    assert.equal(await page.$eval('#project-launch', button => button.disabled), true);
+    await page.type('#project-new', name);
+    const [createdResponse] = await Promise.all([
+      page.waitForResponse(response => response.request().method() === 'POST'
+        && new URL(response.url()).pathname.startsWith('/api/projects/')),
+      page.click('#project-launch'),
+    ]);
+    assert.equal(createdResponse.status(), 502);
+    assert.equal((await createdResponse.json()).created, true);
+    const project = parent ? `${parent}/${name}` : name;
+    assert.equal((await stat(path.join(projects, project))).isDirectory(), true);
+    if (parent) assert.equal(existsSync(path.join(projects, name)), false);
+    await page.waitForFunction(project => (
+      document.getElementById('project-select').value === project
+      && !document.getElementById('project-launch').disabled
+      && document.getElementById('project-new').hidden
+    ), {}, project);
+    if (parent) {
+      const [retryResponse] = await Promise.all([
+        page.waitForResponse(response => response.request().method() === 'POST'
+          && new URL(response.url()).pathname.startsWith('/api/projects/')),
+        page.click('#project-launch'),
+      ]);
+      assert.equal(retryResponse.status(), 502);
+      assert.equal((await retryResponse.json()).created, false);
+      await page.waitForFunction(() => !document.getElementById('project-launch').disabled);
+    }
+  }
+  await page.select('#project-select', '/new/group');
+  await page.$eval('#project-new', input => { input.focus(); input.select(); });
+  await page.keyboard.press('Backspace');
+  await page.type('#project-new', '../escape');
+  const [escapeResponse] = await Promise.all([
+    page.waitForResponse(response => response.request().method() === 'POST'
+      && new URL(response.url()).pathname.startsWith('/api/projects/')),
+    page.click('#project-launch'),
+  ]);
+  assert.equal(escapeResponse.status(), 400);
+  assert.equal(existsSync(path.join(projects, 'escape')), false);
+  await page.waitForFunction(() => !document.getElementById('project-launch').disabled);
+  await page.select('#project-select', 'demo');
   const cookies = await page.cookies();
   const device = cookies.find(cookie => cookie.name === 'omp_deck_device');
   assert(device, `secure device cookie missing; service stderr: ${serviceError}`);

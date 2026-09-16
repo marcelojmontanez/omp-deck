@@ -20,6 +20,12 @@
 
 ### Fixed
 
+- Escape quotes in rendered Markdown and session metadata without changing their displayed text, and preserve keyboard focus on session tiles during live updates.
+- Recheck authorization after reading mutation bodies and bound slow body uploads so revoked access cannot dispatch a delayed action and trickling requests cannot occupy HTTP workers indefinitely.
+- Reject user-controlled filesystem aliases in project roots, image-blob paths, and purge targets; refuse purging directories whose ownership or write permissions are no longer safe.
+- Preserve nested project identities during legacy migration, close recovery file descriptors after path-revalidation failures, and treat empty platform-directory variables as unset.
+- Keep the existing terminal transport owned when replacement cleanup fails, and report Collab pending-dialog overflow explicitly without fabricating a user cancellation.
+- Fence terminal-extension reconnect retries to their originating session. The bundled extension is now 1.3.2; rerun setup after upgrading and restart/resume terminal-owned OMP sessions when idle to load this fix.
 - Keep HTTP startup independent of reverse DNS, which could delay macOS readiness.
 - Avoid concurrent private-state lock creation failures on APFS.
 - Refuse purging configured XDG roots reached through filesystem aliases.

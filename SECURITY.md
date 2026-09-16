@@ -212,15 +212,18 @@ sequences, and transport peer identity are validated at ingress. Windows blob
 reads bind ACL, owner, reparse-point, size, and final-path validation to the
 opened handles. Private responses use `no-store`, a restrictive CSP, and browser
 hardening headers.
+Authorization is checked again after reading mutation bodies, before dispatching
+an action or issuing new fleet tickets.
 Only packaged public JavaScript and CSS use content-based cache revalidation.
 HTML, authentication, API, SSE, and blob responses remain `no-store`.
 
 Each HTTP listener admits at most 64 simultaneous connections and closes
 connections whose request headers do not complete within ten seconds, including
-clients that keep sending partial headers. Excess connections are closed before
-allocating a handler. Completed requests, including authenticated SSE streams,
-are not subject to the header deadline. These limits do not replace the
-owner-restricted network access boundary.
+clients that keep sending partial headers. Request bodies have a thirty-second
+absolute deadline and a ten-second idle timeout. Excess connections are closed
+before allocating a handler. Completed requests, including authenticated SSE
+streams, are not subject to these read deadlines. These limits do not replace
+the owner-restricted network access boundary.
 
 Node state contains stable session metadata, hashed local-device credentials,
 last-read cursors, imported Collab credentials, and—when enrolled—the
@@ -234,7 +237,9 @@ memory and revokes attachment object URLs when their owner is removed.
 
 Removing the per-user background service does not delete configuration or
 state. `purge` deletes only paths proven to be Deck-owned and refuses roots,
-home directories, shallow ancestors, symlinks, and Windows reparse points.
+home directories, shallow ancestors, user-controlled symlink ancestors, and
+Windows reparse points. POSIX purge also refuses roots that are no longer
+current-user-owned or have become group/world-writable.
 
 ## Reporting a vulnerability
 

@@ -262,6 +262,7 @@ Optional configuration lives at `~/.config/omp-deck/config.json` on Linux/macOS 
 ```
 
 Project names are resolved beneath `project_root`; traversal, symlink escapes, broken links, and non-directories are rejected. `project_discovery_depth` limits filesystem traversal to 1–8 directory levels and defaults to `2`: direct children and grandchildren are listed, while configured depths beyond two discover only directories containing `.git`, `AGENTS.md`, `Cargo.toml`, `go.mod`, `package.json`, or `pyproject.toml`. Keep `project_root` near the common parent of your projects and increase the depth only when nested repositories must appear.
+Use real directories for the project root and its user-controlled ancestors, not symlink aliases. Empty XDG directory variables use the normal home-directory defaults rather than the current working directory.
 
 Restart Deck after a configuration change with `omp-deck service restart`.
 
@@ -326,7 +327,7 @@ Sensitive files are atomic and bounded. Linux/macOS enforce owner-only mode `060
 
 Live browser state uses authenticated SSE with bounded replay. Low-frequency snapshot recovery replaces state when a cursor is stale. The compatibility JSONL reader is isolated and bounded; it is not a discovery mechanism, live event source, or control protocol.
 
-Dashboard assets are served without browser caching so an upgrade or rollback replaces the previous release's scripts and styles.
+Public JavaScript and CSS are revalidated by content so upgrades and rollbacks replace stale scripts and styles. HTML and private responses remain `no-store`.
 
 ## Legacy migration and rollback
 
@@ -426,14 +427,15 @@ python3 tools/check.py --release
 
 `--release` requires the repository checks, actual Chromium scenarios, and extension checks to pass. Missing browser or plugin prerequisites fail the command; they are not silently skipped. `python3 tools/check.py` alone remains the repository-only gate. CI uses the complete release command.
 
-Browser regressions exercise persistent-cookie expiry and process restart, failed and superseded startup reads, resume-time stream replacement, stale responses, forbidden mutations without logout or resend, per-machine outage isolation, fragmented events, newest-first messages, and mobile Enter as newline. These contracts protect the tested behaviors; they do not certify every Android/Brave eviction policy or every historical UX request.
+Browser regressions exercise persistent-cookie expiry and process restart, failed and superseded startup reads, resume-time stream replacement, stale responses, forbidden mutations without logout or resend, per-machine outage isolation, fragmented events, newest-first messages, mobile Enter as newline, quoted Markdown attribute safety, and keyboard focus during live session updates. These contracts protect the tested behaviors; they do not certify every Android/Brave eviction policy or every historical UX request.
 
-Browser and extension scenarios use temporary state and local listeners. Native Windows tests exercise process containment and named pipes; native macOS LaunchAgent lifecycle tests require a graphical login and `OMP_DECK_MACOS_LAUNCHD_SMOKE=1`. Run native gates on their actual operating systems; skipped native tests do not establish portability.
+Browser server scenarios use temporary homes, OMP profiles, configuration, state, and local listeners; extension scenarios use temporary endpoint directories. Native Windows tests exercise process containment and named pipes; native macOS LaunchAgent lifecycle tests require a graphical login and `OMP_DECK_MACOS_LAUNCHD_SMOKE=1`. Run native gates on their actual operating systems; skipped native tests do not establish portability.
 
 ## Architecture and limitations
 
 OMP owns agent and tool lifecycles. Each transport adapter owns protocol translation and request correlation. Python owns process supervision, normalized fleet state, authentication, persistence, unread cursors, HTTP actions, and SSE replay. The dependency-free browser owns only ephemeral presentation and user interaction.
 
 Managed RPC sessions are recoverable only when intentionally left running and when OMP's recorded session identity remains valid. Collab availability depends on its relay and the imported link's permissions. Extension fallback is intentionally smaller than RPC and cannot answer Ask remotely. JSONL compatibility recovery does not authorize control. Deck remains single-owner and local-first.
+If Collab exceeds Deck's pending-dialog capacity, the connection fails explicitly rather than silently dropping a question or sending a cancellation on your behalf. Answer outstanding questions in the owning terminal before reconnecting.
 
 See [SECURITY.md](SECURITY.md) for the trust boundary and private vulnerability reporting process.

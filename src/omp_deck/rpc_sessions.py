@@ -34,6 +34,7 @@ class _Runtime:
     instance_id: str
     generation: int
     adapter: SessionAdapter | None = None
+    initialized: bool = False
 
 
 class RpcSessionManager:
@@ -69,20 +70,22 @@ class RpcSessionManager:
         for record in self.registry.load():
             if record["adapterKind"] != "rpc" or not record["desiredRpcRunning"]:
                 continue
-            if self._runtime_or_none(record["id"]) is not None:
-                continue
-            try:
-                self._connect(record)
-            except Exception as error:
-                failures[record["id"]] = str(error)
-                current = self._record(record["id"])
-                self.model.set_transport(
-                    record["id"],
-                    instance_id=None,
-                    generation=current["generation"],
-                    status="disconnected",
-                    reason=f"recovery failed: {error}",
-                )
+            with self._operation_lock(record["id"]):
+                record = self._record(record["id"])
+                if not record["desiredRpcRunning"] or self._runtime_or_none(record["id"]) is not None:
+                    continue
+                try:
+                    self._connect(record)
+                except Exception as error:
+                    failures[record["id"]] = str(error)
+                    current = self._record(record["id"])
+                    self.model.set_transport(
+                        record["id"],
+                        instance_id=None,
+                        generation=current["generation"],
+                        status="disconnected",
+                        reason=f"recovery failed: {error}",
+                    )
         return failures
 
     def launch(self, project_name: str, project_path: Path, *, title: str | None = None) -> dict[str, Any]:
@@ -91,23 +94,25 @@ class RpcSessionManager:
             project_name=project_name,
             project_path=str(project_path),
             title=title or project_name,
-            desired_rpc_running=True,
+            desired_rpc_running=False,
         )
-        self.model.load_record(record)
-        try:
-            self._connect(record)
-        except Exception as error:
-            failed = self.registry.update(record["id"], desired_rpc_running=False)
-            self.model.load_record(failed)
-            self.model.set_transport(
-                record["id"],
-                instance_id=None,
-                generation=failed["generation"],
-                status="disconnected",
-                reason=f"launch failed: {error}",
-            )
-            raise
-        return self.model.get(record["id"])
+        # Publish the running intent only after startup owns the session operation lock.
+        with self._operation_lock(record["id"]):
+            self.model.load_record(record)
+            try:
+                self._connect(record)
+            except Exception as error:
+                failed = self.registry.update(record["id"], desired_rpc_running=False)
+                self.model.load_record(failed)
+                self.model.set_transport(
+                    record["id"],
+                    instance_id=None,
+                    generation=failed["generation"],
+                    status="disconnected",
+                    reason=f"launch failed: {error}",
+                )
+                raise
+            return self.model.get(record["id"])
 
     def launch_request(
         self,
@@ -171,13 +176,18 @@ class RpcSessionManager:
         )
 
     def _refresh_or_reconnect(self, session_id: str) -> dict[str, Any]:
-        if self._runtime_or_none(session_id) is not None:
+        runtime = self._runtime_or_none(session_id)
+        if runtime is not None and runtime.initialized:
             return self.refresh(session_id)
-        record = self._record(session_id)
-        if record["adapterKind"] != "rpc" or not record["desiredRpcRunning"]:
-            raise _rpc_dispatch.SessionNotConnectedError(session_id)
-        self._connect(record)
-        return self.model.get(session_id)
+        # Startup owns this lock until the child and its durable identity are ready.
+        with self._operation_lock(session_id):
+            record = self._record(session_id)
+            if record["adapterKind"] != "rpc" or not record["desiredRpcRunning"]:
+                raise _rpc_dispatch.SessionNotConnectedError(session_id)
+            if self._runtime_or_none(session_id) is None:
+                self._connect(record)
+                return self.model.get(session_id)
+        return self.refresh(session_id)
 
     def dispatch(
         self,
@@ -318,6 +328,7 @@ class RpcSessionManager:
                 generation=runtime.generation,
                 snapshot=snapshot,
             )
+            runtime.initialized = True
         except Exception as error:
             cleanup_error = None
             if adapter is not None:

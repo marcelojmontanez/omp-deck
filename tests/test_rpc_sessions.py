@@ -7,7 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from threading import Event, Thread
+from threading import Event, Thread, current_thread
 from unittest.mock import patch
 
 from omp_rpc import BranchResult, ReadyEvent, RpcProcessExitError
@@ -326,6 +326,64 @@ class TestRpcSessionManager(unittest.TestCase):
         self.assertEqual(FakeRpcClient.instances[-1].new_session_calls, 1)
         self.assertTrue(record["desiredRpcRunning"])
         self.assertEqual(session["transport"]["status"], "connected")
+
+    def test_refresh_during_startup_does_not_stop_or_replace_the_launching_process(self):
+        start_entered, release_start, started, refresh_entered = (Event() for _ in range(4))
+        outcomes, errors = [], []
+        original_start = FakeRpcClient.start
+        original_state = FakeRpcClient.get_state
+        operation_lock = self.manager._operation_lock
+
+        def delayed_start(client):
+            start_entered.set()
+            if not release_start.wait(3):
+                raise TimeoutError("startup was not released")
+            result = original_start(client)
+            started.set()
+            return result
+
+        def state_when_ready(client):
+            if not started.is_set() or client.stopped:
+                raise RpcProcessExitError("RPC process is not ready")
+            return original_state(client)
+
+        def launch():
+            try:
+                outcomes.append(self.manager.launch_request("concurrent-launch", "project"))
+            except Exception as error:
+                errors.append(error)
+
+        def observed_lock(session_id):
+            if current_thread() is refresh_thread:
+                refresh_entered.set()
+            return operation_lock(session_id)
+
+        launch_thread = Thread(target=launch)
+        refresh_thread = Thread(target=self.manager.refresh_connected)
+        with (
+            patch.object(FakeRpcClient, "start", delayed_start),
+            patch.object(FakeRpcClient, "get_state", state_when_ready),
+            patch.object(self.manager, "_operation_lock", side_effect=observed_lock),
+        ):
+            launch_thread.start()
+            try:
+                self.assertTrue(start_entered.wait(2))
+                client = FakeRpcClient.instances[0]
+                refresh_thread.start()
+                self.assertTrue(refresh_entered.wait(2))
+            finally:
+                release_start.set()
+                launch_thread.join(4)
+                if refresh_thread.ident is not None:
+                    refresh_thread.join(4)
+
+        self.assertFalse(launch_thread.is_alive())
+        self.assertFalse(refresh_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(outcomes[0]["status"], "accepted")
+        self.assertFalse(client.stopped)
+        self.assertEqual(outcomes[0]["session"]["ompSessionId"], client.state.session_id)
+        self.assertEqual(self.manager.refresh("deck-stable-id")["transport"]["status"], "connected")
 
     def test_cancelled_fresh_materialization_fails_launch_and_cleans_up(self):
         FakeRpcClient.cancel_new_session = True

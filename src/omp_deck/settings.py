@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ._platform_paths import default_config_path, default_omp_path, default_state_root
 from ._private_state import validate_private_directory, validate_private_file
+from .auth_policy import auth_configuration
 
 
 def config_path():
@@ -25,6 +26,8 @@ class Settings:
     project_discovery_depth: int
     omp_bin: str
     allowed_hosts: tuple[str, ...]
+    auth_mode: str = "pairing"
+    tailscale_user: str | None = None
 
     @property
     def cursor_path(self):
@@ -113,8 +116,10 @@ def load_settings(path=None):
     project_discovery_depth = values.get("project_discovery_depth", 2)
     if type(project_discovery_depth) is not int or not 1 <= project_discovery_depth <= 8:
         raise RuntimeError("project_discovery_depth must be an integer between 1 and 8")
+    host = str(values.get("host", "127.0.0.1"))
+    auth_mode, tailscale_user = auth_configuration(values, host)
     return Settings(
-        host=str(values.get("host", "127.0.0.1")),
+        host=host,
         port=port,
         session_root=expanded(values.get("session_root", home / ".omp/agent/sessions")),
         socket_root=expanded(values.get("socket_root", state_root / "sockets")),
@@ -122,5 +127,7 @@ def load_settings(path=None):
         project_root=expanded(values.get("project_root", home / "dev")),
         project_discovery_depth=project_discovery_depth,
         omp_bin=executable(values.get("omp_bin", shutil.which("omp") or default_omp_path())),
-        allowed_hosts=allowed_hosts(values, str(values.get("host", "127.0.0.1"))),
+        allowed_hosts=allowed_hosts(values, host),
+        auth_mode=auth_mode,
+        tailscale_user=tailscale_user,
     )

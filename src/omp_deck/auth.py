@@ -1,8 +1,7 @@
-"""Persistent pairing and device authentication for OMP Deck.
+"""Persistent opaque device authentication for OMP Deck.
 
-The module is deliberately independent of any HTTP framework.  Callers pass the
-request boundary values to :class:`AuthManager` and translate ``AuthError``
-subclasses into their HTTP response policy.
+Pairing secret mechanics remain here, while HTTP trust-policy selection lives
+at the request boundary. This module centrally issues and revokes credentials.
 """
 
 from __future__ import annotations
@@ -171,32 +170,21 @@ class AuthManager:
                     self._write_state()
                 raise PairingFailed("invalid or expired pairing secret")
 
-            credential = "v1." + secrets.token_urlsafe(32)
-            device_id = secrets.token_hex(16)
-            created = int(self._now())
-            expires = created + self.session_ttl
-            self._state["pairing"] = None  # consume before the durable commit
-            self._state["devices"][device_id] = {
-                "verifier": self._verifier(credential),
-                "createdAt": created,
-                "expiresAt": expires,
-                "epoch": self._state["epoch"],
-            }
-            self._prune_expired(created)
-            while len(self._state["devices"]) > self.max_devices:
-                oldest = min(
-                    self._state["devices"],
-                    key=lambda key: self._state["devices"][key]["createdAt"],
-                )
-                del self._state["devices"][oldest]
-            self._write_state()
-            device = AuthenticatedDevice(
-                device_id=device_id,
-                csrf_token=self._csrf(credential, device_id, self._state["epoch"]),
-                created_at=created,
-                expires_at=expires,
+            self._state["pairing"] = None
+            return self._issue_device()
+
+    def authenticate_or_issue(self, credential: str | None) -> PairedDevice:
+        """Reuse a valid cookie session or atomically issue a new one."""
+        with self._locked_state():
+            try:
+                device = self._authenticate_current(credential)
+            except AuthenticationFailed:
+                return self._issue_device()
+            return PairedDevice(
+                device,
+                credential,
+                self.cookie_header(credential, device.expires_at),
             )
-            return PairedDevice(device, credential, self.cookie_header(credential, expires))
 
     def authenticate(self, credential: str | None) -> AuthenticatedDevice:
         """Validate an opaque cookie credential using timing-safe comparison."""
@@ -250,6 +238,33 @@ class AuthManager:
     def _csrf(credential: str, device_id: str, epoch: str) -> str:
         message = f"omp-deck-csrf-v1\0{device_id}\0{epoch}".encode()
         return hmac.new(credential.encode(), message, hashlib.sha256).hexdigest()
+
+    def _issue_device(self) -> PairedDevice:
+        credential = "v1." + secrets.token_urlsafe(32)
+        device_id = secrets.token_hex(16)
+        created = int(self._now())
+        expires = created + self.session_ttl
+        self._state["devices"][device_id] = {
+            "verifier": self._verifier(credential),
+            "createdAt": created,
+            "expiresAt": expires,
+            "epoch": self._state["epoch"],
+        }
+        self._prune_expired(created)
+        while len(self._state["devices"]) > self.max_devices:
+            oldest = min(
+                self._state["devices"],
+                key=lambda key: self._state["devices"][key]["createdAt"],
+            )
+            del self._state["devices"][oldest]
+        self._write_state()
+        device = AuthenticatedDevice(
+            device_id=device_id,
+            csrf_token=self._csrf(credential, device_id, self._state["epoch"]),
+            created_at=created,
+            expires_at=expires,
+        )
+        return PairedDevice(device, credential, self.cookie_header(credential, expires))
 
     def _authenticate_current(self, credential: str | None) -> AuthenticatedDevice:
         candidate = self._verifier(credential) if isinstance(credential, str) else ""

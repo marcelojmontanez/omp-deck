@@ -80,6 +80,19 @@ class CommandTests(unittest.TestCase):
         remove.assert_called_once_with()
         load_settings_mock.assert_not_called()
 
+    def test_pair_refuses_tailscale_auth_mode_without_creating_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_root = Path(directory) / "state"
+            settings = SimpleNamespace(
+                auth_mode="tailscale",
+                tailscale_user="owner@example.com",
+                state_root=state_root,
+            )
+            with patch.object(cli, "load_settings", return_value=settings):
+                with self.assertRaises(RuntimeError):
+                    cli.pair()
+            self.assertFalse((state_root / "auth.json").exists())
+
     def test_purge_uses_configured_omp_binary(self):
         settings = SimpleNamespace(omp_bin="/opt/omp/bin/omp")
         with (
@@ -98,7 +111,12 @@ class CommandTests(unittest.TestCase):
         purge.assert_called_once_with("omp")
 
     def test_setup_orders_plugin_service_health_and_pairing(self):
-        settings = SimpleNamespace(omp_bin="omp", state_root=Path("/tmp/state"))
+        settings = SimpleNamespace(
+            omp_bin="omp",
+            state_root=Path("/tmp/state"),
+            auth_mode="pairing",
+            tailscale_user=None,
+        )
         calls = []
         secret = SimpleNamespace(token="secret", expires_at=1)
         manager = SimpleNamespace(begin_pairing=lambda: secret)
@@ -141,7 +159,12 @@ class CommandTests(unittest.TestCase):
         )
 
     def test_setup_rolls_back_new_plugin_and_service_after_failed_health(self):
-        settings = SimpleNamespace(omp_bin="omp", state_root=Path("/tmp/state"))
+        settings = SimpleNamespace(
+            omp_bin="omp",
+            state_root=Path("/tmp/state"),
+            auth_mode="pairing",
+            tailscale_user=None,
+        )
         manager = SimpleNamespace(begin_pairing=lambda: SimpleNamespace(token="secret", expires_at=1))
         service_snapshot = object()
         with (
@@ -180,7 +203,12 @@ class CommandTests(unittest.TestCase):
             state.mkdir()
             sentinel = state / "keep.txt"
             sentinel.write_text("foreign\n")
-            settings = SimpleNamespace(omp_bin="/usr/bin/omp", state_root=state)
+            settings = SimpleNamespace(
+                omp_bin="/usr/bin/omp",
+                state_root=state,
+                auth_mode="pairing",
+                tailscale_user=None,
+            )
             with patch.dict(cli.os.environ, environment, clear=False):
                 paths = installation_paths(config_file=config, state_root=state)
                 paths.unit_path.parent.mkdir(parents=True)
@@ -219,7 +247,12 @@ class CommandTests(unittest.TestCase):
     def test_setup_keeps_restored_plugin_backup_after_late_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            settings = SimpleNamespace(omp_bin="omp", state_root=root / "state")
+            settings = SimpleNamespace(
+                omp_bin="omp",
+                state_root=root / "state",
+                auth_mode="pairing",
+                tailscale_user=None,
+            )
             manager = SimpleNamespace(begin_pairing=lambda: SimpleNamespace(token="secret", expires_at=1))
             service_snapshot = object()
             plugin_backup = settings.state_root / "setup-rollback/plugin"
@@ -254,7 +287,12 @@ class CommandTests(unittest.TestCase):
             self.assertEqual((installed_plugin / "omp-deck.ts").read_text(), "restored\n")
 
     def test_setup_refuses_to_replace_unsnapshottable_existing_plugin(self):
-        settings = SimpleNamespace(omp_bin="omp", state_root=Path("/tmp/state"))
+        settings = SimpleNamespace(
+            omp_bin="omp",
+            state_root=Path("/tmp/state"),
+            auth_mode="pairing",
+            tailscale_user=None,
+        )
         manager = SimpleNamespace(begin_pairing=lambda: SimpleNamespace(token="secret", expires_at=1))
         with (
             patch.object(cli, "load_settings", return_value=settings),
@@ -276,7 +314,12 @@ class CommandTests(unittest.TestCase):
         install_plugin.assert_not_called()
 
     def test_setup_does_not_create_pairing_secret_before_success(self):
-        settings = SimpleNamespace(omp_bin="omp", state_root=Path("/tmp/state"))
+        settings = SimpleNamespace(
+            omp_bin="omp",
+            state_root=Path("/tmp/state"),
+            auth_mode="pairing",
+            tailscale_user=None,
+        )
         manager = Mock()
         with (
             patch.object(cli, "load_settings", return_value=settings),
@@ -295,7 +338,12 @@ class CommandTests(unittest.TestCase):
         manager.begin_pairing.assert_not_called()
 
     def test_setup_removes_tailscale_route_when_pairing_fails(self):
-        settings = SimpleNamespace(omp_bin="omp", state_root=Path("/tmp/state"))
+        settings = SimpleNamespace(
+            omp_bin="omp",
+            state_root=Path("/tmp/state"),
+            auth_mode="pairing",
+            tailscale_user=None,
+        )
         manager = Mock()
         manager.begin_pairing.side_effect = RuntimeError("pairing failed")
         with (

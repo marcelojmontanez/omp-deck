@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from omp_deck import server
 from omp_deck.auth import AuthenticationFailed
+from omp_deck.auth_policy import AuthPolicy
 from omp_deck.event_stream import EventJournal
 
 
@@ -40,10 +41,13 @@ class ServerSseBoundaryTests(unittest.TestCase):
         self.model = _FleetModel()
         self._model_patch = patch.object(server, "_fleet_model", self.model)
         self._auth_patch = patch.object(server, "_auth_manager", self.auth)
+        self._policy_patch = patch.object(server, "AUTH_POLICY", AuthPolicy())
         self._model_patch.start()
         self._auth_patch.start()
+        self._policy_patch.start()
         self.addCleanup(self._auth_patch.stop)
         self.addCleanup(self._model_patch.stop)
+        self.addCleanup(self._policy_patch.stop)
 
         self.httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         self.port = self.httpd.server_address[1]

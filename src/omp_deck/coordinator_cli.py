@@ -79,6 +79,8 @@ def _remove_machine(args, settings) -> None:
 
 
 def _pair(settings) -> None:
+    if settings.auth_mode != "pairing":
+        raise RuntimeError("pairing is disabled while auth_mode is 'tailscale'")
     secret = AuthManager(settings.state_root, cookie_name=COORDINATOR_COOKIE_NAME).begin_pairing()
     print(f"Pairing code: {secret.token}")
     print(f"Expires at Unix time {secret.expires_at}.")

@@ -29,6 +29,7 @@
         <input id="pair-token" name="token" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required>
         <button id="pair-submit" type="submit">Pair device</button>
       </div>
+      <button id="tailscale-sign-in" type="button" hidden>Sign in with Tailscale</button>
       <button id="auth-retry" type="button" hidden>Retry connection</button>
       <p class="auth-error" id="auth-error" role="alert" hidden></p>
       <p id="auth-status" role="status" aria-live="polite">Checking connection…</p>

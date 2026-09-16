@@ -12,6 +12,7 @@
     const title = document.getElementById('auth-title');
     const description = document.getElementById('auth-description');
     const submit = document.getElementById('pair-submit');
+    const tailscaleSignIn = document.getElementById('tailscale-sign-in');
     const retry = document.getElementById('auth-retry');
     let checkController = null;
     let generation = 0;
@@ -23,17 +24,31 @@
       return {generation, signal: checkController.signal};
     };
 
+    const isCurrent = request => (
+      !request.signal.aborted && request.generation === generation
+    );
+
     const showScreen = () => {
       app.hidden = true;
       screen.hidden = false;
     };
 
-    const showChecking = () => {
-      showScreen();
+    const hideActions = () => {
       fields.hidden = true;
+      tailscaleSignIn.hidden = true;
       retry.hidden = true;
+    };
+
+    const clearMessage = () => {
       error.hidden = true;
       error.textContent = '';
+      status.textContent = '';
+    };
+
+    const showChecking = () => {
+      showScreen();
+      hideActions();
+      clearMessage();
       title.textContent = 'Connecting to OMP Deck';
       description.textContent = 'Checking this device’s secure session…';
       status.textContent = 'Checking connection…';
@@ -41,24 +56,22 @@
 
     const showRetry = message => {
       showScreen();
-      fields.hidden = true;
+      hideActions();
       retry.hidden = false;
       title.textContent = 'OMP Deck is unreachable';
-      description.textContent = 'Pairing status is unchanged. Restore the connection, then retry.';
+      description.textContent = 'Authentication status is unchanged. Restore the connection, then retry.';
       status.textContent = '';
       error.textContent = message || 'Unable to reach OMP Deck.';
       error.hidden = false;
       retry.focus();
     };
 
-    const showUnpaired = ({clearToken = false} = {}) => {
+    const showPairing = ({clearToken = false} = {}) => {
       showScreen();
+      hideActions();
+      clearMessage();
       fields.hidden = false;
       submit.disabled = false;
-      retry.hidden = true;
-      error.hidden = true;
-      error.textContent = '';
-      status.textContent = '';
       title.textContent = 'Pair this device';
       description.textContent = 'Enter the one-time code shown by the command below.';
       document.getElementById('pair-command').textContent = api.mode() === 'coordinator'
@@ -68,61 +81,135 @@
       token.focus();
     };
 
+    const showTailscale = ({signedOut = false, retentionFailed = false, message = ''} = {}) => {
+      showScreen();
+      hideActions();
+      clearMessage();
+      tailscaleSignIn.hidden = false;
+      tailscaleSignIn.disabled = false;
+      if (signedOut) {
+        title.textContent = 'Signed out of OMP Deck';
+        description.textContent = 'Sign in again with the approved Tailscale account to continue.';
+      } else if (retentionFailed) {
+        title.textContent = 'Tailscale sign-in did not persist';
+        description.textContent = 'This browser did not retain the secure OMP Deck session.';
+      } else {
+        title.textContent = 'Tailscale access denied';
+        description.textContent = 'OMP Deck could not verify an approved Tailscale account for this connection.';
+      }
+      if (message) {
+        error.textContent = message;
+        error.hidden = false;
+      }
+      tailscaleSignIn.focus();
+    };
+
+    const showTailscaleChecking = () => {
+      showScreen();
+      hideActions();
+      clearMessage();
+      title.textContent = 'Signing in with Tailscale';
+      description.textContent = 'Verifying the approved Tailscale account for this connection…';
+      status.textContent = 'Signing in…';
+    };
+
+    const completeAuthentication = async (request, completedLabel) => {
+      status.textContent = `${completedLabel}. Verifying secure session…`;
+      const session = await api.session({signal: request.signal});
+      if (!isCurrent(request)) return;
+      if (!session.authenticated) {
+        const retentionError = new Error(
+          `${completedLabel}, but the secure session was not retained. Open OMP Deck over HTTPS.`
+        );
+        retentionError.name = 'SessionRetentionError';
+        throw retentionError;
+      }
+      if (api.mode() === 'coordinator') {
+        status.textContent = `${completedLabel}. Reloading the authenticated dashboard…`;
+        checkController = null;
+        location.reload();
+        return;
+      }
+      checkController = null;
+      await showApplication();
+    };
+
+    const signInWithTailscale = async request => {
+      showTailscaleChecking();
+      try {
+        await api.tailscaleLogin({signal: request.signal});
+        if (!isCurrent(request)) return;
+        await completeAuthentication(request, 'Signed in with Tailscale');
+      } catch (caught) {
+        if (!isCurrent(request)) return;
+        checkController = null;
+        if (caught.name === 'TailscaleAccessDeniedError') {
+          showTailscale({message: caught.message});
+        } else if (caught.name === 'SessionRetentionError') {
+          showTailscale({retentionFailed: true, message: caught.message});
+        } else {
+          showRetry(caught.message);
+        }
+      }
+    };
+
     const check = async () => {
       const request = begin();
       showChecking();
       try {
         const session = await api.session({signal: request.signal});
-        if (request.generation !== generation) return;
-        checkController = null;
-        if (session.authenticated) await showApplication();
-        else {
+        if (!isCurrent(request)) return;
+        if (session.authenticated) {
+          checkController = null;
+          await showApplication();
+        } else {
           resetApplication();
-          showUnpaired({clearToken: true});
+          if (api.authMode() === 'tailscale') {
+            await signInWithTailscale(request);
+          } else {
+            checkController = null;
+            showPairing({clearToken: true});
+          }
         }
       } catch (caught) {
-        if (request.signal.aborted || request.generation !== generation) return;
-        checkController?.abort();
+        if (!isCurrent(request)) return;
         checkController = null;
         showRetry(caught.message);
       }
     };
 
     retry.addEventListener('click', () => { void check(); });
+    tailscaleSignIn.addEventListener('click', () => {
+      const request = begin();
+      void signInWithTailscale(request);
+    });
     form.addEventListener('submit', async event => {
       event.preventDefault();
+      if (api.authMode() !== 'pairing') return;
       const request = begin();
       error.hidden = true;
       status.textContent = 'Pairing…';
       submit.disabled = true;
       try {
         await api.pair(token.value.trim(), {signal: request.signal});
-        status.textContent = 'Paired. Verifying secure session…';
-        const session = await api.session({signal: request.signal});
-        if (request.generation !== generation) return;
-        if (!session.authenticated) {
-          throw new Error('Pairing succeeded, but the secure session was not retained. Open OMP Deck over HTTPS.');
-        }
-        if (api.mode() === 'coordinator') {
-          status.textContent = 'Paired. Reloading the authenticated dashboard…';
-          location.reload();
-          return;
-        }
-        checkController = null;
-        await showApplication();
+        if (!isCurrent(request)) return;
+        await completeAuthentication(request, 'Paired');
       } catch (caught) {
-        if (request.signal.aborted || request.generation !== generation) return;
+        if (!isCurrent(request)) return;
+        checkController = null;
         status.textContent = '';
         error.textContent = caught.message;
         error.hidden = false;
         token.select();
       } finally {
-        if (request.generation === generation) submit.disabled = false;
+        if (isCurrent(request)) submit.disabled = false;
       }
     });
 
     const retryIfDisconnected = () => {
-      if (!retry.hidden || (checkController && fields.hidden)) void check();
+      if (!retry.hidden || (checkController && fields.hidden && tailscaleSignIn.hidden)) {
+        void check();
+      }
     };
     window.addEventListener('online', retryIfDisconnected);
     document.addEventListener('visibilitychange', () => {
@@ -130,19 +217,23 @@
     });
 
     window.addEventListener('omp-deck-auth-required', () => {
-      begin();
-      void clearLocalData();
+      const request = begin();
       resetApplication();
-      showUnpaired();
+      showChecking();
+      void clearLocalData().catch(() => {}).then(() => {
+        if (isCurrent(request)) void check();
+      });
     });
     document.addEventListener('DOMContentLoaded', () => { void check(); }, {once: true});
 
     return Object.freeze({
       check,
-      requirePairing(options) {
+      requireAuthentication(options = {}) {
         begin();
+        checkController = null;
         resetApplication();
-        showUnpaired(options);
+        if (api.authMode() === 'tailscale') showTailscale({signedOut: true});
+        else showPairing(options);
       },
     });
   }

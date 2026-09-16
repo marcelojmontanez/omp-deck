@@ -12,6 +12,7 @@ from pathlib import Path
 from socketserver import TCPServer
 
 from .auth import COOKIE_NAME, AuthenticationFailed, AuthError, AuthManager, PairingFailed, PairingRateLimited
+from .auth_policy import TAILSCALE_AUTH, AuthPolicy
 from .request_parsing import cookie_credential, read_json_request, request_host, trusted_browser_request
 
 _STATIC_ROOT = Path(__file__).parent / "static"
@@ -138,6 +139,9 @@ class DeckHttpHandler(SimpleHTTPRequestHandler):
     def cookie_name(self) -> str:
         return COOKIE_NAME
 
+    def auth_policy(self) -> AuthPolicy:
+        return AuthPolicy()
+
     def connect_origins(self) -> tuple[str, ...]:
         return ()
 
@@ -145,6 +149,7 @@ class DeckHttpHandler(SimpleHTTPRequestHandler):
         return None
 
     def request_authenticated(self, *, csrf: bool = False):
+        self.auth_policy().require_request_identity(self.headers, self.client_address)
         credential = cookie_credential(self.headers, self.cookie_name())
         if csrf:
             return self.auth_backend().validate_csrf(credential, self.headers.get("X-OMP-Deck-CSRF"))
@@ -204,7 +209,7 @@ class DeckHttpHandler(SimpleHTTPRequestHandler):
         return True
 
     def handle_auth_post(self, path: str) -> bool:
-        if path not in {"/api/auth/pair", "/api/auth/logout", "/api/auth/revoke-all"}:
+        if path not in {"/api/auth/pair", "/api/auth/tailscale", "/api/auth/logout", "/api/auth/revoke-all"}:
             return False
         if not self.host_valid():
             self.reply(400, {"error": "invalid host"})
@@ -213,7 +218,13 @@ class DeckHttpHandler(SimpleHTTPRequestHandler):
             self.reply(403, {"error": "request origin is not allowed"})
             return True
         if path == "/api/auth/pair":
-            self._pair()
+            if not self.auth_policy().pairing_enabled:
+                self.reply(403, {"error": "pairing is disabled"})
+            else:
+                self._pair()
+            return True
+        if path == "/api/auth/tailscale":
+            self._tailscale_login()
             return True
         try:
             self.request_authenticated(csrf=True)
@@ -262,6 +273,40 @@ class DeckHttpHandler(SimpleHTTPRequestHandler):
                 "csrfToken": paired.device.csrf_token,
             },
             headers=(("Set-Cookie", paired.set_cookie),),
+        )
+
+    def _tailscale_login(self) -> None:
+        policy = self.auth_policy()
+        if policy.mode != TAILSCALE_AUTH:
+            self.reply(403, {"error": "Tailscale authentication is disabled"})
+            return
+        try:
+            policy.require_request_identity(self.headers, self.client_address)
+            data = self.read_json(4096)
+            if data:
+                raise ValueError("request body must be empty")
+            credential = cookie_credential(self.headers, self.cookie_name())
+            issued = self.auth_backend().authenticate_or_issue(credential)
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            self.reply(400, {"error": str(error)})
+            return
+        except TimeoutError:
+            self.reply(408, {"error": "request body timed out"})
+            return
+        except AuthenticationFailed:
+            self.reply(403, {"error": "Tailscale authentication denied"})
+            return
+        except AuthError:
+            self.reply(503, {"error": "authentication state unavailable"})
+            return
+        self.reply(
+            200,
+            {
+                "authenticated": True,
+                "deviceId": issued.device.device_id,
+                "csrfToken": issued.device.csrf_token,
+            },
+            headers=(("Set-Cookie", issued.set_cookie),),
         )
 
     def log_message(self, format, *args) -> None:

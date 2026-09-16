@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import {existsSync} from 'node:fs';
-import {mkdtemp, mkdir, rm, writeFile} from 'node:fs/promises';
+import {mkdtemp, mkdir, readFile, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {spawn, spawnSync} from 'node:child_process';
 import net from 'node:net';
+import http from 'node:http';
 import {once} from 'node:events';
 import test from 'node:test';
 import puppeteer from 'puppeteer';
@@ -81,6 +82,42 @@ async function stop(server) {
   server.child.kill('SIGTERM');
   const timer = setTimeout(() => server.child.kill('SIGKILL'), 5000);
   try {await exited;} finally {clearTimeout(timer);}
+}
+
+async function tailscaleProxy(server) {
+  const backendPort = new URL(server.origin).port;
+  server.identity = 'owner@example.test';
+  const proxy = http.createServer((request, response) => {
+    const headers = {...request.headers};
+    for (const name of Object.keys(headers)) {
+      if (name.startsWith('tailscale-user-')) delete headers[name];
+    }
+    if (server.identity !== null) headers['tailscale-user-login'] = server.identity;
+    const upstream = http.request({
+      hostname: '127.0.0.1', port: backendPort, path: request.url, method: request.method, headers,
+    }, reply => {
+      if (server.retainCookies === false) delete reply.headers['set-cookie'];
+      response.writeHead(reply.statusCode, reply.headers);
+      reply.pipe(response);
+    });
+    upstream.on('error', () => {
+      if (!response.headersSent) response.writeHead(502);
+      response.end();
+    });
+    response.on('close', () => upstream.destroy());
+    request.pipe(upstream);
+  });
+  await new Promise(resolve => proxy.listen(0, '127.0.0.1', resolve));
+  server.origin = `http://localhost:${proxy.address().port}`;
+  const values = JSON.parse(await readFile(server.config, 'utf8'));
+  if (values.origin) values.origin = server.origin;
+  Object.assign(values, {auth_mode: 'tailscale', tailscale_user: server.identity});
+  await writeFile(server.config, JSON.stringify(values), {mode: 0o600});
+  return async () => {
+    const closed = new Promise(resolve => proxy.close(resolve));
+    proxy.closeAllConnections();
+    await closed;
+  };
 }
 
 async function pair(page, coordinator) {
@@ -273,4 +310,144 @@ test('independent viewers route duplicate session IDs directly and survive one m
   await computer.click('#send');
   await computer.waitForFunction(() => document.getElementById('activity').textContent.includes('Second device stays authorized'));
   assert.deepEqual(pageErrors, [], 'fleet lifecycles must not raise uncaught JavaScript errors');
+});
+
+test('Tailscale sign-in protects coordinator and node cookies without weakening enrolled tickets', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'deck-tailscale-browser-'));
+  const coordinator = await configure(root, 'coordinator', true);
+  const node = await configure(root, 'node');
+  const proxies = [];
+  let chrome;
+  t.after(async () => {
+    await chrome?.close();
+    await Promise.all(proxies.map(close => close()));
+    await Promise.all([coordinator, node].map(stop));
+    await rm(root, {recursive: true, force: true});
+  });
+  proxies.push(await tailscaleProxy(coordinator), await tailscaleProxy(node));
+  const bundle = path.join(coordinator.base, 'node.json');
+  command(coordinator, ['coordinator', 'machine', 'add', 'Node', '--origin', node.origin,
+    '--out', bundle, '--config', coordinator.config]);
+  command(node, ['fleet', 'join', '--file', bundle, '--config', node.config]);
+  await start(coordinator, ['-m', 'omp_deck', 'coordinator', 'serve', '--config', coordinator.config]);
+  await start(node, ['-m', 'tests.fixtures.fleet_browser_server', 'Node']);
+  chrome = await puppeteer.launch({headless: true, args: ['--no-sandbox']});
+  const [fleetContext, localContext] = await Promise.all([
+    chrome.createBrowserContext(), chrome.createBrowserContext(),
+  ]);
+  const [fleet, local] = await Promise.all([fleetContext.newPage(), localContext.newPage()]);
+  await fleet.setViewport({width: 390, height: 844});
+  await local.setViewport({width: 1440, height: 900});
+  const errors = [];
+  const signIns = [];
+  const directRequests = [];
+  for (const page of [fleet, local]) {
+    page.on('pageerror', error => errors.push(error.message));
+    page.on('request', request => {
+      const url = new URL(request.url());
+      if (url.pathname === '/api/auth/tailscale') signIns.push(url.origin);
+      if (page === fleet && url.origin === node.origin && url.pathname.startsWith('/api/')) {
+        directRequests.push({method: request.method(), headers: request.headers()});
+      }
+    });
+    await page.goto(page === fleet ? coordinator.origin : node.origin, {waitUntil: 'domcontentloaded'});
+    await page.waitForFunction(() => (
+      document.getElementById('auth-screen')?.hidden
+      && document.querySelectorAll('#agent-list [data-id]').length === 1
+    ));
+    assert.equal(await page.$eval('#pairing-fields', fields => fields.hidden), true);
+    assert.equal(await page.evaluate(() => (
+      document.documentElement.scrollWidth > document.documentElement.clientWidth
+    )), false);
+  }
+  assert.deepEqual(signIns, [coordinator.origin, node.origin]);
+  await fleet.reload({waitUntil: 'domcontentloaded'});
+  await fleet.waitForFunction(() => (
+    document.getElementById('auth-screen')?.hidden
+    && document.querySelectorAll('#agent-list [data-id]').length === 1
+  ));
+  assert.deepEqual(signIns, [coordinator.origin, node.origin], 'valid cookies must survive navigation');
+  assert(directRequests.some(request => request.method !== 'OPTIONS' && request.headers.authorization));
+  assert(directRequests.every(request => !request.headers.cookie), 'fleet access must not send ambient cookies');
+
+  coordinator.retainCookies = false;
+  const blockedContext = await chrome.createBrowserContext();
+  const blocked = await blockedContext.newPage();
+  let blockedSignIns = 0;
+  blocked.on('request', request => {
+    if (new URL(request.url()).pathname === '/api/auth/tailscale') blockedSignIns += 1;
+  });
+  await blocked.goto(coordinator.origin, {waitUntil: 'domcontentloaded'});
+  await blocked.waitForSelector('#tailscale-sign-in:not([hidden])');
+  assert.equal(await blocked.$eval('#app', app => app.hidden), true);
+  assert.equal(await blocked.$eval('#pairing-fields', fields => fields.hidden), true);
+  await blocked.evaluate(() => {
+    window.dispatchEvent(new Event('online'));
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await blocked.waitForNetworkIdle({idleTime: 300});
+  assert.equal(blockedSignIns, 1, 'missing cookie retention must not cause an automatic sign-in loop');
+  await blockedContext.close();
+  coordinator.retainCookies = true;
+
+  node.identity = null;
+  assert.equal(await local.evaluate(async () => (await fetch('/api/sessions')).status), 401);
+  assert.equal(await fleet.evaluate(async () => (
+    await ompDeckApi.request('/api/sessions', {machineId: ompDeckApi.machines()[0].id})
+  ).status), 200, 'enrolled tickets remain an independent authority');
+  node.identity = 'owner@example.test';
+  await fleet.evaluate(() => {
+    const originalFetch = window.fetch;
+    window.fetch = async (input, options) => {
+      const response = await originalFetch(input, options);
+      if (input === '/api/auth/tailscale') {
+        return new Promise(resolve => {
+          window.releaseSignIn = () => {
+            window.fetch = originalFetch;
+            resolve(response);
+          };
+        });
+      }
+      return response;
+    };
+    window.delayedSignIn = ompDeckApi.tailscaleLogin().then(
+      () => 'accepted', error => error.name
+    );
+  });
+  await fleet.waitForFunction(() => typeof window.releaseSignIn === 'function');
+  await fleet.click('.dashboard-actions [data-deck-settings]');
+  await fleet.click('[data-session-action="logout"]');
+  await fleet.waitForFunction(() => !document.getElementById('auth-screen').hidden);
+  assert.equal(await fleet.evaluate(async () => {
+    window.releaseSignIn();
+    return await window.delayedSignIn;
+  }), 'AbortError', 'a delayed sign-in must not overwrite newer logout state');
+  assert.equal(await fleet.$eval('#pairing-fields', fields => fields.hidden), true);
+  assert.equal(await fleet.evaluate(async () => (
+    await (await fetch('/api/auth/session')).json()
+  ).authenticated), false, 'logout must not immediately auto-sign-in');
+  await fleet.click('#tailscale-sign-in');
+  await fleet.waitForFunction(() => (
+    document.getElementById('auth-screen')?.hidden
+    && document.querySelectorAll('#agent-list [data-id]').length === 1
+  ));
+
+  coordinator.identity = 'other@example.test';
+  assert.equal(await fleet.evaluate(async () => (await fetch('/api/fleet')).status), 401);
+  const spoofed = await fetch(`${coordinator.origin}/api/auth/tailscale`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', Origin: coordinator.origin,
+      'Tailscale-User-Login': 'owner@example.test'},
+    body: '{}',
+  });
+  assert.equal(spoofed.status, 403, 'the proxy must overwrite supplied identity headers');
+  assert.equal(spoofed.headers.get('set-cookie'), null);
+  await fleet.reload({waitUntil: 'domcontentloaded'});
+  await fleet.waitForFunction(() => (
+    !document.getElementById('auth-screen').hidden
+    && !document.getElementById('auth-error').hidden
+  ));
+  assert.equal(await fleet.$eval('#pairing-fields', fields => fields.hidden), true);
+  assert.equal(await fleet.$eval('#app', app => app.hidden), true);
+  assert.deepEqual(errors, [], 'automatic login and denial must not raise page errors');
 });

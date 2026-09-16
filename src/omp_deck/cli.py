@@ -133,6 +133,8 @@ def _require_supported_migration():
 
 def pair():
     settings = load_settings()
+    if settings.auth_mode != "pairing":
+        raise RuntimeError("pairing is disabled while auth_mode is 'tailscale'")
     print_pairing(AuthManager(settings.state_root).begin_pairing())
 
 
@@ -168,7 +170,7 @@ def setup(*, tailscale=False):
         check_health(settings)
         if tailscale:
             tailscale_touched = enable_tailscale(settings)
-        secret = AuthManager(settings.state_root).begin_pairing()
+        secret = AuthManager(settings.state_root).begin_pairing() if settings.auth_mode == "pairing" else None
     except Exception as error:
         rollback_errors = []
         if tailscale_touched:
@@ -190,7 +192,8 @@ def setup(*, tailscale=False):
             raise RuntimeError(f"{error}; setup rollback failed: {'; '.join(rollback_errors)}") from error
         raise
     discard_plugin_backup(plugin_backup)
-    print_pairing(secret)
+    if secret is not None:
+        print_pairing(secret)
 
 
 def _check(label, healthy, *, optional=False, detail=""):

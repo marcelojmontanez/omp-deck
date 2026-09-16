@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 from ._http_common import DeckHttpHandler, ThreadingHTTPServer
 from .auth import AuthenticationFailed, AuthError, AuthManager, validate_auth_state
+from .auth_policy import AuthPolicy
 from .coordinator_settings import COORDINATOR_COOKIE_NAME, CoordinatorSettings
 from .coordinator_store import CoordinatorStateError, CoordinatorStore
 from .fleet_protocol import issue_ticket
@@ -18,12 +19,14 @@ class CoordinatorContext:
     settings: CoordinatorSettings
     store: CoordinatorStore
     auth: AuthManager
+    policy: AuthPolicy
 
     @classmethod
     def create(cls, settings: CoordinatorSettings) -> CoordinatorContext:
         store = CoordinatorStore(settings.state_root, settings.origin)
         auth = AuthManager(settings.state_root, cookie_name=COORDINATOR_COOKIE_NAME)
-        return cls(settings=settings, store=store, auth=auth)
+        policy = AuthPolicy(settings.auth_mode, settings.tailscale_user)
+        return cls(settings=settings, store=store, auth=auth, policy=policy)
 
 
 class CoordinatorHTTPServer(ThreadingHTTPServer):
@@ -43,6 +46,9 @@ class CoordinatorHandler(DeckHttpHandler):
 
     def auth_backend(self) -> AuthManager:
         return self.context.auth
+
+    def auth_policy(self) -> AuthPolicy:
+        return self.context.policy
 
     def cookie_name(self) -> str:
         return COORDINATOR_COOKIE_NAME
@@ -84,7 +90,7 @@ class CoordinatorHandler(DeckHttpHandler):
             self._health()
             return
         if path == "/api/client-config":
-            self.reply(200, {"mode": "coordinator"})
+            self.reply(200, {"mode": "coordinator", "authMode": self.context.policy.mode})
             return
         if self.handle_auth_get(path):
             return

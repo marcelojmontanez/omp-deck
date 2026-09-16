@@ -100,6 +100,46 @@ class CoordinatorStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "explicit allowed_hosts"):
             load_coordinator_settings(config)
 
+    def test_tailscale_auth_configuration_requires_owner_and_loopback_listener(self):
+        config = Path(self.temp.name) / "coordinator-auth.json"
+        state = Path(self.temp.name) / "coordinator-auth-state"
+        base = {"origin": self.origin, "state_root": str(state)}
+        for auth in (
+            {"auth_mode": "invalid"},
+            {"auth_mode": "tailscale"},
+            {"auth_mode": "pairing", "tailscale_user": "owner@example.com"},
+            {
+                "auth_mode": "tailscale",
+                "tailscale_user": "owner@example.com",
+                "host": "0.0.0.0",
+                "allowed_hosts": ["coordinator.example"],
+            },
+        ):
+            with self.subTest(auth=auth):
+                config.write_text(json.dumps({**base, **auth}))
+                config.chmod(0o600)
+                with self.assertRaises(RuntimeError):
+                    load_coordinator_settings(config)
+
+    def test_pair_cli_refuses_tailscale_mode_without_creating_auth_state(self):
+        config = Path(self.temp.name) / "coordinator-tailscale.json"
+        state = Path(self.temp.name) / "coordinator-tailscale-state"
+        config.write_text(
+            json.dumps(
+                {
+                    "origin": self.origin,
+                    "state_root": str(state),
+                    "auth_mode": "tailscale",
+                    "tailscale_user": "owner@example.com",
+                }
+            )
+        )
+        config.chmod(0o600)
+
+        with self.assertRaises(RuntimeError):
+            run_coordinator(Namespace(coordinator_action="pair", config=str(config)))
+        self.assertFalse((state / "auth.json").exists())
+
     def test_machine_add_cli_writes_exclusive_owner_only_public_bundle(self):
         config = Path(self.temp.name) / "coordinator.json"
         output = Path(self.temp.name) / "join.json"
@@ -205,7 +245,10 @@ class CoordinatorHTTPTests(unittest.TestCase):
             try:
                 connection.request("GET", "/api/client-config", headers={"Host": "[::1]:18799"})
                 response = connection.getresponse()
-                self.assertEqual((response.status, json.loads(response.read())), (200, {"mode": "coordinator"}))
+                self.assertEqual(
+                    (response.status, json.loads(response.read())),
+                    (200, {"mode": "coordinator", "authMode": "pairing"}),
+                )
             finally:
                 connection.close()
         finally:
@@ -240,7 +283,7 @@ class CoordinatorHTTPTests(unittest.TestCase):
 
     def test_public_surface_discloses_neither_roster_nor_machine_csp(self):
         status, headers, payload = self.request("GET", "/api/client-config")
-        self.assertEqual((status, payload), (200, {"mode": "coordinator"}))
+        self.assertEqual((status, payload), (200, {"mode": "coordinator", "authMode": "pairing"}))
         self.assertNotIn("workstation.example", headers["Content-Security-Policy"])
 
         status, headers, _ = self.request("GET", "/", parse_json=False)

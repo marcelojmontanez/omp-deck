@@ -8,6 +8,7 @@
 - Add a native macOS CI gate for LaunchAgent lifecycle, Python portability contracts, and the Unix-socket plugin.
 - Add an optional standalone multi-machine coordinator with explicit node enrollment, an authenticated shared dashboard, direct browser-to-node connections using 60-second Ed25519 bearer tickets, per-machine outage isolation, bounded revocation behavior, and documented backup and re-enrollment recovery.
 - Make ongoing sessions the default dashboard, with a quiet secondary History view for retained unattached records and ongoing-only summary counts.
+- Add optional owner-account sign-in through Tailscale Serve for standalone nodes and shared dashboards. Pairing remains the default; opting in replaces codes with an explicit account allowlist while retaining browser cookies, CSRF protection, and fleet ticket checks.
 
 ### Changed
 

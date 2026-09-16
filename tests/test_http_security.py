@@ -4,6 +4,7 @@ import json
 import tempfile
 import threading
 import unittest
+from email.header import Header
 from email.utils import parsedate_to_datetime
 from http.cookies import SimpleCookie
 from pathlib import Path
@@ -12,6 +13,7 @@ from unittest.mock import patch
 
 from omp_deck import attachments, server
 from omp_deck.auth import AuthManager
+from omp_deck.auth_policy import AuthPolicy
 
 
 class Clock:
@@ -32,11 +34,16 @@ class HttpSecurityTests(unittest.TestCase):
         settings = SimpleNamespace(
             allowed_hosts=("127.0.0.1",),
             state_root=Path(self.directory.name),
+            auth_mode="pairing",
+            tailscale_user=None,
         )
         self.settings = settings
         self.settings_patch = patch.object(server, "SETTINGS", settings)
         self.settings_patch.start()
         self.addCleanup(self.settings_patch.stop)
+        self.policy_patch = patch.object(server, "AUTH_POLICY", AuthPolicy())
+        self.policy_patch.start()
+        self.addCleanup(self.policy_patch.stop)
         self.blob_root = Path(self.directory.name) / "blobs"
         self.blob_root.mkdir()
         self.blob_patch = patch.object(
@@ -67,6 +74,23 @@ class HttpSecurityTests(unittest.TestCase):
         response = connection.getresponse()
         data = json.loads(response.read())
         result = response.status, response.headers, data
+        connection.close()
+        return result
+
+    def request_with_duplicate_identity(self, path, body, values):
+        connection = http.client.HTTPConnection("127.0.0.1", self.httpd.server_port)
+        payload = json.dumps(body)
+        connection.putrequest("POST", path, skip_host=True)
+        connection.putheader("Host", self.host)
+        connection.putheader("Origin", self.origin)
+        connection.putheader("Sec-Fetch-Site", "same-origin")
+        connection.putheader("Content-Type", "application/json")
+        connection.putheader("Content-Length", str(len(payload)))
+        for value in values:
+            connection.putheader("Tailscale-User-Login", value)
+        connection.endheaders(payload.encode())
+        response = connection.getresponse()
+        result = response.status, response.headers, json.loads(response.read())
         connection.close()
         return result
 
@@ -239,6 +263,153 @@ class HttpSecurityTests(unittest.TestCase):
             )
             self.assertEqual((status, payload), (200, {"authenticated": False}))
             self.assertIsNone(session_headers.get("Set-Cookie"))
+
+    def test_tailscale_login_reuses_cookie_and_requires_identity_and_csrf_on_every_request(self):
+        cookie, _ = self.pair()
+        credential = cookie.split("=", 1)[1]
+        first_device = server.auth_manager().authenticate(credential).device_id
+        self.settings.auth_mode = "tailscale"
+        self.settings.tailscale_user = "owner@example.com"
+        server.AUTH_POLICY = AuthPolicy("tailscale", "owner@example.com")
+        identity = {"Tailscale-User-Login": "owner@example.com"}
+        trusted = {**identity, "Origin": self.origin, "Sec-Fetch-Site": "same-origin"}
+        status, _, adopted = self.request(
+            "GET",
+            "/api/auth/session",
+            headers={**identity, "Cookie": cookie},
+        )
+        self.assertEqual((status, adopted["deviceId"]), (200, first_device))
+
+        status, headers, login = self.request(
+            "POST",
+            "/api/auth/tailscale",
+            {},
+            {**trusted, "Cookie": cookie},
+        )
+        self.assertEqual((status, login["deviceId"]), (200, first_device))
+        self.assertTrue(login["authenticated"])
+        self.assertEqual(headers["Set-Cookie"].split(";", 1)[0], cookie)
+
+        status, _, repeated = self.request(
+            "POST",
+            "/api/auth/tailscale",
+            {},
+            {**trusted, "Cookie": cookie},
+        )
+        self.assertEqual((status, repeated["deviceId"]), (200, first_device))
+
+        status, _, session = self.request(
+            "GET",
+            "/api/auth/session",
+            headers={**identity, "Cookie": cookie},
+        )
+        self.assertEqual((status, session["deviceId"]), (200, first_device))
+        for headers in (
+            {"Cookie": cookie},
+            {"Cookie": cookie, "Tailscale-User-Login": "other@example.com"},
+        ):
+            status, _, payload = self.request("GET", "/api/auth/session", headers=headers)
+            self.assertEqual((status, payload), (200, {"authenticated": False}))
+
+        mutation = {
+            **trusted,
+            "Cookie": cookie,
+        }
+        status, _, _ = self.request("POST", "/api/auth/logout", {}, mutation)
+        self.assertEqual(status, 403)
+        status, _, _ = self.request(
+            "POST",
+            "/api/auth/logout",
+            {},
+            {**mutation, "X-OMP-Deck-CSRF": login["csrfToken"], "Tailscale-User-Login": "other@example.com"},
+        )
+        self.assertEqual(status, 403)
+        status, headers, payload = self.request(
+            "POST",
+            "/api/auth/logout",
+            {},
+            {**mutation, "X-OMP-Deck-CSRF": login["csrfToken"]},
+        )
+        self.assertEqual((status, payload), (200, {"ok": True}))
+        self.assertIn("Max-Age=0", headers["Set-Cookie"])
+
+    def test_rfc2047_utf8_identity_issues_cookie_usable_for_session_authentication(self):
+        owner = "ü" * 500 + "@x"
+        encoded = " ".join(part.strip() for part in Header(owner, "utf-8").encode().splitlines())
+        self.settings.auth_mode = "tailscale"
+        self.settings.tailscale_user = owner
+        server.AUTH_POLICY = AuthPolicy("tailscale", owner)
+        identity = {"Tailscale-User-Login": encoded}
+        trusted = {**identity, "Origin": self.origin, "Sec-Fetch-Site": "same-origin"}
+
+        status, headers, login = self.request("POST", "/api/auth/tailscale", {}, trusted)
+        self.assertEqual(status, 200)
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+        status, _, session = self.request(
+            "GET",
+            "/api/auth/session",
+            headers={**identity, "Cookie": cookie},
+        )
+        self.assertEqual(
+            (status, session),
+            (
+                200,
+                {
+                    "authenticated": True,
+                    "deviceId": login["deviceId"],
+                    "csrfToken": login["csrfToken"],
+                },
+            ),
+        )
+
+    def test_tailscale_login_rejects_untrusted_inputs_without_consuming_pairing_secret(self):
+        self.settings.auth_mode = "tailscale"
+        self.settings.tailscale_user = "owner@example.com"
+        identity = {"Tailscale-User-Login": "owner@example.com"}
+        trusted = {**identity, "Origin": self.origin, "Sec-Fetch-Site": "same-origin"}
+        server.AUTH_POLICY = AuthPolicy("tailscale", "owner@example.com")
+        secret = server.auth_manager().begin_pairing()
+
+        denied = (
+            ({}, {"Origin": self.origin, "Sec-Fetch-Site": "same-origin"}),
+            ({}, {**trusted, "Tailscale-User-Login": "other@example.com"}),
+            ({}, {**trusted, "Tailscale-User-Login": "=?UTF-8?B?not-base64!?="}),
+            ({}, {**trusted, "Origin": "http://attacker.example"}),
+            ({"identity": "owner@example.com"}, trusted),
+            ([], trusted),
+        )
+        for body, headers in denied:
+            with self.subTest(body=body, headers=headers):
+                status, response_headers, _ = self.request("POST", "/api/auth/tailscale", body, headers)
+                self.assertIn(status, {400, 403})
+                self.assertIsNone(response_headers.get("Set-Cookie"))
+
+        status, headers, _ = self.request("POST", "/api/auth/pair", {"token": secret.token}, trusted)
+        self.assertEqual(status, 403)
+        self.assertIsNone(headers.get("Set-Cookie"))
+        state = json.loads((self.settings.state_root / "auth.json").read_text())
+        self.assertEqual(state["devices"], {})
+        paired = server.auth_manager().pair(secret.token, source="proof-pairing-token-was-not-consumed")
+        self.assertEqual(server.auth_manager().authenticate(paired.credential).device_id, paired.device.device_id)
+
+        status, headers, _ = self.request_with_duplicate_identity(
+            "/api/auth/tailscale",
+            {},
+            ("owner@example.com", "owner@example.com"),
+        )
+        self.assertEqual(status, 403)
+        self.assertIsNone(headers.get("Set-Cookie"))
+
+    def test_client_config_publishes_auth_mode_without_owner_identity(self):
+        status, _, payload = self.request("GET", "/api/client-config")
+        self.assertEqual((status, payload), (200, {"mode": "local", "authMode": "pairing"}))
+
+        self.settings.auth_mode = "tailscale"
+        self.settings.tailscale_user = "private-owner@example.com"
+        status, _, payload = self.request("GET", "/api/client-config")
+
+        self.assertEqual((status, payload), (200, {"mode": "local", "authMode": "tailscale"}))
+        self.assertNotIn("private-owner@example.com", json.dumps(payload))
 
     def test_invalid_host_is_rejected_before_static_or_api_access(self):
         connection = http.client.HTTPConnection("127.0.0.1", self.httpd.server_port)

@@ -13,6 +13,7 @@ from ._terminal_commands import TerminalCommandConflict
 from .attachments import detect_image_mime, read_blob
 from .auth import COOKIE_NAME as COOKIE_NAME
 from .auth import AuthenticationFailed, AuthError, AuthManager
+from .auth_policy import AuthPolicy
 from .fleet_model import FleetModel
 from .fleet_protocol import verify_ticket
 from .normalized_actions import NormalizedActionDispatcher
@@ -31,6 +32,7 @@ HOST = SETTINGS.host
 PORT = SETTINGS.port
 SESSION_ROOT = SETTINGS.session_root
 DEV_ROOT = SETTINGS.project_root
+AUTH_POLICY = AuthPolicy(SETTINGS.auth_mode, SETTINGS.tailscale_user)
 _auth_manager = None
 _auth_lock = threading.Lock()
 _cursor_store = None
@@ -162,6 +164,9 @@ def action_dispatcher():
 class Handler(DeckHttpHandler):
     def auth_backend(self):
         return auth_manager()
+
+    def auth_policy(self):
+        return AUTH_POLICY
 
     def allowed_hosts(self):
         return SETTINGS.allowed_hosts
@@ -320,7 +325,7 @@ class Handler(DeckHttpHandler):
             )
             return
         if request_path == "/api/client-config":
-            self.reply(200, {"mode": "local"})
+            self.reply(200, {"mode": "local", "authMode": SETTINGS.auth_mode})
             return
         if request_path.startswith("/api/auth/") and self.headers.get_all("Authorization", []):
             self.reply(403, {"error": "fleet authorization is not allowed for local authentication"})

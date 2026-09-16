@@ -145,7 +145,12 @@ function showSessionInfo(trigger) {
 }
 
 function showDeckSettings(trigger) {
-  if (el['settings-status']) el['settings-status'].textContent = '';
+  const revoke = el['deck-settings']?.querySelector('[data-session-action="revoke-all"]');
+  if (revoke) {
+    revoke.textContent = ompDeckApi.authMode() === 'tailscale'
+      ? 'Sign out all browser sessions'
+      : 'Revoke all devices';
+  }
   openDialog(el['deck-settings'], dialogReturnTarget(trigger));
 }
 
@@ -190,9 +195,16 @@ async function runSettingsAction(button) {
 
   if (!['logout', 'revoke-all'].includes(action)) return;
   const all = action === 'revoke-all';
-  if (all && !confirm('Revoke access for every paired device?')) return;
+  const tailscale = ompDeckApi.authMode() === 'tailscale';
+  if (all && !confirm(tailscale
+    ? 'Sign out every OMP Deck browser session? Approved Tailscale users can sign in again.'
+    : 'Revoke access for every paired device?')) return;
   setSettingsBusy(true);
-  if (status) status.textContent = all ? 'Revoking paired devices…' : 'Logging out…';
+  if (status) {
+    status.textContent = all
+      ? (tailscale ? 'Signing out browser sessions…' : 'Revoking paired devices…')
+      : 'Logging out…';
+  }
   let loggedOut = false;
   try {
     await ompDeckApi.logout({all});
@@ -206,7 +218,7 @@ async function runSettingsAction(button) {
   } finally {
     if (loggedOut) {
       clearPrivateDialogState();
-      authRecovery.requirePairing({clearToken: true});
+      authRecovery.requireAuthentication({clearToken: true});
     }
     setSettingsBusy(false);
   }

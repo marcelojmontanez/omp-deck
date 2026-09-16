@@ -40,6 +40,23 @@ class StorageSettingsTests(unittest.TestCase):
 
             self.assertEqual(load_settings(config).omp_bin, "omp-custom")
 
+    def test_tailscale_auth_configuration_requires_one_owner_and_loopback_listener(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.json"
+
+            for values in (
+                {"auth_mode": "unknown"},
+                {"auth_mode": "tailscale"},
+                {"auth_mode": "tailscale", "tailscale_user": "  "},
+                {"auth_mode": "pairing", "tailscale_user": "owner@example.com"},
+                {"auth_mode": "tailscale", "tailscale_user": "owner@example.com", "host": "0.0.0.0"},
+            ):
+                with self.subTest(values=values):
+                    config.write_text(json.dumps(values), encoding="utf-8")
+                    config.chmod(0o600)
+                    with self.assertRaises(RuntimeError):
+                        load_settings(config)
+
 
 if __name__ == "__main__":
     unittest.main()

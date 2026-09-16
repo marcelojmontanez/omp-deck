@@ -13,6 +13,7 @@ from unittest.mock import patch
 from omp_deck import server
 from omp_deck._rpc_dispatch import SessionCommandConflictError
 from omp_deck._terminal_commands import TerminalCommandConflict
+from omp_deck.auth_policy import AuthPolicy
 from omp_deck.fleet_model import FleetModel
 
 
@@ -69,6 +70,8 @@ class NormalizedHttpTests(unittest.TestCase):
             allowed_hosts=("127.0.0.1",),
             project_discovery_depth=2,
             state_root=root / "state",
+            auth_mode="pairing",
+            tailscale_user=None,
         )
 
         self.model = FleetModel()
@@ -78,6 +81,7 @@ class NormalizedHttpTests(unittest.TestCase):
         self.terminal = _Manager(TerminalCommandConflict)
         for target, value in (
             ("SETTINGS", settings),
+            ("AUTH_POLICY", AuthPolicy()),
             ("DEV_ROOT", self.project_root),
             ("_fleet_model", self.model),
             ("_rpc_manager", self.rpc),

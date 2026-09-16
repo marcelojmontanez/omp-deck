@@ -7,11 +7,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .auth_policy import auth_configuration
 from .fleet_protocol import validate_origin
 from .settings import _read_config
 from .settings import allowed_hosts as build_allowed_hosts
 
-_CONFIG_FIELDS = {"host", "port", "origin", "state_root", "allowed_hosts"}
+_CONFIG_FIELDS = {
+    "host",
+    "port",
+    "origin",
+    "state_root",
+    "allowed_hosts",
+    "auth_mode",
+    "tailscale_user",
+}
 COORDINATOR_COOKIE_NAME = "omp_deck_coordinator_device"
 _HOSTNAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?\Z")
 
@@ -23,6 +32,8 @@ class CoordinatorSettings:
     origin: str
     state_root: Path
     allowed_hosts: tuple[str, ...]
+    auth_mode: str = "pairing"
+    tailscale_user: str | None = None
 
 
 def _configured_root(value, path: Path) -> Path:
@@ -88,10 +99,13 @@ def load_coordinator_settings(path) -> CoordinatorSettings:
         raise RuntimeError("port must be an integer between 1 and 65535")
     if not loopback and "allowed_hosts" not in values:
         raise RuntimeError("non-loopback host requires explicit allowed_hosts trusted exposure configuration")
+    auth_mode, tailscale_user = auth_configuration(values, host)
     return CoordinatorSettings(
         host=host,
         port=port,
         origin=origin,
         state_root=state_root,
         allowed_hosts=_validate_allowed_hosts(values, host, origin),
+        auth_mode=auth_mode,
+        tailscale_user=tailscale_user,
     )

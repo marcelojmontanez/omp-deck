@@ -123,7 +123,7 @@ The **thinking** control shows OMP's effective level. Tap it to cycle through th
 
 ## Multi-machine coordinator
 
-The optional coordinator is a separate Python process. It serves the shared dashboard and owns only the machine directory, viewing-device authentication, and the Ed25519 ticket-signing key. It does not store node transcripts, run OMP, proxy node traffic, or act as a central session/process lifecycle authority. After pairing with the coordinator, the browser connects directly to every enrolled Deck node for sessions, commands, images, usage, and SSE.
+The optional coordinator is a separate Python process. It serves the shared dashboard and owns only the machine directory, viewing-device authentication, and the Ed25519 ticket-signing key. It does not store node transcripts, run OMP, proxy node traffic, or act as a central session/process lifecycle authority. After signing in to the coordinator, the browser connects directly to every enrolled Deck node for sessions, commands, images, usage, and SSE.
 
 Run it on your PC for loopback testing, or on an independently available Linux host for regular use. No particular hosting provider, container runtime, or web server is required. Installing the Python package is enough for a coordinator-only host; do **not** run `omp-deck setup` there unless you also want a local Deck node.
 
@@ -179,13 +179,15 @@ omp-deck fleet status --config /path/to/node-config.json
 
 Omit `--config` to use that node's normal Deck configuration. Keep the bundle owner-only, transfer it only through a trusted channel, and delete working copies after a successful join unless they are in a protected backup. On POSIX, the input file must have no group or world permissions and its parent must be owned by you and not group- or world-writable. The node's `allowed_hosts` must include the hostname in its advertised origin. Joining is live: no service restart or plugin reinstall is required. Repeat enrollment for your Mac or other computers. Replacing an existing trust relationship requires `fleet leave` first.
 
-Back on the coordinator host, create a one-time code for each viewing device:
+With the default pairing authentication, create a one-time code on the coordinator host for each viewing device:
 
 ```bash
 omp-deck coordinator pair --config ~/.config/omp-deck-coordinator/config.json
 ```
 
 Enter it at the coordinator dashboard—not at an individual node. Successful pairing reloads the authenticated dashboard so its connection policy includes the enrolled origins. Additional tabs in the same paired browser reuse its cookie. Coordinator and local-node cookies have distinct names, so hosting both on one PC does not overwrite local pairing.
+
+Alternatively, configure [Tailscale-account sign-in](#optional-tailscale-account-sign-in) on the coordinator to authorize your own Tailscale account without pairing codes. This does not change node authentication or enrollment.
 
 ### Availability and revocation
 
@@ -277,7 +279,7 @@ Treat authenticated Deck access as terminal access to the host. The supported re
 Phone -> owner-restricted Tailscale HTTPS -> localhost OMP Deck
 ```
 
-Both layers are required. Keep the listener on `127.0.0.1`, use Tailscale Serve rather than Funnel, restrict the endpoint with tailnet ACLs or grants, and retain Deck pairing. TLS, firewall reachability, or broad tailnet membership does not replace application authentication. Direct public exposure is unsupported.
+Keep the listener on `127.0.0.1`, use Tailscale Serve rather than Funnel, and restrict the endpoint with tailnet ACLs or grants. Pairing is the default application authentication; the optional Tailscale-account mode below replaces the code, not authentication. TLS, firewall reachability, or broad tailnet membership alone does not authorize Deck access. Direct public exposure is unsupported.
 
 Pairing uses a six-digit code that expires after one minute. The code is single-use, and the first failed submission invalidates it; run `omp-deck pair` again after a typo or failed attempt.
 
@@ -285,7 +287,30 @@ Paired-device cookies persist for the existing 90-day server-side lifetime; chec
 
 A failed connection check shows **Retry connection**, not the PIN form. Returning to a tab or restoring connectivity replaces stale reads and event streams while preserving in-memory drafts and attachments; reconnecting does not replay accepted actions or actions with an uncertain outcome. Drafts are not persisted across a full page reload or browser-process loss.
 
-Every private API, SSE, and blob request requires a paired device cookie, or an explicitly enrolled coordinator's short-lived machine-specific access ticket. Cookie-authenticated mutations require an exact trusted Origin and session-bound CSRF token; fleet tickets require the exact pinned coordinator Origin and never use ambient node cookies. Devices can log out individually or revoke all paired devices from the session menu.
+Every private API, SSE, and blob request requires an authenticated device cookie, or an explicitly enrolled coordinator's short-lived machine-specific access ticket. Cookie-authenticated mutations require an exact trusted Origin and session-bound CSRF token; fleet tickets require the exact pinned coordinator Origin and never use ambient node cookies. Devices can log out individually or revoke all browser sessions from the session menu.
+
+### Optional Tailscale-account sign-in
+
+To skip pairing codes, add these fields to the configuration of the **service being opened**: the node configuration for standalone use, or the separate coordinator configuration for a shared dashboard:
+
+```json
+{
+  "auth_mode": "tailscale",
+  "tailscale_user": "you@example.com"
+}
+```
+
+Use your exact Tailscale account login, not a device name or display name. Keep the other configuration fields, including `"host": "127.0.0.1"`, and restart that service. For a coordinator, restart its own supervisor—not `omp-deck service`, which manages the node. Changing coordinator authentication does not require restarting nodes or OMP sessions.
+
+This mode requires **Tailscale Serve directly proxying to Deck's loopback listener**. Serve strips supplied identity headers and inserts the authenticated account's `Tailscale-User-Login`. Deck accepts only the configured account, rejects missing or duplicate identity headers, and checks the identity again on every cookie-authenticated request. Tagged clients and Funnel do not supply a user identity and cannot sign in. This authorizes every reachable device belonging to that account; use Tailscale device posture or access policy for narrower access.
+
+The loopback listener is a trust boundary, not proof that a request came from Serve: a local process can forge those headers. Enable this option only on a host where local users and processes are trusted. Do not expose the backend on a LAN address, accept these headers from an arbitrary reverse proxy, or forward unverified client-supplied identity headers. Keep pairing on hosts where that local trust assumption is inappropriate. See [Tailscale's identity-header contract](https://tailscale.com/docs/features/tailscale-serve#identity-headers).
+
+An authorized browser signs in automatically and receives the same Secure, HttpOnly, 90-day cookie used by pairing. Cookies, CSRF protection, and signed fleet tickets remain required. Pairing commands and the pairing endpoint are disabled in this mode; denied identity does not fall back to a code.
+
+Logging out or revoking browser sessions invalidates existing credentials, but does **not** revoke the Tailscale account: an approved device can sign in again or reload the dashboard. For lasting revocation, remove the device/account's Tailscale access or change the configured account. Already-issued fleet tickets retain their existing maximum 60-second lifetime.
+
+To return to pairing, set `"auth_mode": "pairing"` (or omit it), remove `tailscale_user`, and restart that service. Existing unexpired browser cookies remain valid; switching modes does not reset authentication state. Revoke browser sessions before switching if you want to require a fresh login.
 
 ## Retained data
 

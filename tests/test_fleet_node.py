@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from omp_deck import _sse, fleet_cli, fleet_protocol, server
 from omp_deck._fleet_trust import FleetTrustStore
+from omp_deck.auth_policy import AuthPolicy
 from omp_deck.fleet_protocol import issue_ticket
 
 
@@ -32,10 +33,15 @@ class FleetNodeBoundaryTests(unittest.TestCase):
         settings = SimpleNamespace(
             allowed_hosts=("127.0.0.1",),
             state_root=self.state_root,
+            auth_mode="pairing",
+            tailscale_user=None,
         )
         self.settings_patch = patch.object(server, "SETTINGS", settings)
         self.settings_patch.start()
         self.addCleanup(self.settings_patch.stop)
+        self.policy_patch = patch.object(server, "AUTH_POLICY", AuthPolicy())
+        self.policy_patch.start()
+        self.addCleanup(self.policy_patch.stop)
         for name in ("_auth_manager", "_fleet_trust_store"):
             patcher = patch.object(server, name, None)
             patcher.start()

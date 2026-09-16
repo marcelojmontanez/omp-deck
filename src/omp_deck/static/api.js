@@ -9,6 +9,7 @@
   let csrfToken = null;
   let authGeneration = 0, sessionGeneration = 0;
   let mode = null;
+  let authMode = null;
   let modeRequest = null;
   let renewalPromise = null, renewalController = null;
   let renewalTimer = null, expiryTimer = null;
@@ -122,10 +123,15 @@
         if (request.signal?.aborted || modeRequest !== request) {
           throw new DOMException('Client configuration request is stale', 'AbortError');
         }
-        if (!payload || !['local', 'coordinator'].includes(payload.mode)) {
+        const configuredAuthMode = payload?.authMode === undefined ? 'pairing' : payload.authMode;
+        if (
+          !payload || !['local', 'coordinator'].includes(payload.mode)
+          || !['pairing', 'tailscale'].includes(configuredAuthMode)
+        ) {
           throw new Error('Invalid client configuration');
         }
         mode = payload.mode;
+        authMode = configuredAuthMode;
         if (mode === 'local') {
           initializeLocalMachine();
           notifyMachines();
@@ -196,6 +202,8 @@
 
   async function pair(token, options = {}) {
     await ensureMode(options);
+    if (authMode !== 'pairing') throw new Error('Pairing is not available');
+    const requestGeneration = authGeneration;
     const {response, payload} = await ompDeckNetwork.fetchJsonBounded('/api/auth/pair', {
       method: 'POST',
       credentials: 'same-origin',
@@ -204,7 +212,47 @@
       signal: options.signal,
     });
     if (!response.ok) throw new Error(payload?.error || `Pairing returned ${response.status}`);
-    if (options.signal?.aborted) throw new DOMException('Pairing request is stale', 'AbortError');
+    if (
+      options.signal?.aborted || requestGeneration !== authGeneration
+      || payload?.authenticated !== true
+      || typeof payload.csrfToken !== 'string' || !payload.csrfToken
+    ) {
+      if (options.signal?.aborted || requestGeneration !== authGeneration) {
+        throw new DOMException('Pairing request is stale', 'AbortError');
+      }
+      throw new Error('Invalid pairing response');
+    }
+    authenticated = true;
+    authGeneration += 1;
+    csrfToken = payload.csrfToken;
+    return payload;
+  }
+
+  async function tailscaleLogin(options = {}) {
+    await ensureMode(options);
+    if (authMode !== 'tailscale') throw new Error('Tailscale sign-in is not available');
+    const requestGeneration = authGeneration;
+    const {response, payload} = await ompDeckNetwork.fetchJsonBounded('/api/auth/tailscale', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json'},
+      body: '{}',
+      signal: options.signal,
+    });
+    if (response.status === 403) {
+      const denied = new Error('Connect through Tailscale with the approved account, then try again.');
+      denied.name = 'TailscaleAccessDeniedError';
+      throw denied;
+    }
+    if (!response.ok) throw new Error(`Tailscale sign-in returned ${response.status}`);
+    if (options.signal?.aborted || requestGeneration !== authGeneration) {
+      throw new DOMException('Tailscale sign-in request is stale', 'AbortError');
+    }
+    if (
+      payload?.authenticated !== true
+      || typeof payload.deviceId !== 'string' || !payload.deviceId
+      || typeof payload.csrfToken !== 'string' || !payload.csrfToken
+    ) throw new Error('Invalid Tailscale sign-in response');
     authenticated = true;
     authGeneration += 1;
     csrfToken = payload.csrfToken;
@@ -324,7 +372,6 @@
     return machineList();
   }
 
-
   async function directRequest(path, options, allowRenew = true) {
     if (!authenticated) throw new Error('Authentication required');
     const requestGeneration = authGeneration;
@@ -393,7 +440,6 @@
     return directRequest(path, options);
   }
 
-
   async function logout({all = false} = {}) {
     const response = await coordinatorRequest(all ? '/api/auth/revoke-all' : '/api/auth/logout', {
       method: 'POST',
@@ -432,6 +478,7 @@
   window.ompDeckApi = {
     ensureMode,
     mode: () => mode,
+    authMode: () => authMode,
     initializeFleet,
     authenticated: () => authenticated,
     renewAccess,
@@ -444,6 +491,7 @@
     request,
     session,
     pair,
+    tailscaleLogin,
     logout,
     clearFleet,
     shouldReuseRequestId,

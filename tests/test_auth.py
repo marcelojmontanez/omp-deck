@@ -3,6 +3,7 @@ import os
 import stat
 import tempfile
 import unittest
+from email.message import Message
 from http.cookies import SimpleCookie
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from omp_deck.auth import (
     PairingRateLimited,
     validate_auth_state,
 )
+from omp_deck.auth_policy import AuthPolicy
 
 
 class Clock:
@@ -339,6 +341,26 @@ class AuthManagerTests(unittest.TestCase):
 
             self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o755)
             self.assertFalse((target / "auth.json").exists())
+
+
+class AuthPolicyTests(unittest.TestCase):
+    @staticmethod
+    def headers(*values):
+        headers = Message()
+        for value in values:
+            headers.add_header("Tailscale-User-Login", value)
+        return headers
+
+    def test_tailscale_identity_rejects_untrusted_peer_and_oversized_header(self):
+        policy = AuthPolicy("tailscale", "owner@example.com")
+        rejected = (
+            (self.headers("owner@example.com"), ("192.0.2.1", 1234)),
+            (self.headers("x" * 4097), ("127.0.0.1", 1234)),
+        )
+        for headers, peer in rejected:
+            with self.subTest(headers=headers.get_all("Tailscale-User-Login"), peer=peer):
+                with self.assertRaises(AuthenticationFailed):
+                    policy.require_request_identity(headers, peer)
 
 
 if __name__ == "__main__":

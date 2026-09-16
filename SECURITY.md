@@ -12,15 +12,17 @@ The supported remote-access design is:
 Phone -> authenticated Tailscale HTTPS -> localhost Python service
 ```
 
-Both layers are required: Tailscale authenticates access to the private network,
-and OMP Deck must independently authenticate the application session. Tailnet
-membership alone is not a sufficient authorization boundary.
+Tailscale protects network reachability; Deck separately authorizes application
+sessions. Tailnet membership alone is not sufficient. Public installations
+default to one-time pairing codes. An explicit `auth_mode: "tailscale"` option
+instead authorizes one configured Tailscale account through Serve's identity
+headers; it does not disable application authentication.
 
-A standalone Deck node requires a paired device cookie for every private API,
-SSE, and blob request. The fleet coordinator uses its own distinct paired-device
-cookie for its dashboard and ticket endpoint. Pairing uses a one-time expiring
-code printed locally by `omp-deck pair` or `omp-deck coordinator pair`; the code
-is exchanged by POST and never stored in a URL or browser storage. Device
+A standalone Deck node requires a device cookie for every private API, SSE,
+and blob request. The fleet coordinator uses its own distinct device cookie
+for its dashboard and ticket endpoint. In the default mode, a one-time expiring
+code printed locally by `omp-deck pair` or `omp-deck coordinator pair` is
+exchanged by POST and never stored in a URL or browser storage. Device
 credentials are opaque, stored server-side only as verifiers, and can be logged
 out individually or revoked together.
 
@@ -29,7 +31,8 @@ their existing server-side expiry (90 days by default). Successful session
 verification upgrades an older session-only cookie without rotating its
 credential or extending that expiry. Logout and revocation take effect
 server-side even if a browser retains an old cookie. Deleting site data or
-losing an earlier session-only cookie still requires explicit pairing.
+losing a cookie requires pairing again in the default mode; an approved
+Tailscale-account client can sign in again without a code.
 
 Connection errors and generic forbidden responses do not establish that a
 device is unpaired. The browser offers connection recovery until the server
@@ -41,8 +44,8 @@ For remote access:
   localhost listener;
 - restrict the Deck endpoint to its owner with tailnet ACLs or grants, rather
   than granting access to the entire tailnet;
-- retain Deck's own application authentication even for an owner-restricted
-  tailnet route; and
+- retain Deck's application authentication, using either default pairing or
+  explicitly configured Tailscale-account sign-in; and
 - review the effective Serve and tailnet policy after every configuration
   change.
 
@@ -70,6 +73,38 @@ to one specific phone rather than every device owned by that identity.
 Tailscale Serve configuration may require device or tailnet administrator
 authorization. This is separate from Deck's per-user systemd service, macOS
 LaunchAgent, or Windows scheduled task, which do not require root or elevation.
+
+### Optional Tailscale-account authentication
+
+Both standalone nodes and coordinators accept `auth_mode: "tailscale"` with
+one exact `tailscale_user` account login. This requires a loopback listener and
+a loopback request peer. Tailscale Serve must be the trusted immediate proxy:
+it removes incoming identity headers and supplies `Tailscale-User-Login` from
+the authenticated connection. Missing, duplicate, or nonmatching identity
+headers are rejected, including when the request contains an otherwise-valid
+Deck cookie. Tagged clients and Funnel do not supply a user identity.
+
+The headers are **not signed**. Any local process that can connect to the
+backend can impersonate the configured account. This opt-in mode therefore
+trusts the local host and its users/processes; it is inappropriate when those
+are outside the trust boundary. Never expose its backend to the LAN or public
+internet, or use a proxy that forwards unverified client identity headers.
+Pairing remains available when this local trust assumption is unsuitable.
+
+The explicit sign-in POST requires the trusted browser Origin plus the
+configured proxy identity before issuing a cookie. GET session checks do not
+issue new credentials. Other cookie-authenticated mutations still require
+session-bound CSRF tokens. The configured login is not returned in public
+configuration or errors. Pairing endpoints and commands are disabled in this
+mode; identity failure never falls back to pairing.
+
+This authorizes an account, not a particular phone or browser. Logout and
+revoke-all invalidate Deck cookies but cannot prevent an approved Tailscale
+device from signing in again. Revoke persistent access through Tailscale
+device/access policy or change the configured account. Existing signed fleet
+tickets remain usable for their bounded lifetime. Switching authentication
+modes preserves unexpired cookies; revoke them explicitly when a fresh login
+is required.
 
 ## Fleet coordinator trust boundary
 
@@ -119,12 +154,14 @@ delivering newly available events.
 A node outage is isolated to that machine. A coordinator outage does not stop
 OMP or cancel work already accepted by nodes, but existing browser access lasts
 only until its tickets expire and no new tickets can be issued. Direct local
-node pairing remains independent. Back up the stopped coordinator's complete
-state directory and configuration with owner-only permissions: retaining the
-signing key preserves node enrollment, and retaining `auth.json` preserves
-paired viewers. If the key or exact coordinator origin cannot be restored, use
-a fresh state root, explicitly leave and re-enroll every node, and pair every
-viewer again rather than editing state files.
+node authentication remains independent. An enrolled coordinator's signed
+ticket is an explicit delegated authority, independent of the node's local
+cookie authentication mode. Back up the stopped coordinator's complete state
+directory and configuration with owner-only permissions: retaining the signing
+key preserves node enrollment, and retaining `auth.json` preserves browser
+credentials. If the key or exact coordinator origin cannot be restored, use a
+fresh state root, explicitly leave and re-enroll every node, and authenticate
+every viewer again rather than editing state files.
 
 ## Unsupported exposure
 

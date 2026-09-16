@@ -9,6 +9,7 @@ import http from 'node:http';
 import {once} from 'node:events';
 import test from 'node:test';
 import puppeteer from 'puppeteer';
+import {verifyConnectionRecovery} from './connection_recovery_cases.mjs';
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const PYTHON = process.env.PYTHON || (
@@ -215,6 +216,7 @@ test('independent viewers route duplicate session IDs directly and survive one m
     ]);
   }
   const desktopId = await selectMachineSession(phone, 'Desktop');
+  await verifyConnectionRecovery(phone);
   await phone.click('#overflow-button');
   await phone.click('[data-session-action="rename"]');
   await phone.type('#session-name-input', 'Desktop release work');

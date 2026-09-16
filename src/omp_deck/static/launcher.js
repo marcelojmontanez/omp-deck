@@ -34,8 +34,13 @@ function renderProjectOptions(projects) {
 const activeLaunches = new Set();
 let launcherGeneration = 0;
 let projectLoadGeneration = 0;
+let projectLoadController = null;
+let projectLoadFailed = false;
 async function loadLaunchableProjects(createdProject = '') {
   const generation = ++projectLoadGeneration;
+  projectLoadController?.abort();
+  projectLoadController = null;
+  projectLoadFailed = false;
   const machineId = state.selectedMachineId;
   const machine = ompDeckApi.machine(machineId);
   const select = el['project-select'];
@@ -54,10 +59,13 @@ async function loadLaunchableProjects(createdProject = '') {
     syncProjectLauncher();
     return;
   }
+  const controller = new AbortController();
+  projectLoadController = controller;
   try {
-    const response = await ompDeckApi.request('/api/projects', {machineId, cache: 'no-store'});
+    const {response, payload} = await ompDeckNetwork.fetchJsonBounded('/api/projects', {
+      machineId, cache: 'no-store', signal: controller.signal,
+    }, ompDeckNetwork.STARTUP_TIMEOUT_MS, ompDeckApi.request);
     if (!response.ok) throw new Error(`Projects returned ${response.status}`);
-    const payload = await response.json();
     if (generation !== projectLoadGeneration || machineId !== state.selectedMachineId) return;
     const projects = Array.isArray(payload.projects) ? payload.projects : [];
     // Keep a just-created directory selectable even beyond discovery depth.
@@ -69,14 +77,21 @@ async function loadLaunchableProjects(createdProject = '') {
     el['launch-state'].textContent = projects.length ? '' : 'No project directories yet. Create one below.';
   } catch (error) {
     if (generation !== projectLoadGeneration || machineId !== state.selectedMachineId) return;
+    projectLoadFailed = true;
     select.replaceChildren(new Option('Projects unavailable', ''));
     el['launch-state'].textContent = error.message;
   } finally {
     if (generation === projectLoadGeneration && machineId === state.selectedMachineId) {
+      projectLoadController = null;
       select.disabled = activeLaunches.has(machineId);
       syncProjectLauncher();
     }
   }
+}
+
+function recoverLaunchableProjects() {
+  // Reconnecting must not replace a usable directory selection or creation draft.
+  if (projectLoadController || projectLoadFailed) void loadLaunchableProjects();
 }
 
 function selectedProjectParent() {
@@ -178,6 +193,9 @@ const collabState = document.getElementById('collab-state');
 const pendingCollab = new Map();
 function clearLauncherAttempts() {
   projectLoadGeneration += 1;
+  projectLoadController?.abort();
+  projectLoadController = null;
+  projectLoadFailed = false;
   launcherGeneration += 1;
   pendingLaunches.clear();
   activeLaunches.clear();

@@ -29,6 +29,8 @@ Python normalizes all transports into one session model. The browser uses advert
 
 Capabilities can differ by transport, authorization, connection state, platform, and protocol version. Unavailable controls are disabled rather than silently emulated. Extension disconnects never abort the terminal session. Collab failures affect only the imported Collab session.
 
+Deck accepts HTTP requests while managed and imported terminal connections recover in the background. A healthy service does not mean every OMP session is connected: each session reports its own connection state, and slow recovery does not block the dashboard.
+
 The extension fallback runs only in interactive terminal mode. RPC, JSON, and print-mode OMP processes do not publish fallback endpoints or appear as additional terminal sessions.
 
 Extension shutdown follows OMP's deferred shutdown request: it may wait for OMP's next idle boundary rather than immediately exit an idle terminal. Deck does not inject terminal input or force-kill that session.
@@ -294,6 +296,8 @@ Pairing uses a six-digit code that expires after one minute. The code is single-
 Paired-device cookies persist for the existing 90-day server-side lifetime; checking a session does not extend that expiry. A still-valid cookie from an older version becomes persistent on the next successful connection without a new code. Expired, revoked, or already-lost cookies still require pairing. Private browsing or settings that delete site data can remove even a persistent cookie.
 
 A failed connection check shows **Retry connection**, not the PIN form. In an already loaded writable session, you can keep editing drafts and adding supported attachments while the machine or session connection is unavailable; **Send** stays disabled until it reconnects. Reconnection does not send your draft automatically. Returning to a tab or restoring connectivity replaces stale reads and event streams while preserving in-memory drafts and attachments; reconnecting does not replay accepted actions or actions with an uncertain outcome. Drafts are not persisted across a full page reload or browser-process loss.
+
+Browser connection checks, session/project reads, and event-stream handshakes have an eight-second deadline; JSON reads include the response body. The deadline does not limit a healthy event stream or cancel an OMP operation. Returning to the browser retries stalled reads and failed project loading without replacing a usable project selection. Connection-state updates preserve composer focus and text selection.
 
 Every private API, SSE, and blob request requires an authenticated device cookie, or an explicitly enrolled coordinator's short-lived machine-specific access ticket. Cookie-authenticated mutations require an exact trusted Origin and session-bound CSRF token; fleet tickets require the exact pinned coordinator Origin and never use ambient node cookies. Devices can log out individually or revoke all browser sessions from the session menu.
 

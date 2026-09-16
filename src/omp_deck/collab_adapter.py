@@ -72,6 +72,7 @@ class CollabAdapter:
         self._entry_limit, self._ui_limit = entry_limit, ui_limit
         self._max_snapshot_bytes, self._max_frame_bytes = max_snapshot_bytes, max_frame_bytes
         self._lock = threading.RLock()
+        self._close_lock = threading.RLock()
         self._send_lock = threading.Lock()
         self._ready = threading.Event()
         self._stopping = threading.Event()
@@ -113,10 +114,11 @@ class CollabAdapter:
             return self._reason
 
     def start(self) -> None:
-        with self._lock:
+        with self._close_lock, self._lock:
             if self._thread is not None:
                 raise AdapterError("adapter is already started", kind="lifecycle")
-            self._stopping.clear()
+            if self._stopping.is_set():
+                raise AdapterDisconnectedError("adapter is closed", kind="closed")
             self._ready.clear()
             self._fatal = None
             self._thread = threading.Thread(target=self._run, name="omp-collab-reader", daemon=True)
@@ -125,38 +127,42 @@ class CollabAdapter:
             self.close()
             raise AdapterTimeoutError("collaboration snapshot timed out", kind="timeout")
         with self._lock:
+            if self._stopping.is_set():
+                raise AdapterDisconnectedError("adapter closed during startup", kind="closed")
             if self._fatal is not None:
                 raise self._fatal
 
     def close(self) -> None:
-        self._stopping.set()
-        with self._lock:
-            ws, thread = self._ws, self._thread
-        if ws is not None:
-            try:
-                ws.close()
-            except Exception:
-                pass
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(WELCOME_TIMEOUT)
-            if thread.is_alive():
-                error = AdapterTimeoutError("collaboration reader did not stop", kind="timeout")
-                with self._lock:
-                    self._status, self._reason = "degraded", str(error)
-                    _transport._fail_replies(self._replies, error)
-                self._emit(
-                    "transport",
-                    {"status": "degraded", "reason": str(error)},
-                )
-                raise error
-        with self._lock:
-            self._thread = None
-            self._ws = None
-            _transport._fail_replies(self._replies, AdapterDisconnectedError("adapter closed", kind="closed"))
-            changed = self._status != "disconnected"
-            self._status, self._reason = "disconnected", "closed"
-        if changed:
-            self._emit("transport", {"status": "disconnected", "reason": "closed"})
+        with self._close_lock:
+            self._stopping.set()
+            self._ready.set()
+            with self._lock:
+                ws, thread = self._ws, self._thread
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(WELCOME_TIMEOUT)
+                if thread.is_alive():
+                    error = AdapterTimeoutError("collaboration reader did not stop", kind="timeout")
+                    with self._lock:
+                        self._status, self._reason = "degraded", str(error)
+                        _transport._fail_replies(self._replies, error)
+                    self._emit(
+                        "transport",
+                        {"status": "degraded", "reason": str(error)},
+                    )
+                    raise error
+            with self._lock:
+                self._thread = None
+                self._ws = None
+                _transport._fail_replies(self._replies, AdapterDisconnectedError("adapter closed", kind="closed"))
+                changed = self._status != "disconnected"
+                self._status, self._reason = "disconnected", "closed"
+            if changed:
+                self._emit("transport", {"status": "disconnected", "reason": "closed"})
 
     shutdown = close
 

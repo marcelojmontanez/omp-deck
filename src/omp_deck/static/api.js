@@ -294,17 +294,15 @@
     renewalController = controller;
     const requestGeneration = authGeneration;
     renewalPromise = (async () => {
-      let response;
       try {
-        response = await coordinatorRequest('/api/fleet/access', {
+        const {response, payload} = await ompDeckNetwork.fetchJsonBounded('/api/fleet/access', {
           method: 'POST',
           cache: 'no-store',
           headers: {'Content-Type': 'application/json'},
           body: '{}',
           signal: controller.signal,
-        });
+        }, ompDeckNetwork.STARTUP_TIMEOUT_MS, coordinatorRequest);
         if (!response.ok) throw new Error(`Fleet access returned ${response.status}`);
-        const payload = await response.json();
         if (controller.signal.aborted || !authenticated || requestGeneration !== authGeneration) {
           throw new DOMException('Machine access request is stale', 'AbortError');
         }

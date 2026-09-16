@@ -504,6 +504,52 @@ class CollabAdapterTests(unittest.TestCase):
         self.assertIsNone(adapter._thread)
         self.assertEqual(adapter.transport_status, "disconnected")
 
+    def test_close_cancels_start_waiting_for_initial_snapshot(self):
+        class BlockingSocket(Socket):
+            def __init__(self):
+                super().__init__([])
+                self.receiving = threading.Event()
+                self.released = threading.Event()
+
+            def recv(self, timeout=None):
+                self.receiving.set()
+                self.released.wait(2)
+                raise OSError("closed")
+
+            def close(self):
+                super().close()
+                self.released.set()
+
+        sock = BlockingSocket()
+        adapter = CollabAdapter(link(), "guest", connector=lambda url, **opts: sock)
+        errors = []
+
+        def start():
+            try:
+                adapter.start()
+            except Exception as error:
+                errors.append(error)
+
+        worker = threading.Thread(target=start)
+        worker.start()
+        self.assertTrue(sock.receiving.wait(1))
+
+        adapter.close()
+        worker.join(1)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], AdapterDisconnectedError)
+        self.assertEqual(adapter.transport_status, "disconnected")
+
+    def test_closed_adapter_refuses_start_without_reopening_transport(self):
+        adapter, sock = self.make([host(WELCOME), host(CHUNK)])
+        adapter.close()
+        with self.assertRaises(AdapterDisconnectedError):
+            adapter.start()
+        self.assertEqual(sock.sent, [])
+        self.assertEqual(adapter.transport_status, "disconnected")
+
     def test_corrupt_crypto_is_fatal_and_redacted(self):
         corrupt = pack_envelope(1, b"0" * 28)
         adapter, _ = self.make([corrupt])

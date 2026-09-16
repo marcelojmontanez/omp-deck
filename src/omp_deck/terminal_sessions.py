@@ -11,6 +11,7 @@ from typing import Any
 
 from . import _terminal_commands
 from ._collab_imports import CollabImportCoordinator
+from ._collab_recovery import CollabRecoverySupervisor
 from ._extension_activation import ExtensionEventActivation
 from ._shutdown import close_terminal_manager
 from ._terminal_discovery import discover_extension_candidates, removed_extension_connection
@@ -75,6 +76,12 @@ class TerminalSessionManager:
         self._stop = threading.Event()
         self._watcher: threading.Thread | None = None
         self._ignored_extensions: dict[str, str] = {}
+        self._collab_recovery = CollabRecoverySupervisor(
+            self._stop,
+            self.credentials,
+            self.model,
+            self._connect_collab,
+        )
         for record in self.registry.load():
             ignored = removed_extension_connection(record)
             if ignored is not None:
@@ -82,53 +89,32 @@ class TerminalSessionManager:
             elif record["adapterKind"] in {"collab", "extension"}:
                 self.model.load_record(record)
 
-    def start(self) -> dict[str, str]:
-        failures: dict[str, str] = {}
-        for record in self.registry.load():
-            if record["adapterKind"] != "collab":
-                continue
-            link = self.credentials.get_link(record["id"])
-            if link is None:
-                self.model.set_transport(
-                    record["id"],
-                    instance_id=None,
-                    generation=record["generation"],
-                    status="disconnected",
-                    reason="Collab credential removed",
-                )
-                continue
-            try:
-                self._connect_collab(record, link)
-            except Exception:
-                failures[record["id"]] = "collaboration connection unavailable"
-                self.model.set_transport(
-                    record["id"],
-                    instance_id=None,
-                    generation=record["generation"],
-                    status="disconnected",
-                    reason="Collaboration connection unavailable",
-                )
+    def start(self) -> None:
+        records = [record for record in self.registry.load() if record["adapterKind"] == "collab"]
         with self._lock:
+            if self._stop.is_set():
+                raise RuntimeError("terminal session manager is closed")
             if self._watcher is None:
-                self._stop.clear()
                 self._watcher = threading.Thread(
                     target=self._watch_extensions,
                     name="omp-deck-extension-discovery",
                     daemon=True,
                 )
                 self._watcher.start()
-        return failures
+        self._collab_recovery.start(records)
 
     def close(self, timeout: float = 5.0) -> None:
-        self._stop.set()
         with self._lock:
+            self._stop.set()
             watcher = self._watcher
             self._watcher = None
             runtimes = self._runtimes.values()
+        workers = self._collab_recovery.stop()
         close_terminal_manager(
             self,
             runtimes,
             watcher,
+            workers,
             timeout,
             self._commands.lock,
         )
@@ -287,21 +273,29 @@ class TerminalSessionManager:
 
         adapter = CollabAdapter(link, guest_name, on_event=on_event)
         runtime = _Runtime(session_id, instance_id, generation, "collab", adapter)
-        previous = self._runtimes.get(session_id)
-        if previous is not None:
-            # Keep the existing owner discoverable until it has actually
-            # stopped; otherwise a failed close strands that live transport.
-            previous.adapter.close()
-        self._runtimes.install(runtime)
-        self.model.set_transport(
-            session_id,
-            instance_id=instance_id,
-            generation=generation,
-            status="connecting",
-            reason=None,
-        )
+        with self._commands.lock(session_id):
+            current = _registry_record(self.registry, session_id)
+            if current["generation"] != generation:
+                raise TerminalSessionNotConnected(session_id)
+            previous = self._runtimes.get(session_id)
+            if previous is not None:
+                # Keep the existing owner until close succeeds.
+                previous.adapter.close()
+            with self._lock:
+                if self._stop.is_set():
+                    raise TerminalSessionNotConnected(session_id)
+                self._runtimes.install(runtime)
+            self.model.set_transport(
+                session_id,
+                instance_id=instance_id,
+                generation=generation,
+                status="connecting",
+                reason=None,
+            )
         try:
             adapter.start()
+            if self._stop.is_set():
+                raise TerminalSessionNotConnected(session_id)
             if not self.model.apply_collab_snapshot(
                 session_id,
                 instance_id=instance_id,

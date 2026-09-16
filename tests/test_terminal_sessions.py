@@ -7,6 +7,7 @@ import socket
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from collections import deque
 from dataclasses import replace
@@ -21,6 +22,7 @@ from omp_deck._terminal_commands import TerminalCommandConflict
 from omp_deck._terminal_discovery import discover_extension_candidates
 from omp_deck.collab_adapter import CollabAdapter, CollabSnapshot
 from omp_deck.collab_protocol import b64url_encode, open_frame, pack_envelope, seal_frame, unpack_envelope
+from omp_deck.collab_store import CollabStore
 from omp_deck.extension_adapter import ExtensionAdapter as RealExtensionAdapter
 from omp_deck.extension_adapter import ExtensionRegistration, ExtensionSnapshot
 from omp_deck.fleet_model import FleetModel
@@ -1125,6 +1127,10 @@ class TerminalSessionManagerTests(unittest.TestCase):
         restarted = self.manager()
         with patch("omp_deck.terminal_sessions.CollabAdapter", FakeCollabAdapter):
             restarted.start()
+            deadline = time.monotonic() + 1
+            while restarted._runtimes.get(session_id) is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertIsNotNone(restarted._runtimes.get(session_id))
 
         duplicate = restarted.command(session_id, "durable-terminal", "sendMessage", {"message": "once"})
 
@@ -1275,15 +1281,108 @@ class TerminalSessionManagerTests(unittest.TestCase):
         )
         self.assertEqual(public["state"], "needs_input")
 
+    def test_background_recovery_serves_fast_collab_while_slow_peer_waits_and_close_cancels_it(self):
+        slow_link = collab_link()
+        fast_link = slow_link.replace(ROOM, "klmnopqrst")
+        registry = RegistryStore(self.settings.state_root / "registry.json")
+        credentials = CollabStore(self.settings.state_root)
+        slow = registry.create(
+            session_id="slow-collab",
+            adapter_kind="collab",
+            project_name="Terminal",
+            project_path=str(self.settings.project_root),
+            title="Slow",
+        )
+        fast = registry.create(
+            session_id="fast-collab",
+            adapter_kind="collab",
+            project_name="Terminal",
+            project_path=str(self.settings.project_root),
+            title="Fast",
+        )
+        credentials.put(slow["id"], slow_link)
+        credentials.put(fast["id"], fast_link)
+        manager = self.manager(registry=registry, credentials=credentials)
+        slow_started = threading.Event()
+        release_slow = threading.Event()
+
+        class RecoveringCollabAdapter(FakeCollabAdapter):
+            def start(self):
+                if self._link_for_assertion == slow_link:
+                    self.calls.append(("start",))
+                    slow_started.set()
+                    release_slow.wait(2)
+                    if self.closed:
+                        raise RuntimeError("closed during startup")
+                    return
+                super().start()
+
+            def close(self):
+                super().close()
+                release_slow.set()
+
+        with patch("omp_deck.terminal_sessions.CollabAdapter", RecoveringCollabAdapter):
+            manager.start()
+            self.assertTrue(slow_started.wait(1))
+            deadline = time.monotonic() + 1
+            while self.model.get(fast["id"])["transport"]["status"] != "connected" and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(self.model.get(fast["id"])["transport"]["status"], "connected")
+            self.assertEqual(self.model.get(slow["id"])["transport"]["status"], "reconnecting")
+
+            manager.close(timeout=1)
+        self.assertIsNone(manager._runtimes.get(slow["id"]))
+        self.assertIsNone(manager._runtimes.get(fast["id"]))
+        self.assertEqual(self.model.get(slow["id"])["transport"]["status"], "disconnected")
+
+    def test_removal_wins_over_queued_collab_recovery(self):
+        registry = RegistryStore(self.settings.state_root / "registry.json")
+        credentials = CollabStore(self.settings.state_root)
+        record = registry.create(
+            session_id="removed-collab",
+            adapter_kind="collab",
+            project_name="Terminal",
+            project_path=str(self.settings.project_root),
+            title="Removed",
+        )
+        credentials.put(record["id"], collab_link())
+        manager = self.manager(registry=registry, credentials=credentials)
+        entered, release, connected = (threading.Event() for _ in range(3))
+
+        class QueuedAdapter(FakeCollabAdapter):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                entered.set()
+                release.wait(2)
+
+            def start(self):
+                connected.set()
+                super().start()
+
+        with patch("omp_deck.terminal_sessions.CollabAdapter", QueuedAdapter):
+            manager.start()
+            try:
+                self.assertTrue(entered.wait(1))
+                self.assertTrue(manager.remove(record["id"]))
+            finally:
+                release.set()
+            deadline = time.monotonic() + 1
+            while manager._collab_recovery._workers and time.monotonic() < deadline:
+                time.sleep(0.01)
+            manager.close(timeout=1)
+        self.assertFalse(connected.is_set())
+        self.assertEqual(registry.load(), [])
+        with self.assertRaises(KeyError):
+            self.model.get(record["id"])
+
     def test_close_joins_watcher_and_closes_all_adapters(self):
-        manager = self.manager(discovery_interval=0.01)
+        manager = self.manager()
+        manager.start()
+        watcher = manager._watcher
+        self.assertIsNotNone(watcher)
         session_id, _, extension = self.connect_extension(manager)
         with patch("omp_deck.terminal_sessions.CollabAdapter", FakeCollabAdapter):
             manager.add_collab(collab_link())
-        with patch("omp_deck.terminal_sessions.CollabAdapter", FakeCollabAdapter):
-            manager.start()
-        watcher = manager._watcher
-        self.assertIsNotNone(watcher)
         manager.close()
         self.assertFalse(watcher.is_alive())
         self.assertTrue(extension.closed)

@@ -252,6 +252,7 @@ class FakeRpcClient:
 class TestRpcSessionManager(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
         root = Path(self.temporary.name).resolve()
         self.project = root / "project"
         self.project.mkdir()
@@ -285,15 +286,39 @@ class TestRpcSessionManager(unittest.TestCase):
         FakeRpcClient.branch_release = None
         self.rpc_patch = patch("omp_deck.rpc_sessions.RpcClient", FakeRpcClient)
         self.rpc_patch.start()
+        self.addCleanup(self.rpc_patch.stop)
         self.manager = RpcSessionManager(self.settings, self.model, self.registry)
 
-    def tearDown(self):
-        self.manager.close()
-        self.rpc_patch.stop()
-        self.temporary.cleanup()
+        self.addCleanup(lambda: self.manager.close())
 
     def launch(self):
         return self.manager.launch("project", self.project, title="RPC test")
+
+    def recover(self, manager, model, timeout=2):
+        desired = [
+            record["id"]
+            for record in manager.registry.load()
+            if record["adapterKind"] == "rpc" and record["desiredRpcRunning"]
+        ]
+        cursor = model.journal.latest_id
+        updated = set()
+        manager.request_refresh_connected()
+        deadline = time.monotonic() + timeout
+        while desired:
+            transports = {session_id: model.get(session_id)["transport"] for session_id in desired}
+            if all(
+                session_id in updated and transport["status"] != "reconnecting"
+                for session_id, transport in transports.items()
+            ):
+                return transports
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self.fail(f"recovery did not settle: {transports}")
+            events = model.journal.wait_after(cursor, min(remaining, 0.1))
+            if events:
+                cursor = events[-1].id
+                updated.update(event.session_id for event in events)
+        return {}
 
     def test_manager_does_not_project_terminal_tombstones(self):
         self.registry.create(
@@ -512,16 +537,18 @@ class TestRpcSessionManager(unittest.TestCase):
         recovering_model = FleetModel()
         recovering = RpcSessionManager(self.settings, recovering_model, self.registry)
         self.manager = recovering
-        self.assertIn(session_id, recovering.recover_desired())
+        transports = self.recover(recovering, recovering_model)
+        self.assertEqual(transports[session_id]["reason"], "recovery failed: launch failed")
 
         result = recovering.command(session_id, "shutdown", {})
         self.assertEqual(result, {"accepted": True, "result": None})
         self.assertFalse(self.registry.load()[0]["desiredRpcRunning"])
 
         recovering.close()
-        restarted = RpcSessionManager(self.settings, FleetModel(), self.registry)
+        restarted_model = FleetModel()
+        restarted = RpcSessionManager(self.settings, restarted_model, self.registry)
         self.manager = restarted
-        self.assertEqual(restarted.recover_desired(), {})
+        self.assertEqual(self.recover(restarted, restarted_model), {})
         self.assertEqual(len(FakeRpcClient.instances), 2)
 
     def test_shutdown_failure_retains_runtime_ownership_for_retry(self):
@@ -620,7 +647,7 @@ class TestRpcSessionManager(unittest.TestCase):
         recovering = RpcSessionManager(self.settings, recovering_model, self.registry)
         self.addCleanup(recovering.close)
 
-        self.assertEqual(recovering.recover_desired(), {})
+        self.assertEqual(self.recover(recovering, recovering_model)[original["id"]]["status"], "connected")
         client = FakeRpcClient.instances[-1]
         self.assertEqual(client.resumed_path, str(session_file))
         self.assertEqual(client.new_session_calls, 0)
@@ -638,9 +665,9 @@ class TestRpcSessionManager(unittest.TestCase):
         recovering = RpcSessionManager(self.settings, recovering_model, self.registry)
         self.addCleanup(recovering.close)
 
-        failures = recovering.recover_desired()
+        transports = self.recover(recovering, recovering_model)
 
-        self.assertIn("session file is missing or inaccessible", failures[session_id])
+        self.assertIn("session file is missing or inaccessible", transports[session_id]["reason"])
         self.assertEqual(len(FakeRpcClient.instances), 1)
         self.assertEqual(self.registry.load()[0]["ompSessionId"], record["ompSessionId"])
         self.assertEqual(recovering_model.get(session_id)["transport"]["status"], "disconnected")
@@ -652,12 +679,13 @@ class TestRpcSessionManager(unittest.TestCase):
         FakeRpcClient._write_session(outside, record["ompSessionId"])
         self.manager.close()
         self.registry.update(session_id, recovery_metadata={"sessionFile": str(outside)})
-        recovering = RpcSessionManager(self.settings, FleetModel(), self.registry)
+        recovering_model = FleetModel()
+        recovering = RpcSessionManager(self.settings, recovering_model, self.registry)
         self.addCleanup(recovering.close)
 
-        failures = recovering.recover_desired()
+        transports = self.recover(recovering, recovering_model)
 
-        self.assertIn("outside the configured session root", failures[session_id])
+        self.assertIn("outside the configured session root", transports[session_id]["reason"])
         self.assertEqual(len(FakeRpcClient.instances), 1)
 
     def test_recovery_refuses_a_symlinked_session_file(self):
@@ -668,12 +696,13 @@ class TestRpcSessionManager(unittest.TestCase):
         alias.symlink_to(original)
         self.manager.close()
         self.registry.update(session_id, recovery_metadata={"sessionFile": str(alias)})
-        recovering = RpcSessionManager(self.settings, FleetModel(), self.registry)
+        recovering_model = FleetModel()
+        recovering = RpcSessionManager(self.settings, recovering_model, self.registry)
         self.addCleanup(recovering.close)
 
-        failures = recovering.recover_desired()
+        transports = self.recover(recovering, recovering_model)
 
-        self.assertIn("must not use filesystem aliases", failures[session_id])
+        self.assertIn("must not use filesystem aliases", transports[session_id]["reason"])
         self.assertEqual(len(FakeRpcClient.instances), 1)
 
     def test_recovery_refuses_a_malformed_session_without_replacing_it(self):
@@ -682,12 +711,13 @@ class TestRpcSessionManager(unittest.TestCase):
         session_file = Path(record["recoveryMetadata"]["sessionFile"])
         self.manager.close()
         session_file.write_text("{not-json}\n", encoding="utf-8")
-        recovering = RpcSessionManager(self.settings, FleetModel(), self.registry)
+        recovering_model = FleetModel()
+        recovering = RpcSessionManager(self.settings, recovering_model, self.registry)
         self.addCleanup(recovering.close)
 
-        failures = recovering.recover_desired()
+        transports = self.recover(recovering, recovering_model)
 
-        self.assertIn("missing or malformed header", failures[session_id])
+        self.assertIn("missing or malformed header", transports[session_id]["reason"])
         self.assertEqual(len(FakeRpcClient.instances), 1)
         self.assertEqual(self.registry.load()[0]["ompSessionId"], record["ompSessionId"])
 
@@ -702,9 +732,10 @@ class TestRpcSessionManager(unittest.TestCase):
         )
 
         self.manager.close()
-        recovering = RpcSessionManager(self.settings, FleetModel(), self.registry)
+        recovering_model = FleetModel()
+        recovering = RpcSessionManager(self.settings, recovering_model, self.registry)
         self.addCleanup(recovering.close)
-        self.assertEqual(recovering.recover_desired(), {})
+        self.assertEqual(self.recover(recovering, recovering_model)[session_id]["status"], "connected")
         self.assertEqual(
             FakeRpcClient.instances[-1].resumed_path,
             record["recoveryMetadata"]["sessionFile"],
@@ -720,9 +751,10 @@ class TestRpcSessionManager(unittest.TestCase):
         self.assertEqual(record["recoveryMetadata"], {"sessionFile": str(switch_target)})
 
         self.manager.close()
-        recovering = RpcSessionManager(self.settings, FleetModel(), self.registry)
+        recovering_model = FleetModel()
+        recovering = RpcSessionManager(self.settings, recovering_model, self.registry)
         self.addCleanup(recovering.close)
-        self.assertEqual(recovering.recover_desired(), {})
+        self.assertEqual(self.recover(recovering, recovering_model)[session_id]["status"], "connected")
         self.assertEqual(FakeRpcClient.instances[-1].resumed_path, str(switch_target))
 
     def test_refresh_captured_before_branch_cannot_restore_old_identity(self):
@@ -755,10 +787,12 @@ class TestRpcSessionManager(unittest.TestCase):
         recovering = RpcSessionManager(self.settings, recovering_model, self.registry)
         self.addCleanup(recovering.close)
 
-        self.assertEqual(recovering.recover_desired(), {})
+        self.assertEqual(self.recover(recovering, recovering_model)[session_id]["status"], "connected")
         generation = self.registry.load()[0]["generation"]
         child_count = len(FakeRpcClient.instances)
-        self.assertEqual(recovering.recover_desired(), {})
+        event_id = recovering_model.journal.latest_id
+        recovering.request_refresh_connected()
+        recovering_model.journal.wait_after(event_id, timeout=1)
 
         self.assertEqual(self.registry.load()[0]["generation"], generation)
         self.assertEqual(len(FakeRpcClient.instances), child_count)
@@ -772,8 +806,7 @@ class TestRpcSessionManager(unittest.TestCase):
         recovering = RpcSessionManager(self.settings, recovering_model, self.registry)
         self.addCleanup(recovering.close)
 
-        self.assertEqual(recovering.recover_desired(), {session_id: "launch failed"})
-        transport = recovering_model.get(session_id)["transport"]
+        transport = self.recover(recovering, recovering_model)[session_id]
         self.assertEqual(transport["status"], "disconnected")
         self.assertEqual(transport["reason"], "recovery failed: launch failed")
         self.assertTrue(FakeRpcClient.instances[-1].stopped)
@@ -795,6 +828,35 @@ class TestRpcSessionManager(unittest.TestCase):
             "connected",
             self.model.snapshot(),
         )
+
+    def test_background_recovery_does_not_let_a_slow_session_block_another(self):
+        slow_id = self.launch()["id"]
+        second_project = self.settings.project_root / "second"
+        second_project.mkdir()
+        fast_id = self.manager.launch("second", second_project)["id"]
+        self.manager.close()
+        recovering_model = FleetModel()
+        recovering = RpcSessionManager(self.settings, recovering_model, self.registry)
+        self.manager = recovering
+        slow_entered = Event()
+        release_slow = Event()
+        original_start = FakeRpcClient.start
+
+        def selective_start(client):
+            if client.kwargs["cwd"] == str(self.project):
+                slow_entered.set()
+                release_slow.wait(2)
+            return original_start(client)
+
+        with patch.object(FakeRpcClient, "start", selective_start):
+            recovering.request_refresh_connected()
+            self.assertTrue(slow_entered.wait(1))
+            deadline = time.monotonic() + 1
+            while recovering_model.get(fast_id)["transport"]["status"] != "connected" and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(recovering_model.get(fast_id)["transport"]["status"], "connected")
+            self.assertEqual(recovering_model.get(slow_id)["transport"]["status"], "reconnecting")
+            release_slow.set()
 
     def test_background_refresh_isolates_a_blocked_session(self):
         first_id = self.launch()["id"]

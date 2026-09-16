@@ -10,6 +10,14 @@ def _remaining(deadline: float) -> float:
     return max(0.0, deadline - time.monotonic())
 
 
+def _join_threads(threads: Iterable[threading.Thread], deadline: float) -> bool:
+    current = threading.current_thread()
+    joined = tuple(thread for thread in threads if thread is not current)
+    for thread in joined:
+        thread.join(_remaining(deadline))
+    return any(thread.is_alive() for thread in joined)
+
+
 def _call_with_timeout(
     callback: Callable[[], None],
     timeout: float,
@@ -125,6 +133,7 @@ def close_terminal_manager(
     manager: Any,
     runtimes: Iterable[Any],
     watcher: threading.Thread | None,
+    recovery_workers: Iterable[threading.Thread],
     timeout: float,
     lock_for: Callable[[str], Any],
 ) -> None:
@@ -132,10 +141,8 @@ def close_terminal_manager(
         raise ValueError("timeout must not be negative")
     deadline = time.monotonic() + timeout
     errors = []
-    if watcher is not None and watcher is not threading.current_thread():
-        watcher.join(_remaining(deadline))
-        if watcher.is_alive():
-            errors.append("extension watcher did not stop")
+    if watcher is not None and _join_threads((watcher,), deadline):
+        errors.append("extension watcher did not stop")
     errors.extend(
         _close_runtimes(
             manager,
@@ -146,4 +153,6 @@ def close_terminal_manager(
             success_reason="service stopped",
         )
     )
+    if _join_threads(recovery_workers, deadline):
+        errors.append("Collab recovery workers did not stop")
     _raise_errors("terminal session", errors)

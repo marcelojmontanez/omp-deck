@@ -89,9 +89,8 @@ def terminal_manager():
 def start_runtime():
     auth_manager()
     cursor_store()
-    failures = dict(rpc_manager().recover_desired())
-    failures.update(terminal_manager().start())
-    return failures
+    terminal_manager().start()
+    rpc_manager().request_refresh_connected()
 
 
 def stop_runtime():

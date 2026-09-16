@@ -110,13 +110,16 @@ async function connectEventStream(machineId, stream) {
   try {
     const headers = {Accept: 'text/event-stream'};
     if (stream.lastEventId) headers['Last-Event-ID'] = stream.lastEventId;
-    const response = await ompDeckApi.request('/api/events', {
+    const response = await ompDeckNetwork.fetchResponseBounded('/api/events', {
       machineId,
       cache: 'no-store',
       headers,
       signal: stream.controller.signal,
-    });
-    if (!isCurrent()) return;
+    }, ompDeckNetwork.STARTUP_TIMEOUT_MS, ompDeckApi.request);
+    if (!isCurrent()) {
+      await response.body?.cancel().catch(() => {});
+      return;
+    }
     if (!response.ok) throw new Error(`Event stream returned ${response.status}`);
     await consumeSse(response, machineId, stream);
     if (isCurrent()) throw new Error('Event stream ended');

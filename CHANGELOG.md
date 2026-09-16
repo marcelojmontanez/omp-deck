@@ -22,7 +22,9 @@
 
 ### Fixed
 
-- Keep writable-session drafts and supported image attachments editable while disconnected, without sending automatically on reconnect.
+- Keep writable-session drafts and supported image attachments editable while disconnected, preserve composer focus and text selection across reconnects, and never send automatically on reconnect.
+- Bound stalled connection checks, session/project reads, and event-stream handshakes so the dashboard does not remain stuck connecting indefinitely; returning to the browser retries failed project loading.
+- Serve the dashboard while managed and imported terminal sessions recover in the background, isolate slow connections, and cancel pending Collab startup when stopped or removed.
 - Let the project dropdown create directories inside listed folders and retain a newly created directory for starting or retrying, including below the configured discovery depth.
 - Prevent dashboard refreshes from interrupting a managed OMP while it starts, which could report a failed launch and replace the process even though a session later appeared connected.
 - Escape quotes in rendered Markdown and session metadata without changing their displayed text, and preserve keyboard focus on session tiles during live updates.

@@ -65,29 +65,6 @@ class RpcSessionManager:
             if record["adapterKind"] == "rpc":
                 self.model.load_record(record)
 
-    def recover_desired(self) -> dict[str, str]:
-        failures: dict[str, str] = {}
-        for record in self.registry.load():
-            if record["adapterKind"] != "rpc" or not record["desiredRpcRunning"]:
-                continue
-            with self._operation_lock(record["id"]):
-                record = self._record(record["id"])
-                if not record["desiredRpcRunning"] or self._runtime_or_none(record["id"]) is not None:
-                    continue
-                try:
-                    self._connect(record)
-                except Exception as error:
-                    failures[record["id"]] = str(error)
-                    current = self._record(record["id"])
-                    self.model.set_transport(
-                        record["id"],
-                        instance_id=None,
-                        generation=current["generation"],
-                        status="disconnected",
-                        reason=f"recovery failed: {error}",
-                    )
-        return failures
-
     def launch(self, project_name: str, project_path: Path, *, title: str | None = None) -> dict[str, Any]:
         record = self.registry.create(
             adapter_kind="rpc",
@@ -185,7 +162,17 @@ class RpcSessionManager:
             if record["adapterKind"] != "rpc" or not record["desiredRpcRunning"]:
                 raise _rpc_dispatch.SessionNotConnectedError(session_id)
             if self._runtime_or_none(session_id) is None:
-                self._connect(record)
+                try:
+                    self._connect(record)
+                except Exception as error:
+                    current = self._record(session_id)
+                    self.model.set_transport(
+                        session_id,
+                        instance_id=None,
+                        generation=current["generation"],
+                        status="disconnected",
+                        reason=f"recovery failed: {error}",
+                    )
                 return self.model.get(session_id)
         return self.refresh(session_id)
 

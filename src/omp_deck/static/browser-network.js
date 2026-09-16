@@ -24,9 +24,13 @@
     }
   }
 
-  function fetchJsonBounded(input, options = {}, timeoutMs = STARTUP_TIMEOUT_MS) {
+  function fetchResponseBounded(input, options = {}, timeoutMs = STARTUP_TIMEOUT_MS, request = fetch) {
+    return runBounded(signal => request(input, {...options, signal}), options.signal, timeoutMs);
+  }
+
+  function fetchJsonBounded(input, options = {}, timeoutMs = STARTUP_TIMEOUT_MS, request = fetch) {
     return runBounded(async signal => {
-      const response = await fetch(input, {...options, signal});
+      const response = await request(input, {...options, signal});
       let payload;
       try {
         payload = await response.json();
@@ -40,6 +44,7 @@
 
   window.ompDeckNetwork = Object.freeze({
     fetchJsonBounded,
+    fetchResponseBounded,
     STARTUP_TIMEOUT_MS,
   });
 })();

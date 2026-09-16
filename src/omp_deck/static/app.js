@@ -95,13 +95,12 @@ async function refreshNode(machineId, {replace = false} = {}) {
     const requestedRevision = node.presentationRevision;
     const requestedGeneration = node.snapshotGeneration;
     try {
-      const response = await ompDeckApi.request('/api/sessions', {
+      const {response, payload: snapshot} = await ompDeckNetwork.fetchJsonBounded('/api/sessions', {
         machineId,
         cache: 'no-store',
         signal: request.controller.signal,
-      });
+      }, ompDeckNetwork.STARTUP_TIMEOUT_MS, ompDeckApi.request);
       if (!response.ok) throw new Error(`Sessions returned ${response.status}`);
-      const snapshot = await response.json();
       if (request.controller.signal.aborted || node.refreshRequest !== request) return;
       applyFleetSnapshot(snapshot, requestedGeneration, machineId, requestedRevision);
     } catch (error) {
@@ -269,6 +268,7 @@ function recoverLiveConnections() {
   void ompDeckApi.recoverAccess().catch(() => {});
   restartEventStreams();
   void refresh(null, {replace: true});
+  if (state.selectedMachineId) recoverLaunchableProjects();
 }
 
 document.addEventListener('visibilitychange', () => {

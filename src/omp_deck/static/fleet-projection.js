@@ -48,6 +48,40 @@ function todosText(todos) {
   }).join('\n')}`).join('\n');
 }
 
+function sessionDuplicateOrdinals(agents) {
+  const groups = new Map();
+  for (const agent of agents) {
+    const key = JSON.stringify([agent.machineId, agent.project, agent.label]);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(agent);
+  }
+  const ordinals = new Map();
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    group.sort((left, right) => {
+      const leftId = String(left.localId || left.id);
+      const rightId = String(right.localId || right.id);
+      return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+    });
+    group.forEach((agent, index) => {
+      ordinals.set(agent.id, `Session ${index + 1} of ${group.length}`);
+    });
+  }
+  return ordinals;
+}
+
+function sessionIdentity(agent) {
+  const title = agent.label || 'Untitled conversation';
+  const project = agent.project || 'Unknown project';
+  const machine = agent.machineName || 'Unknown machine';
+  return {
+    title,
+    project,
+    machine,
+    metadata: [`Project: ${project}`, `Machine: ${machine}`],
+  };
+}
+
 function projectSession(session, machine = null) {
   const status = normalizedStatus(session.state);
   const updatedMs = Date.parse(session.updatedAt || '') || Date.now();
@@ -80,6 +114,12 @@ function projectSession(session, machine = null) {
     : workSummaryStatuses.has(status) && session.workingOn
       ? session.workingOn
       : status.replaceAll('-', ' ');
+  const nativeTitle = typeof session.title === 'string' && session.title
+    ? session.title
+    : 'OMP session';
+  const displayName = typeof session.displayName === 'string' && session.displayName
+    ? session.displayName
+    : null;
   return {
     id: projectedId,
     localId,
@@ -90,7 +130,10 @@ function projectSession(session, machine = null) {
     nodeAvailable: machine ? machine.status === 'live' : true,
     project: session.project?.name || 'Terminal',
     cwd: session.project?.path || '',
-    label: session.title || 'OMP session',
+    label: displayName || nativeTitle,
+    nativeLabel: nativeTitle,
+    displayName,
+    pinned: session.pinned === true,
     status,
     executionState: status,
     inboxState: session.unread ? 'unread' : 'read',

@@ -134,6 +134,28 @@ test('projects normalized RPC, collaboration, extension, and disconnected sessio
     'History stream unavailable');
 });
 
+test('projects Deck display metadata separately from the native session title', () => {
+  const { projectSession } = loadProjection();
+  const custom = projectSession(session({
+    title: 'Native title',
+    displayName: 'Release control',
+    pinned: true,
+  }));
+  const reset = projectSession(session({
+    title: 'Native title',
+    displayName: null,
+    pinned: false,
+  }));
+
+  assert.equal(custom.label, 'Release control');
+  assert.equal(custom.nativeLabel, 'Native title');
+  assert.equal(custom.displayName, 'Release control');
+  assert.equal(custom.pinned, true);
+  assert.equal(reset.label, 'Native title');
+  assert.equal(reset.displayName, null);
+  assert.equal(reset.pinned, false);
+});
+
 test('preserves the capability contract and pending UI request shape', () => {
   const { projectSession } = loadProjection();
   const capabilities = {

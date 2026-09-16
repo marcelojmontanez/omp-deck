@@ -112,6 +112,8 @@
             <div class="session-menu" id="session-menu" role="menu" hidden>
               <button type="button" role="menuitem" data-back-to-sessions>All sessions</button>
               <button type="button" role="menuitem" data-session-info>Session details</button>
+              <button type="button" role="menuitem" data-session-action="rename">Rename session</button>
+              <button type="button" role="menuitem" data-session-action="pin">Pin session</button>
               <button type="button" role="menuitem" data-session-action="compact">Compact context</button>
               <button type="button" role="menuitem" data-session-action="interrupt">Interrupt</button>
               <button type="button" role="menuitem" data-session-action="quit">Quit</button>
@@ -143,6 +145,20 @@
   <dialog class="deck-dialog" id="session-info" aria-labelledby="session-info-title">
     <header><h2 id="session-info-title">Session details</h2><button type="button" data-close-dialog aria-label="Close session details">×</button></header>
     <dl id="session-metadata" data-session-identity></dl>
+  </dialog>
+  <dialog class="deck-dialog" id="session-name-dialog" aria-labelledby="session-name-title">
+    <form id="session-name-form">
+      <header><h2 id="session-name-title">Session name</h2><button type="button" data-close-dialog aria-label="Close session name editor">×</button></header>
+      <label for="session-name-input">Custom display name</label>
+      <input id="session-name-input" type="text" maxlength="120" autocomplete="off" aria-describedby="session-name-help session-name-status" autofocus>
+      <p id="session-name-help">Leave blank or reset to use OMP’s current session name.</p>
+      <p id="session-name-status" role="status" aria-live="polite"></p>
+      <div class="session-name-actions">
+        <button type="button" data-reset-session-name>Reset to default</button>
+        <button type="button" data-close-dialog>Cancel</button>
+        <button type="submit" data-save-session-name>Save</button>
+      </div>
+    </form>
   </dialog>
   <dialog class="deck-dialog" id="deck-settings" aria-labelledby="deck-settings-title">
     <header><h2 id="deck-settings-title">Deck settings</h2><button type="button" data-close-dialog aria-label="Close Deck settings">×</button></header>

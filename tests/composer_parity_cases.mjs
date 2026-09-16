@@ -155,14 +155,18 @@ export async function verifyComposerParity(page) {
       await page.click('#overflow-button');
       await page.keyboard.press('Enter');
       const cards = await page.$$eval('.agent-card', nodes => nodes.map(node => {
-        const {x, y, width} = node.getBoundingClientRect();
-        return {x, y, width, project: node.querySelector('.agent-name').textContent};
+        const {x, width} = node.getBoundingClientRect();
+        const identity = ['.agent-name', '.agent-project', '.agent-machine-line']
+          .map(selector => node.querySelector(selector));
+        return {
+          name: node.querySelector('.agent-name').textContent,
+          contained: x >= 0 && x + width <= innerWidth && identity.every(element => (
+            element.scrollWidth <= element.clientWidth && element.scrollHeight <= element.clientHeight
+          )),
+        };
       }));
-      assert.deepEqual(cards.map(card => card.project).sort(), ['parity-fixture', 'second-project']);
-      if (width <= 390) {
-        assert.equal(cards[0].y, cards[1].y, 'phone sessions remain two-column tiles');
-        assert(cards[0].x + cards[0].width <= cards[1].x);
-      }
+      assert.deepEqual(cards.map(card => card.name).sort(), ['A different conversation', 'Composer parity fixture']);
+      assert(cards.every(card => card.contained), `session names, projects and machines remain visible at ${width}px`);
       await page.click('.appbar [data-deck-settings]');
       await page.waitForSelector('#deck-settings[open]', {visible: true});
       await page.keyboard.press('Escape');

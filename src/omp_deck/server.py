@@ -19,6 +19,7 @@ from .fleet_protocol import verify_ticket
 from .normalized_actions import NormalizedActionDispatcher
 from .projects import list_launchable_projects, resolve_project_path
 from .read_cursors import CursorStore
+from .registry_store import RegistryError, RegistryStore
 from .rpc_sessions import RpcSessionManager
 from .settings import load_settings
 from .terminal_sessions import (
@@ -41,11 +42,11 @@ _fleet_trust_store = None
 _fleet_trust_lock = threading.Lock()
 _fleet_model = FleetModel()
 _usage_service = UsageService(SETTINGS.omp_bin)
+_registry_store = None
+_registry_store_lock = threading.Lock()
 _rpc_manager = None
 _rpc_manager_lock = threading.Lock()
 _terminal_manager = None
-
-
 _terminal_manager_lock = threading.Lock()
 
 
@@ -59,11 +60,21 @@ def cursor_store():
         return _cursor_store
 
 
+def registry_store():
+    global _registry_store
+    expected_path = SETTINGS.state_root / "registry.json"
+    if _registry_store is None or _registry_store.path != expected_path:
+        with _registry_store_lock:
+            if _registry_store is None or _registry_store.path != expected_path:
+                _registry_store = RegistryStore(expected_path)
+    return _registry_store
+
+
 def rpc_manager():
     global _rpc_manager
     with _rpc_manager_lock:
         if _rpc_manager is None:
-            _rpc_manager = RpcSessionManager(SETTINGS, _fleet_model)
+            _rpc_manager = RpcSessionManager(SETTINGS, _fleet_model, registry=registry_store())
         return _rpc_manager
 
 
@@ -71,7 +82,7 @@ def terminal_manager():
     global _terminal_manager
     with _terminal_manager_lock:
         if _terminal_manager is None:
-            _terminal_manager = TerminalSessionManager(SETTINGS, _fleet_model)
+            _terminal_manager = TerminalSessionManager(SETTINGS, _fleet_model, registry=registry_store())
         return _terminal_manager
 
 
@@ -150,6 +161,7 @@ def fleet_trust():
 def action_dispatcher():
     return NormalizedActionDispatcher(
         fleet_model=_fleet_model,
+        registry=registry_store(),
         session_root=SESSION_ROOT,
         launch_project=launch_rpc_project,
         dispatch_command=dispatch_session_command,
@@ -236,7 +248,7 @@ class Handler(DeckHttpHandler):
             path == "/api/terminal-sessions/collab"
             or re.fullmatch(r"/api/projects/.+/sessions", path) is not None
             or re.fullmatch(
-                r"/api/sessions/[^/]+/(messages|follow-ups|interrupt|shutdown|model|thinking|branch|switch|resume|compact|read|remove)",
+                r"/api/sessions/[^/]+/(messages|follow-ups|interrupt|shutdown|model|thinking|branch|switch|resume|compact|read|remove|presentation)",
                 path,
             )
             is not None
@@ -427,6 +439,8 @@ class Handler(DeckHttpHandler):
         except (TypeError, ValueError) as error:
             message = "invalid Collab link" if request_path == "/api/terminal-sessions/collab" else str(error)
             self.reply(400, {"error": message})
+        except RegistryError:
+            self.reply(503, {"error": "session metadata unavailable"})
         except (SessionNotConnectedError, TerminalSessionNotConnected):
             self.reply(409, {"error": "session is not connected"})
         except (OSError, RuntimeError) as error:

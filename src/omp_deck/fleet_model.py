@@ -13,10 +13,10 @@ from ._fleet_projection import (
     now,
     pending_ui_projection,
     plain_json,
-    platform_capabilities,
     rpc_projection,
     strict_clone,
 )
+from ._fleet_registry import registry_session
 from ._session_activity import clear_activity, completion_state, update_tool_activity
 from .event_stream import EventJournal
 from .read_cursors import CursorStore
@@ -27,6 +27,8 @@ _PUBLIC_KEYS = (
     "lifecycle",
     "ompSessionId",
     "title",
+    "displayName",
+    "pinned",
     "project",
     "state",
     "transport",
@@ -61,49 +63,8 @@ class FleetModel:
 
     def load_record(self, record: Mapping[str, Any]) -> None:
         session_id = str(record["id"])
-        adapter_kind = str(record["adapterKind"])
-        project = record.get("project")
-        if not isinstance(project, Mapping):
-            raise ValueError("registry project must be an object")
         with self._lock:
-            existing = self._sessions.get(session_id)
-            live = existing is not None and existing["transport"]["instanceId"] is not None
-            session = {
-                "id": session_id,
-                "ompSessionId": existing.get("ompSessionId") if live else record.get("ompSessionId"),
-                "title": str(record["title"]),
-                "project": {"name": str(project["name"]), "path": str(project["path"])},
-                "state": existing.get("state", "disconnected") if existing else "disconnected",
-                "transport": copy.deepcopy(existing["transport"])
-                if existing
-                else {
-                    "kind": adapter_kind,
-                    "status": "disconnected",
-                    "label": "Managed RPC" if adapter_kind == "rpc" else adapter_kind.title(),
-                    "instanceId": None,
-                    "reason": "not connected",
-                },
-                "historyError": existing.get("historyError") if live else None,
-                "capabilities": platform_capabilities(adapter_kind),
-                "messages": copy.deepcopy(existing.get("messages", [])) if existing else [],
-                "todos": copy.deepcopy(existing.get("todos", [])) if existing else [],
-                "subagents": copy.deepcopy(existing.get("subagents", [])) if existing else [],
-                "pendingUiRequest": copy.deepcopy(existing.get("pendingUiRequest")) if existing else None,
-                "unread": bool(existing.get("unread", False)) if existing else False,
-                "updatedAt": str(record["updatedAt"]),
-                "workingOn": existing.get("workingOn") if existing else None,
-                "model": copy.deepcopy(existing.get("model")) if existing else None,
-                "thinking": existing.get("thinking") if existing else None,
-                "thinkingLevels": copy.deepcopy(existing.get("thinkingLevels", [])) if existing else [],
-                "_desiredRpcRunning": bool(record.get("desiredRpcRunning", False)),
-                "_generation": int(record["generation"]),
-                "_adapterSequence": int(existing.get("_adapterSequence", 0)) if live else 0,
-                "_resyncRequired": bool(existing.get("_resyncRequired", False)) if live else False,
-                "_resyncWatermark": int(existing.get("_resyncWatermark", 0)) if live else 0,
-                "_activeTools": copy.deepcopy(existing.get("_activeTools", {})) if live else {},
-                "_toolActivityOverflow": bool(existing.get("_toolActivityOverflow", False)) if live else False,
-                "_extensionThinkingControl": bool(existing.get("_extensionThinkingControl", False)) if live else False,
-            }
+            session = registry_session(record, self._sessions.get(session_id))
             self._sessions[session_id] = session
             self._changed_locked("session_registered", session_id, {"session": self._public_session(session)})
 
@@ -115,6 +76,24 @@ class FleetModel:
         if self.cursor_store is not None:
             self.cursor_store.remove(session_id)
         return True
+
+    def update_presentation(self, record: Mapping[str, Any]) -> tuple[dict[str, Any], int]:
+        """Apply persisted Deck metadata without claiming or rotating a transport."""
+        session_id = str(record["id"])
+        revision = int(record.get("presentationRevision", 0))
+        with self._lock:
+            session = self._sessions[session_id]
+            if revision <= session["_presentationRevision"]:
+                return self._public_session(session), self._snapshot_generation
+            session["displayName"] = record.get("displayName")
+            session["pinned"] = bool(record.get("pinned", False))
+            session["_presentationRevision"] = revision
+            self._changed_locked(
+                "session_presentation",
+                session_id,
+                {"session": self._public_session(session)},
+            )
+            return self._public_session(session), self._snapshot_generation
 
     def apply_rpc_snapshot(
         self,
@@ -421,7 +400,14 @@ class FleetModel:
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             sessions = [self._public_session(session) for session in self._sessions.values()]
-            sessions.sort(key=lambda value: (value["state"] != "needs_input", value["title"].casefold(), value["id"]))
+            sessions.sort(
+                key=lambda value: (
+                    not value["pinned"],
+                    value["state"] != "needs_input",
+                    (value["displayName"] or value["title"]).casefold(),
+                    value["id"],
+                )
+            )
             return {
                 "generatedAt": now(),
                 "snapshotGeneration": self._snapshot_generation,

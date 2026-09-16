@@ -234,6 +234,30 @@ button.chip:active { background: #283247; }
 .settings-actions .danger { color: var(--red); }
 #settings-status { margin-top: 12px; font-size: 13px; overflow-wrap: anywhere; }
 #settings-status:empty { display: none; }
+.deck-dialog form > label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 12px; font-weight: 750; }
+.deck-dialog form > input {
+  width: 100%;
+  min-height: 44px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #0d121c;
+  color: var(--text);
+}
+#session-name-help, #session-name-status { margin: 8px 0 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+#session-name-status { color: var(--red); }
+#session-name-status:empty { display: none; }
+.session-name-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.session-name-actions button {
+  min-height: 44px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #1a2130;
+  color: var(--text);
+  cursor: pointer;
+}
+.session-name-actions button:disabled { opacity: .5; cursor: not-allowed; }
 .archive-separator { display: flex; align-items: center; gap: 10px; margin: 4px 0 8px; }
 .archive-separator::before, .archive-separator::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
 .archive-separator button { border: 0; background: transparent; color: var(--muted); font-size: 11px; white-space: nowrap; cursor: pointer; }

@@ -150,9 +150,11 @@ async function pair(page, coordinator) {
 }
 
 async function selectMachineSession(page, name) {
-  const handle = await page.waitForFunction(label => (
-    [...document.querySelectorAll('#agent-list [data-id]')].find(card => card.textContent.includes(label))
-  ), {}, name);
+  const handle = await page.waitForFunction(label => {
+    const session = state.agents.find(agent => agent.machineName === label);
+    return [...document.querySelectorAll('#agent-list [data-id]')]
+      .find(card => card.dataset.id === session?.id);
+  }, {}, name);
   const id = await handle.evaluate(card => card.dataset.id);
   await page.locator(`#agent-list [data-id=${JSON.stringify(id)}]`).click();
   await handle.dispose();
@@ -213,6 +215,22 @@ test('independent viewers route duplicate session IDs directly and survive one m
     ]);
   }
   const desktopId = await selectMachineSession(phone, 'Desktop');
+  await phone.click('#overflow-button');
+  await phone.click('[data-session-action="rename"]');
+  await phone.type('#session-name-input', 'Desktop release work');
+  await phone.click('[data-save-session-name]');
+  await phone.waitForSelector('#session-name-dialog:not([open])');
+  await phone.click('#overflow-button');
+  await phone.click('[data-session-action="pin"]');
+  await computer.waitForFunction(id => {
+    const session = state.agents.find(agent => agent.id === id);
+    return session?.label === 'Desktop release work' && session.pinned;
+  }, {}, desktopId);
+  const untouchedPeer = await computer.evaluate(id => {
+    const peer = state.agents.find(agent => agent.id !== id);
+    return {label: peer.label, pinned: peer.pinned};
+  }, desktopId);
+  assert.deepEqual(untouchedPeer, {label: 'Shared project', pinned: false});
   await computer.focus(`#agent-list [data-id="${desktopId}"]`);
   await phone.type('#message', 'Live update while choosing a session');
   await phone.click('#send');
@@ -272,6 +290,10 @@ test('independent viewers route duplicate session IDs directly and survive one m
   assert.equal(await phone.$$eval('#attachments img', images => images.length), 1);
   await start(desktop, ['-m', 'tests.fixtures.fleet_browser_server', 'Desktop']);
   await phone.waitForFunction(() => !document.getElementById('send').disabled, {timeout: 30_000});
+  await phone.waitForFunction(id => {
+    const session = state.agents.find(agent => agent.id === id);
+    return session?.label === 'Desktop release work' && session.pinned;
+  }, {}, desktopId);
   for (const page of [phone, computer]) {
     assert.deepEqual(await page.evaluate(() => ({
       local: localStorage.length, session: sessionStorage.length,

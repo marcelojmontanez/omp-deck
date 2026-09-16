@@ -14,6 +14,9 @@ class FleetModelTests(unittest.TestCase):
         record = {
             "id": "deck-1",
             "title": "Build Deck",
+            "displayName": None,
+            "pinned": False,
+            "presentationRevision": 0,
             "project": {"name": "deck", "path": "/work/deck"},
             "adapterKind": "rpc",
             "desiredRpcRunning": True,
@@ -81,6 +84,8 @@ class FleetModelTests(unittest.TestCase):
                 "id",
                 "ompSessionId",
                 "title",
+                "displayName",
+                "pinned",
                 "project",
                 "lifecycle",
                 "state",
@@ -276,28 +281,85 @@ class FleetModelTests(unittest.TestCase):
         )
         self.assertTrue(model.get("deck-1")["unread"])
 
-    def test_record_reload_preserves_live_session_identity_and_adapter_progress(self):
+    def test_presentation_update_preserves_native_title_and_transport_ownership(self):
         model = self.connected_model()
+        live_title = self.make_snapshot(sequence=1, session_name="Native live title")
+        self.assertTrue(model.apply_rpc_snapshot("deck-1", instance_id="instance-a", generation=3, snapshot=live_title))
+
+        session, snapshot_generation = model.update_presentation(
+            self.make_record(
+                displayName="My release",
+                pinned=True,
+                updatedAt="2026-09-03T13:00:00+00:00",
+                presentationRevision=1,
+            )
+        )
+
+        self.assertEqual(snapshot_generation, model.snapshot()["snapshotGeneration"])
+        self.assertEqual(
+            (session["title"], session["displayName"], session["pinned"]),
+            ("Native live title", "My release", True),
+        )
+        self.assertEqual(session["transport"]["instanceId"], "instance-a")
         self.assertTrue(
-            model.apply_adapter_event("deck-1", instance_id="instance-a", generation=3, event=self.event(1))
+            model.apply_rpc_snapshot(
+                "deck-1",
+                instance_id="instance-a",
+                generation=3,
+                snapshot=self.make_snapshot(sequence=2, session_name="New native title"),
+            )
+        )
+        after_native_rename = model.get("deck-1")
+        self.assertEqual(
+            (after_native_rename["title"], after_native_rename["displayName"]),
+            ("New native title", "My release"),
+        )
+        self.assertTrue(
+            model.apply_adapter_event("deck-1", instance_id="instance-a", generation=3, event=self.event(3))
         )
 
         model.load_record(
             self.make_record(
-                title="Renamed",
+                title="Stale persisted default",
+                displayName="Stale Deck name",
+                pinned=False,
                 generation=4,
                 ompSessionId="omp-from-record",
-                updatedAt="2026-09-03T13:00:00+00:00",
+                updatedAt="2026-09-03T14:00:00+00:00",
             )
         )
 
-        session = model.get("deck-1")
-        self.assertEqual(session["id"], "deck-1")
-        self.assertEqual(session["transport"]["instanceId"], "instance-a")
-        self.assertEqual(session["ompSessionId"], "omp-live")
-        self.assertEqual(session["title"], "Renamed")
+        reloaded = model.get("deck-1")
+        self.assertEqual(reloaded["title"], "New native title")
+        self.assertEqual((reloaded["displayName"], reloaded["pinned"]), ("My release", True))
+        self.assertEqual(reloaded["transport"]["instanceId"], "instance-a")
         self.assertTrue(
-            model.apply_adapter_event("deck-1", instance_id="instance-a", generation=4, event=self.event(2))
+            model.apply_adapter_event("deck-1", instance_id="instance-a", generation=4, event=self.event(4))
+        )
+
+        newer, _ = model.update_presentation(
+            self.make_record(
+                displayName="Newest Deck name",
+                pinned=False,
+                presentationRevision=2,
+                generation=4,
+            )
+        )
+        stale, _ = model.update_presentation(
+            self.make_record(
+                displayName="Stale Deck name",
+                pinned=True,
+                presentationRevision=1,
+                generation=3,
+            )
+        )
+        self.assertEqual(
+            (newer["displayName"], newer["pinned"]),
+            ("Newest Deck name", False),
+        )
+        self.assertEqual(
+            (stale["displayName"], stale["pinned"]),
+            ("Newest Deck name", False),
         )
 
     def test_global_event_ids_are_monotonic_across_model_changes(self):

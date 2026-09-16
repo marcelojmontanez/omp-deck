@@ -101,15 +101,18 @@ omp-deck serve
 - choose a configured project and select **Start** for a managed RPC session;
 - open **Deck settings → Connect a terminal** and paste a writable Collab link to connect a terminal-owned session on the selected machine;
 - use the session menu to compact, interrupt, shut down, or remove a terminal transport only when that capability is available;
+- rename or reset a session’s Deck display name and pin or unpin it from the session menu, independently of whether its OMP transport supports native renaming;
 - answer pending RPC or Collab input requests in the request panel; extension-fallback requests remain terminal-only.
 
 **Ongoing** is the default view. It includes sessions with a current transport owner and managed sessions whose recovery is still requested. **Needs attention** includes pending input, failures, unavailable machines, connection recovery, and incomplete history. Summary counts and filters apply to ongoing sessions, not old records.
 
-**History** is a secondary, read-only view of retained session records without a current attachment or managed recovery intent. Moving a record there does not delete it, prove that its terminal process ended, or promise a complete archived transcript. A restored live attachment returns it to Ongoing. Machine outages preserve the browser's last-known session grouping rather than reclassifying every session as history.
+**History** is a secondary view of retained session records without a current attachment or managed recovery intent. Conversations are read-only; their Deck names and pins remain editable. Moving a record there does not delete it, prove that its terminal process ended, or promise a complete archived transcript. A restored live attachment returns it to Ongoing. Machine outages preserve the browser's last-known session grouping rather than reclassifying every session as history.
 
-Unread sessions appear first and only meaningful assistant content creates unread state. Tool-only, thinking-only, and whitespace-only records do not create empty conversation bubbles. Image-only replies and explicit errors remain visible. Running subagents appear beneath their parent session, and supported todo lists retain their phase grouping. Completed runs that report an error remain marked as failed.
+Unread sessions appear first unless pinned sessions are present; pinned sessions stay ahead within the current Ongoing/History view and active filter, while the existing unread, attention, status, and name ordering remains unchanged within each group. Only meaningful assistant content creates unread state. Tool-only, thinking-only, and whitespace-only records do not create empty conversation bubbles. Image-only replies and explicit errors remain visible. Running subagents appear beneath their parent session, and supported todo lists retain their phase grouping. Completed runs that report an error remain marked as failed.
 
-Session tiles put the project first and keep two columns on phones. The conversation toolbar stays compact: provider-qualified model, effective thinking level, tasks, connection light, and session menu. Use browser Back or **All sessions** in that menu to return to the list. **Session details** contains the full session name, project directory, machine, and availability details. Existing session links still open retained history. A direct connection identifies the machine by its Deck address; the multi-machine coordinator uses enrolled machine names.
+Session tiles show the effective session display name and explicitly label its project and machine. Sessions with otherwise identical machine, project, and name labels receive a deterministic ordinal that stays stable when pinning, activity, or filters change. A custom Deck name does not rename the OMP conversation; resetting it reveals OMP’s current native/default title. Custom names and pins are stored in the owning node’s server registry, survive browser and service restarts, and reconcile through normal session state updates without browser storage.
+
+The conversation toolbar stays compact: provider-qualified model, effective thinking level, tasks, connection light, and session menu. Use browser Back or **All sessions** in that menu to return to the list. **Session details** shows the effective name, native/default name when customized, project directory, machine, and availability details. Existing session links still open retained history. A direct connection identifies the machine by its Deck address; the multi-machine coordinator uses enrolled machine names.
 
 The session light is green for connected managed RPC, amber for connected terminal transports, red for an unavailable ongoing connection, and neutral for history. Its accessible label and **Session details** identify the connection without relying on color. Actual machine, transport, and history failures remain visible. **Deck settings**, available from the dashboard or session menu, holds terminal connection setup, local-draft clearing, logout, and device revocation.
 
@@ -319,7 +322,7 @@ To return to pairing, set `"auth_mode": "pairing"` (or omit it), remove `tailsca
 
 Server state defaults to `~/.local/state/omp-deck` on Linux/macOS and `%LOCALAPPDATA%\OMP Deck\state` on Windows:
 
-- `registry.json`: stable Deck session identities and non-secret recovery metadata;
+- `registry.json`: stable Deck session identities, custom display names and pins, and non-secret recovery metadata;
 - `auth.json`: installation verifier and hashed device credentials;
 - `cursors.json`: last-read message cursors;
 - `collab.json`: protected Collab credentials while imported;
@@ -385,6 +388,8 @@ omp-deck service status
 omp-deck service restart
 omp-deck service remove
 ```
+
+The first start of a release with Deck display names upgrades `registry.json` from schema 1 to schema 2. Older releases reject and quarantine schema 2, so reverting the package alone is not a safe rollback after deployment. With Deck stopped, preserve a private backup and convert the current registry to schema 1 by removing only `displayName`, `pinned`, and `presentationRevision` from each session and changing the envelope version to `1`; preserve current session identities, recovery metadata, and generations, and replace the file atomically with its original private permissions. This discards custom names and pins, not the sessions. Do not restore old authentication, trust, or request-ledger files to undo this feature: doing so can revive revoked access or lose newer request outcomes.
 
 Upgrade with the same tool manager, then run `omp-deck setup`. Setup snapshots
 the active OMP plugin and service unit before replacement, validates the new

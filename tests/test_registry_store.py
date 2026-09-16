@@ -57,6 +57,69 @@ class RegistryStoreTests(unittest.TestCase):
         self.assertFalse(restarted.remove(created["id"]))
         self.assertEqual(RegistryStore(self.tmp_path / "registry.json").load(), [])
 
+    def test_presentation_metadata_persists_without_rotating_transport_generation(self):
+        store = self.make_store()
+        created = self.create_session(store)
+
+        renamed = store.update_presentation(created["id"], display_name="Release work", pinned=True)
+
+        self.assertEqual(renamed["generation"], created["generation"])
+        self.assertEqual((renamed["displayName"], renamed["pinned"]), ("Release work", True))
+        self.assertEqual(renamed["presentationRevision"], 1)
+        self.assertEqual(renamed["updatedAt"], created["updatedAt"])
+        self.assertEqual(
+            RegistryStore(self.tmp_path / "registry.json").load()[0],
+            renamed,
+        )
+
+        reset = store.update_presentation(created["id"], display_name=None, pinned=False)
+        self.assertEqual(reset["generation"], created["generation"])
+        self.assertEqual((reset["displayName"], reset["pinned"]), (None, False))
+        self.assertEqual(reset["presentationRevision"], 2)
+
+    def test_concurrent_presentation_updates_receive_ordered_durable_revisions(self):
+        store = self.make_store()
+        created = self.create_session(store)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(
+                executor.map(
+                    lambda name: RegistryStore(self.tmp_path / "registry.json").update_presentation(
+                        created["id"],
+                        display_name=name,
+                    ),
+                    ("First", "Second"),
+                )
+            )
+
+        self.assertEqual({record["presentationRevision"] for record in results}, {1, 2})
+        durable = RegistryStore(self.tmp_path / "registry.json").load()[0]
+        latest = max(results, key=lambda record: record["presentationRevision"])
+        self.assertEqual(
+            (durable["presentationRevision"], durable["displayName"]),
+            (latest["presentationRevision"], latest["displayName"]),
+        )
+
+    def test_version_one_registry_is_upgraded_without_losing_sessions(self):
+        store = self.make_store()
+        created = self.create_session(store)
+        legacy = json.loads(store.path.read_text(encoding="utf-8"))
+        legacy["version"] = 1
+        for record in legacy["sessions"]:
+            record.pop("displayName")
+            record.pop("pinned")
+            record.pop("presentationRevision")
+        store.path.write_text(json.dumps(legacy), encoding="utf-8")
+
+        loaded = RegistryStore(self.tmp_path / "registry.json").load()
+
+        self.assertEqual(loaded[0]["id"], created["id"])
+        self.assertEqual(
+            (loaded[0]["displayName"], loaded[0]["pinned"], loaded[0]["presentationRevision"]),
+            (None, False, 0),
+        )
+        self.assertEqual(json.loads(store.path.read_text(encoding="utf-8"))["version"], 2)
+
     def test_registry_and_lock_are_owner_only(self):
         store = self.make_store()
         self.create_session(store)

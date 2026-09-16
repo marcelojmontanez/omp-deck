@@ -1,5 +1,6 @@
 import re
 
+from .registry_store import MAX_DISPLAY_NAME_LENGTH
 from .request_parsing import (
     bounded_text,
     client_request_id,
@@ -28,11 +29,22 @@ _UI_ROUTE = re.compile(r"/api/sessions/([^/]+)/ui-requests/([^/]+)/(respond|canc
 _PROJECT_ROUTE = re.compile(r"/api/projects/(.+)/sessions")
 _READ_ROUTE = re.compile(r"/api/sessions/([^/]+)/read")
 _REMOVE_ROUTE = re.compile(r"/api/sessions/([^/]+)/remove")
+_PRESENTATION_ROUTE = re.compile(r"/api/sessions/([^/]+)/presentation")
 
 
 class NormalizedActionDispatcher:
-    def __init__(self, *, fleet_model, session_root, launch_project, dispatch_command, terminal_manager):
+    def __init__(
+        self,
+        *,
+        fleet_model,
+        registry,
+        session_root,
+        launch_project,
+        dispatch_command,
+        terminal_manager,
+    ):
         self.fleet_model = fleet_model
+        self.registry = registry
         self.session_root = session_root
         self.launch_project = launch_project
         self.dispatch_command = dispatch_command
@@ -41,6 +53,9 @@ class NormalizedActionDispatcher:
     def dispatch(self, request_path, data):
         if request_path == "/api/terminal-sessions/collab":
             return self._add_collab(data)
+        match = _PRESENTATION_ROUTE.fullmatch(request_path)
+        if match:
+            return self._update_presentation(match, data)
         match = _REMOVE_ROUTE.fullmatch(request_path)
         if match:
             return self._remove(match)
@@ -57,6 +72,32 @@ class NormalizedActionDispatcher:
         if match:
             return self._session_action(match, data)
         return None
+
+    def _update_presentation(self, match, data):
+        session_id = decoded_segment(match.group(1), "session")
+        self.fleet_model.get(session_id)
+        changes = {}
+        if "displayName" in data:
+            display_name = data["displayName"]
+            if not isinstance(display_name, str):
+                raise ValueError("displayName must be a string")
+            display_name = display_name.strip()
+            if len(display_name) > MAX_DISPLAY_NAME_LENGTH:
+                raise ValueError(f"displayName must be at most {MAX_DISPLAY_NAME_LENGTH} characters")
+            changes["display_name"] = display_name or None
+        if "pinned" in data:
+            if not isinstance(data["pinned"], bool):
+                raise ValueError("pinned must be boolean")
+            changes["pinned"] = data["pinned"]
+        if not changes:
+            raise ValueError("displayName or pinned is required")
+        record = self.registry.update_presentation(session_id, **changes)
+        session, snapshot_generation = self.fleet_model.update_presentation(record)
+        return 200, {
+            "status": "updated",
+            "snapshotGeneration": snapshot_generation,
+            "session": session,
+        }
 
     def _add_collab(self, data):
         request_id = client_request_id(data)

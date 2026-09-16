@@ -28,17 +28,19 @@ class BrowserSession:
         path.chmod(0o600)
         attachments.BLOB_ROOT = root
         self.messages.append({"role": "assistant", "content": [{"type": "image", "data": f"blob:sha256:{digest}"}]})
-        server._fleet_model.load_record(
-            {
-                "id": SESSION_ID,
-                "title": "Shared project",
-                "project": {"name": "demo", "path": str(server.SETTINGS.project_root / "demo")},
-                "adapterKind": "rpc",
-                "ompSessionId": "same-omp-session",
-                "generation": 1,
-                "updatedAt": "2026-09-01T00:00:00+00:00",
-            }
-        )
+        registry = server.registry_store()
+        record = next((item for item in registry.load() if item["id"] == SESSION_ID), None)
+        if record is None:
+            record = registry.create(
+                session_id=SESSION_ID,
+                adapter_kind="rpc",
+                project_name="demo",
+                project_path=str(server.SETTINGS.project_root / "demo"),
+                title="Shared project",
+                omp_session_id="same-omp-session",
+            )
+        self.generation = record["generation"]
+        server._fleet_model.load_record(record)
         self.publish()
 
     def publish(self):
@@ -46,7 +48,7 @@ class BrowserSession:
         server._fleet_model.apply_rpc_snapshot(
             SESSION_ID,
             instance_id="browser-fixture",
-            generation=1,
+            generation=self.generation,
             snapshot=AdapterSnapshot(
                 state={"is_streaming": False, "thinking_level": self.thinking},
                 messages=tuple(self.messages),

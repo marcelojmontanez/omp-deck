@@ -3,6 +3,8 @@ let sessionActionGeneration = 0;
 const sessionActionAttempts = new Map();
 const dialogReturnFocus = new WeakMap();
 let settingsBusy = false;
+let sessionNameTarget = null;
+let presentationOperation = null;
 
 function clearSessionActionAttempts() {
   sessionActionAttempts.clear();
@@ -127,10 +129,17 @@ function openDialog(dialog, trigger) {
 function clearPrivateDialogState() {
   closeSessionMenu();
   const info = el['session-info'];
+  const rename = el['session-name-dialog'];
   const settings = el['deck-settings'];
   closeDialog(info, {restoreFocus: false});
+  closeDialog(rename, {restoreFocus: false});
   closeDialog(settings, {restoreFocus: false});
+  sessionNameTarget = null;
+  presentationOperation = null;
+  setPresentationBusy(false);
   el['session-metadata']?.replaceChildren();
+  if (el['session-name-input']) el['session-name-input'].value = '';
+  if (el['session-name-status']) el['session-name-status'].textContent = '';
   if (el['settings-status']) el['settings-status'].textContent = '';
 }
 
@@ -142,6 +151,80 @@ function dialogReturnTarget(trigger) {
 function showSessionInfo(trigger) {
   if (!selectedAgent()) return;
   openDialog(el['session-info'], dialogReturnTarget(trigger));
+}
+
+function showSessionNameEditor(trigger) {
+  const agent = selectedAgent();
+  if (!agent || agent.nodeAvailable === false || presentationOperation) return;
+  sessionNameTarget = {id: agent.id, machineId: agent.machineId};
+  el['session-name-input'].value = agent.displayName || '';
+  el['session-name-status'].textContent = '';
+  openDialog(el['session-name-dialog'], dialogReturnTarget(trigger));
+}
+
+function setPresentationBusy(busy) {
+  el['session-name-dialog']?.querySelectorAll('[data-save-session-name], [data-reset-session-name]')
+    .forEach(button => { button.disabled = busy; });
+}
+
+async function updateSessionPresentation(agent, changes) {
+  if (!agent || agent.nodeAvailable === false || presentationOperation) return false;
+  const generation = sessionActionGeneration;
+  const operation = {};
+  presentationOperation = operation;
+  setPresentationBusy(true);
+  try {
+    const response = await ompDeckApi.request(
+      `/api/sessions/${encodeURIComponent(agent.id)}/presentation`,
+      {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(changes),
+      }
+    );
+    const payload = await response.json().catch(() => ({}));
+    if (generation !== sessionActionGeneration || !ompDeckApi.authenticated()) return false;
+    if (!response.ok) throw new Error(payload.error || `Session update failed (${response.status})`);
+    if (
+      !payload.session || typeof payload.session !== 'object'
+      || !Number.isSafeInteger(payload.snapshotGeneration)
+    ) {
+      throw new Error('Session update returned invalid state');
+    }
+    const current = state.agents.find(item => item.id === agent.id);
+    if (!current || current.machineId !== agent.machineId) {
+      throw new Error('Session is no longer available');
+    }
+    applyFleetSession(payload.session, payload.snapshotGeneration, agent.machineId);
+    return true;
+  } catch (error) {
+    if (generation === sessionActionGeneration && ompDeckApi.authenticated()) {
+      showToast(error.message, 'error');
+      if (el['session-name-dialog']?.open) el['session-name-status'].textContent = error.message;
+    }
+    return false;
+  } finally {
+    if (presentationOperation === operation) {
+      presentationOperation = null;
+      setPresentationBusy(false);
+    }
+  }
+}
+
+async function saveSessionName({reset = false} = {}) {
+  const target = sessionNameTarget;
+  const agent = target ? state.agents.find(item => item.id === target.id) : null;
+  if (!agent || agent.machineId !== target.machineId) {
+    el['session-name-status'].textContent = 'Session is no longer available.';
+    return false;
+  }
+  const displayName = reset ? '' : el['session-name-input'].value.trim();
+  const updated = await updateSessionPresentation(agent, {displayName});
+  if (!updated) return false;
+  sessionNameTarget = null;
+  closeDialog(el['session-name-dialog']);
+  showToast(displayName ? 'Session renamed' : 'Session name reset', 'success');
+  return true;
 }
 
 function showDeckSettings(trigger) {
@@ -282,7 +365,7 @@ el['session-menu'].addEventListener('click', async event => {
   const agent = selectedAgent();
   if (!button || !agent || button.disabled) return;
   const action = button.dataset.sessionAction;
-  closeSessionMenu({restoreFocus: true});
+  closeSessionMenu({restoreFocus: action !== 'rename'});
   if (action === 'copy') {
     const url = new URL(location.href);
     url.searchParams.set('session', agent.id);
@@ -292,6 +375,15 @@ el['session-menu'].addEventListener('click', async event => {
     } catch {
       showToast('Could not copy the session link', 'error');
     }
+    return;
+  }
+  if (action === 'rename') {
+    showSessionNameEditor(button);
+    return;
+  }
+  if (action === 'pin') {
+    const updated = await updateSessionPresentation(agent, {pinned: !agent.pinned});
+    if (updated) showToast(agent.pinned ? 'Session unpinned' : 'Session pinned', 'success');
     return;
   }
   if (action === 'remove') {
@@ -336,7 +428,15 @@ document.addEventListener('click', event => {
   if (!target.closest('#session-menu, #overflow-button')) closeSessionMenu();
 });
 
-for (const dialog of [el['session-info'], el['deck-settings']].filter(Boolean)) {
+el['session-name-form'].addEventListener('submit', event => {
+  event.preventDefault();
+  void saveSessionName();
+});
+el['session-name-dialog'].querySelector('[data-reset-session-name]').addEventListener('click', () => {
+  void saveSessionName({reset: true});
+});
+
+for (const dialog of [el['session-info'], el['session-name-dialog'], el['deck-settings']].filter(Boolean)) {
   dialog.addEventListener('cancel', event => {
     event.preventDefault();
     closeDialog(dialog);

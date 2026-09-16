@@ -87,6 +87,7 @@ class NormalizedHttpTests(unittest.TestCase):
             ("_rpc_manager", self.rpc),
             ("_terminal_manager", self.terminal),
             ("_auth_manager", None),
+            ("_registry_store", None),
         ):
             started = patch.object(server, target, value)
             started.start()
@@ -167,6 +168,74 @@ class NormalizedHttpTests(unittest.TestCase):
         self.assertEqual(projects["rootLabel"], "projects-private-root/")
         self.assertEqual(projects["discoveryDepth"], 2)
         self.assertNotIn(str(self.project_root), json.dumps(projects))
+
+    def test_presentation_metadata_is_validated_persisted_and_projected(self):
+        registry = server.registry_store()
+        registry.create(
+            session_id="rpc-1",
+            adapter_kind="rpc",
+            project_name="rpc-1",
+            project_path="/secret/work/rpc",
+            title="Title rpc-1",
+            omp_session_id="omp-rpc-1",
+        )
+
+        status, _, payload = self.post(
+            "/api/sessions/rpc-1/presentation",
+            {"displayName": "  Release control  ", "pinned": True},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertIsInstance(payload["snapshotGeneration"], int)
+        session = payload["session"]
+        self.assertEqual(
+            (session["title"], session["displayName"], session["pinned"]),
+            ("Title rpc-1", "Release control", True),
+        )
+        persisted = registry.load()[0]
+        self.assertEqual((persisted["displayName"], persisted["pinned"]), ("Release control", True))
+        self.assertEqual(persisted["generation"], 1)
+        self.assertEqual(persisted["presentationRevision"], 1)
+
+        status, _, reset = self.post(
+            "/api/sessions/rpc-1/presentation",
+            {"displayName": ""},
+        )
+        self.assertEqual(status, 200)
+        self.assertIsNone(reset["session"]["displayName"])
+        self.assertEqual(reset["session"]["title"], "Title rpc-1")
+
+        invalid = (
+            ({"displayName": 7}, "displayName must be a string"),
+            ({"displayName": "x" * 121}, "displayName must be at most 120 characters"),
+            ({"pinned": 1}, "pinned must be boolean"),
+            ({}, "displayName or pinned is required"),
+        )
+        for body, error in invalid:
+            with self.subTest(body=body):
+                status, _, rejected = self.post("/api/sessions/rpc-1/presentation", body)
+                self.assertEqual((status, rejected), (400, {"error": error}))
+
+        status, _, missing = self.post(
+            "/api/sessions/missing/presentation",
+            {"pinned": True},
+        )
+        self.assertEqual((status, missing), (404, {"error": "session not found"}))
+
+        status, _, forbidden = self.request(
+            "POST",
+            "/api/sessions/rpc-1/presentation",
+            {"pinned": False},
+            {
+                "Cookie": self.cookie,
+                "Origin": self.origin,
+                "Sec-Fetch-Site": "same-origin",
+            },
+        )
+        self.assertEqual(
+            (status, forbidden),
+            (403, {"error": "authentication and CSRF token required"}),
+        )
 
     def test_invalid_titles_return_validation_errors_without_dispatch(self):
         for route in ("/api/projects/demo/sessions", "/api/terminal-sessions/collab"):

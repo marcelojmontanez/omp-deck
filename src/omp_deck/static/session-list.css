@@ -65,6 +65,7 @@
   background: linear-gradient(145deg, rgba(29,38,56,.82), rgba(12,16,26,.62));
 }
 .agent-card:active { transform: scale(.992); }
+.agent-card.pinned { border-color: rgba(84,216,255,.42); }
 .agent-card-top { display: grid; grid-template-columns: 9px minmax(0, 1fr) auto; gap: 9px; align-items: start; }
 .agent-card-top > :nth-child(2) { min-width: 0; }
 .status-dot { display: block; width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; background: var(--muted); }
@@ -94,24 +95,53 @@
   line-height: 1.2;
   letter-spacing: -.02em;
 }
-.agent-project {
-  margin-top: 5px;
+.agent-project,
+.agent-machine-line {
+  display: block;
   color: #aab4c6;
   font-size: 11px;
   line-height: 1.35;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow: hidden;
+  overflow-wrap: anywhere;
 }
-.agent-project, .activity-summary { overflow-wrap: anywhere; }
+.agent-project { margin-top: 5px; }
+.agent-machine-line { margin-top: 2px; color: var(--muted); }
+.agent-disambiguator {
+  display: block;
+  margin-top: 4px;
+  color: var(--cyan);
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1.25;
+}
+.activity-summary { overflow-wrap: anywhere; }
+.agent-card-side { display: grid; justify-items: end; gap: 5px; }
+.pin-badge {
+  padding: 2px 5px;
+  border-radius: 999px;
+  background: rgba(84,216,255,.12);
+  color: var(--cyan);
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1.2;
+}
 .agent-age { color: var(--muted); font-size: 10px; white-space: nowrap; }
 @media (max-width: 760px) {
   .rail { padding: 10px; overflow: visible; }
   .filters { padding-bottom: 10px; }
   .agent-list { grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: visible; }
   .agent-card { min-height: 88px; padding: 12px; }
-  .agent-project { overflow-wrap: anywhere; }
+  .agent-card-top { grid-template-columns: 9px minmax(0, 1fr); }
+  .agent-card-side {
+    grid-column: 2;
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 8px;
+  }
+}
+
+@media (max-width: 560px) {
+  .agent-list { grid-template-columns: minmax(0, 1fr); }
 }
 
 .agent-list .empty-card { grid-column: 1 / -1; }

@@ -17,8 +17,9 @@ from typing import Any
 
 from ._private_state import PrivateStateFile
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_MAX_RECORDS = 1_000
+MAX_DISPLAY_NAME_LENGTH = 120
 _ADAPTER_KINDS = frozenset({"rpc", "collab", "extension"})
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _FORBIDDEN_METADATA_MARKERS = (
@@ -32,7 +33,7 @@ _FORBIDDEN_METADATA_MARKERS = (
     "token",
     "transcript",
 )
-_RECORD_KEYS = frozenset(
+_LEGACY_RECORD_KEYS = frozenset(
     {
         "id",
         "adapterKind",
@@ -46,6 +47,7 @@ _RECORD_KEYS = frozenset(
         "updatedAt",
     }
 )
+_RECORD_KEYS = _LEGACY_RECORD_KEYS | {"displayName", "pinned", "presentationRevision"}
 _UNSET = object()
 
 
@@ -82,6 +84,22 @@ def _validate_text(value: Any, name: str, *, nullable: bool = False) -> str | No
         return None
     if not isinstance(value, str) or not value or len(value) > 4096 or "\x00" in value:
         raise RegistryValidationError(f"{name} must be a non-empty bounded string")
+    return value
+
+
+def _validate_display_name(value: Any) -> str | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or len(value) > MAX_DISPLAY_NAME_LENGTH
+        or "\x00" in value
+    ):
+        raise RegistryValidationError(
+            f"displayName must be null or a trimmed string of at most {MAX_DISPLAY_NAME_LENGTH} characters"
+        )
     return value
 
 
@@ -175,6 +193,9 @@ class RegistryStore:
                 "ompSessionId": omp_session_id,
                 "project": {"name": project_name, "path": project_path},
                 "title": title,
+                "displayName": None,
+                "pinned": False,
+                "presentationRevision": 0,
                 "desiredRpcRunning": desired_rpc_running,
                 "recoveryMetadata": dict(recovery_metadata or {}),
                 "generation": data["generation"] + 1,
@@ -230,6 +251,41 @@ class RegistryStore:
             self._write(data)
             return copy.deepcopy(record)
 
+    def update_presentation(
+        self,
+        session_id: str,
+        *,
+        display_name: str | None | object = _UNSET,
+        pinned: bool | object = _UNSET,
+    ) -> dict[str, Any]:
+        """Persist Deck-only presentation without changing transport ownership."""
+        if display_name is _UNSET and pinned is _UNSET:
+            raise RegistryValidationError("at least one presentation field is required")
+        with self._locked():
+            data = self._read_or_quarantine()
+            record = next((item for item in data["sessions"] if item["id"] == session_id), None)
+            if record is None:
+                raise KeyError(session_id)
+            changed = False
+            if display_name is not _UNSET:
+                normalized_name = _validate_display_name(display_name)
+                if record["displayName"] != normalized_name:
+                    changed = True
+                record["displayName"] = normalized_name
+            if pinned is not _UNSET:
+                if not isinstance(pinned, bool):
+                    raise RegistryValidationError("pinned must be boolean")
+                if record["pinned"] != pinned:
+                    changed = True
+                record["pinned"] = pinned
+            if not changed:
+                return copy.deepcopy(record)
+            record["presentationRevision"] += 1
+            self._validate_record(record)
+            data["generation"] += 1
+            self._write(data)
+            return copy.deepcopy(record)
+
     def remove(self, session_id: str) -> bool:
         with self._locked():
             data = self._read_or_quarantine()
@@ -266,7 +322,10 @@ class RegistryStore:
             if len(raw) > 8 * 1024 * 1024:
                 raise RegistryValidationError("registry file is too large")
             data = json.loads(raw)
+            upgraded = self._upgrade(data)
             self._validate_store(data)
+            if upgraded:
+                self._write(data)
             return data
         except (
             UnicodeDecodeError,
@@ -276,6 +335,22 @@ class RegistryStore:
         ) as error:
             quarantine = self._quarantine()
             raise RegistryCorruptionError(f"invalid registry quarantined at {quarantine}", quarantine) from error
+
+    def _upgrade(self, data: Any) -> bool:
+        if not isinstance(data, dict) or data.get("version") != 1:
+            return False
+        if set(data) != {"version", "generation", "sessions"} or not isinstance(data["sessions"], list):
+            raise RegistryValidationError("invalid legacy registry envelope")
+        if len(data["sessions"]) > self.max_records:
+            raise RegistryValidationError("invalid legacy registry session count")
+        for record in data["sessions"]:
+            if not isinstance(record, dict) or set(record) != _LEGACY_RECORD_KEYS:
+                raise RegistryValidationError("invalid legacy registry record shape")
+            record["displayName"] = None
+            record["pinned"] = False
+            record["presentationRevision"] = 0
+        data["version"] = SCHEMA_VERSION
+        return True
 
     def _validate_store(self, data: Any) -> None:
         if not isinstance(data, dict) or set(data) != {"version", "generation", "sessions"}:
@@ -313,6 +388,15 @@ class RegistryStore:
         _validate_text(project["name"], "project.name")
         _validate_text(project["path"], "project.path")
         _validate_text(record["title"], "title")
+        _validate_display_name(record["displayName"])
+        if not isinstance(record["pinned"], bool):
+            raise RegistryValidationError("pinned must be boolean")
+        if (
+            not isinstance(record["presentationRevision"], int)
+            or isinstance(record["presentationRevision"], bool)
+            or record["presentationRevision"] < 0
+        ):
+            raise RegistryValidationError("invalid presentationRevision")
         if not isinstance(record["desiredRpcRunning"], bool):
             raise RegistryValidationError("desiredRpcRunning must be boolean")
         if not isinstance(record["recoveryMetadata"], dict):

@@ -28,7 +28,8 @@ const el = Object.fromEntries([
   'pending-request', 'activity', 'scroll-newest', 'composer', 'attachments', 'attach',
   'attachment-input', 'command-menu', 'command-mode', 'message', 'send', 'send-state',
   'toast', 'overflow-button', 'session-menu', 'machine-panel', 'machine-select',
-  'session-info', 'session-metadata', 'deck-settings', 'settings-status',
+  'session-info', 'session-metadata', 'session-name-dialog', 'session-name-form',
+  'session-name-input', 'session-name-status', 'deck-settings', 'settings-status',
   'machine-status-list', 'fleet-reload', 'fleet-reload-button', 'project-root-label',
   'project-select', 'project-new', 'project-launch', 'launch-state'
 ].map(id => [id, document.getElementById(id)]));

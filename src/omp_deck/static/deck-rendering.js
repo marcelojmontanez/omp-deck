@@ -90,6 +90,8 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
   ]);
   const agentLabelOrder = new Intl.Collator(undefined, {sensitivity: 'base'});
   function compareAgents(left, right) {
+    const pinned = Number(right.pinned === true) - Number(left.pinned === true);
+    if (pinned) return pinned;
     const unread = Number(left.inboxState !== 'unread') - Number(right.inboxState !== 'unread');
     if (unread) return unread;
     const status = (statusOrder.get(displayStatus(left)) ?? 9) - (statusOrder.get(displayStatus(right)) ?? 9);
@@ -117,7 +119,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     const focusedId = el['agent-list'].contains(document.activeElement)
       ? document.activeElement.closest('[data-id]')?.dataset.id : null;
     const visible = state.agents.filter(matchesFilter).sort(compareAgents);
-    const showMachine = ompDeckApi.machines().length > 1;
+    const duplicateOrdinals = sessionDuplicateOrdinals(state.agents);
     el['agent-list'].innerHTML = visible.length ? visible.map(agent => {
       const session = agent.session || {};
       const agentLifecycle = lifecycle(agent);
@@ -127,10 +129,8 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
       const subagents = children.map(subagent =>
         `<span class="subagent"><i class="status-dot ${escapeHtml(subagent.executionState)}"></i><span><strong>${escapeHtml(subagent.label)}</strong><small>${escapeHtml(subagent.activitySummary || subagent.executionState)}</small></span></span>`
       ).join('');
-      const project = agent.project || agent.label || 'Untitled conversation';
-      const label = agent.label && agent.label !== project ? agent.label : '';
-      const machine = showMachine ? agent.machineName : '';
-      const metadata = [label, machine].filter(Boolean).join(' · ');
+      const {title, project, machine, metadata} = sessionIdentity(agent);
+      const duplicate = duplicateOrdinals.get(agent.id) || '';
       const lifecycleNote = agentLifecycle === 'history'
         ? 'Saved conversation'
         : agentLifecycle === 'unknown'
@@ -138,15 +138,24 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
           : agent.nodeAvailable === false
             ? 'Machine unavailable'
             : `${agent.activitySummary || status.replace('-', ' ')}${agent.historyError ? ' · History unavailable' : ''}`;
-      return `<button class="agent-card ${escapeHtml(agentLifecycle)}" data-id="${escapeHtml(agent.id)}" type="button" aria-label="${escapeHtml(`${project}${metadata ? `, ${metadata}` : ''}, ${lifecycleNote}`)}">
+      const accessible = [
+        title,
+        ...metadata,
+        duplicate,
+        agent.pinned ? 'Pinned' : '',
+        lifecycleNote,
+      ].filter(Boolean).join(', ');
+      return `<button class="agent-card ${escapeHtml(agentLifecycle)}${agent.pinned ? ' pinned' : ''}" data-id="${escapeHtml(agent.id)}" type="button" aria-label="${escapeHtml(accessible)}">
         <span class="agent-card-top">
           <span class="status-stack"><i class="status-dot ${escapeHtml(status)}"></i>${agent.inboxState === 'unread' ? '<i class="inbox-dot" title="Unread response"></i>' : ''}</span>
           <span>
-            <span class="agent-name">${escapeHtml(project)}</span>
-            ${metadata ? `<span class="agent-project">${escapeHtml(metadata)}</span>` : ''}
+            <span class="agent-name">${escapeHtml(title)}</span>
+            <span class="agent-project">${escapeHtml(`Project: ${project}`)}</span>
+            <span class="agent-machine-line">${escapeHtml(`Machine: ${machine}`)}</span>
+            ${duplicate ? `<span class="agent-disambiguator">${escapeHtml(duplicate)}</span>` : ''}
             ${agentLifecycle !== 'history' ? `<span class="activity-summary">${escapeHtml(lifecycleNote)}</span>` : ''}
           </span>
-          <span class="agent-age">${relativeTime(session.updatedMs)}</span>
+          <span class="agent-card-side">${agent.pinned ? '<span class="pin-badge" title="Pinned" aria-hidden="true">Pinned</span>' : ''}<span class="agent-age">${relativeTime(session.updatedMs)}</span></span>
         </span>
         ${subagents ? `<span class="subagent-progress">${children.length} working subagent${children.length === 1 ? '' : 's'}</span><span class="subagents" aria-label="Working subagents">${subagents}</span>` : ''}
       </button>`;
@@ -197,12 +206,20 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
         : `<span class="chip read-only" title="${escapeHtml(unavailable)}" aria-label="${escapeHtml(`Thinking ${label}; read-only`)}">thinking: ${escapeHtml(label)}</span>`);
     }
     const executionState = displayStatus(agent || {});
-    el.detail.setAttribute('aria-label', agent ? `${agent.project || agent.label} conversation` : 'Conversation');
+    el.detail.setAttribute('aria-label', agent ? `${agent.label} conversation` : 'Conversation');
     for (const {action, enabled} of sessionActionOptions(agent)) {
       const button = el['session-menu'].querySelector(`[data-session-action="${action}"]`);
       button.disabled = !enabled;
       button.hidden = !enabled;
     }
+    const presentationAvailable = Boolean(agent && agent.nodeAvailable !== false);
+    const renameButton = el['session-menu'].querySelector('[data-session-action="rename"]');
+    renameButton.hidden = !agent;
+    renameButton.disabled = !presentationAvailable;
+    const pinButton = el['session-menu'].querySelector('[data-session-action="pin"]');
+    pinButton.hidden = !agent;
+    pinButton.disabled = !presentationAvailable;
+    pinButton.textContent = agent?.pinned ? 'Unpin session' : 'Pin session';
     const removeButton = el['session-menu'].querySelector('[data-session-action="remove"]');
     const removable = Boolean(agent?.nodeAvailable !== false && capabilities.remove);
     removeButton.hidden = !removable;
@@ -240,9 +257,14 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     }
     el.detail.querySelector('.detail-notices').innerHTML = notices.join('');
     const metadata = [
-      ['Project', agent?.project], ['Session', agent?.label], ['Machine', agent?.machineName],
+      ['Name', agent?.label],
+      ['Default name', agent?.displayName ? agent.nativeLabel : null],
+      ['Project', agent?.project],
+      ['Machine', agent?.machineName],
       ['Directory', agent?.cwd],
-      ['Model', session.model], ['Thinking', thinkingDescription], ['Connection', transportLabel],
+      ['Model', session.model],
+      ['Thinking', thinkingDescription],
+      ['Connection', transportLabel],
       ['Status', agentLifecycle === 'history' ? 'Saved conversation' : executionState.replaceAll('-', ' ')],
     ];
     document.getElementById('session-metadata').innerHTML = agent

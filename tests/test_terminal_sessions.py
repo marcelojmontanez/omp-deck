@@ -1010,6 +1010,22 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.assertEqual(registry.load(), [record])
         self.assertEqual(self.model.get(record["id"])["id"], record["id"])
 
+    def test_collab_replacement_close_failure_keeps_the_live_runtime_owned(self):
+        manager = self.manager()
+        with patch("omp_deck.terminal_sessions.CollabAdapter", FakeCollabAdapter):
+            session_id = manager.add_collab(collab_link())["id"]
+            original = manager._runtimes.get(session_id)
+            record = manager.registry.load()[0]
+            FakeCollabAdapter.fail_close = True
+            try:
+                with self.assertRaisesRegex(RuntimeError, "close failed"):
+                    manager._connect_collab(record, collab_link())
+            finally:
+                FakeCollabAdapter.fail_close = False
+
+        self.assertIs(manager._runtimes.get(session_id), original)
+        self.assertNotIn(("start",), FakeCollabAdapter.instances[-1].calls)
+
     def test_collab_connection_failure_rolls_back_every_owned_resource(self):
         manager = self.manager()
         FakeCollabAdapter.fail_start = True

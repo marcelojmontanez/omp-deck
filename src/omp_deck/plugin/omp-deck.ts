@@ -369,10 +369,11 @@ export default function ompDeck(pi: ExtensionAPI) {
     if (active) await new Promise<void>((resolve) => active.close(() => resolve()));
     await removeFiles();
   }
-  function scheduleReconnect(context: ExtensionContext): void {
-    if (stopping || retryTimer) return;
+  function scheduleReconnect(context: ExtensionContext, generation: number): void {
+    if (stopping || retryTimer || generation !== lifecycleGeneration) return;
     const delay = Math.min(30_000, 250 * (2 ** Math.min(reconnectAttempt++, 7)));
     retryTimer = context.setTimeout(() => {
+      if (stopping || generation !== lifecycleGeneration) return;
       retryTimer = undefined;
       queueRestart(context);
     }, delay);
@@ -402,7 +403,7 @@ export default function ompDeck(pi: ExtensionAPI) {
         pi.logger.warn("OMP Deck fallback listener error", { error: error.message });
         if (server !== listener) return;
         void closeServer()
-          .then(() => scheduleReconnect(context))
+          .then(() => scheduleReconnect(context, generation))
           .catch((closeError) => pi.logger.warn("OMP Deck fallback listener cleanup failed", { error: errorText(closeError) }));
       });
       await new Promise<void>((resolve, reject) => {
@@ -427,12 +428,14 @@ export default function ompDeck(pi: ExtensionAPI) {
     } catch (error) {
       if (listener && server === listener) await closeServer();
       pi.logger.warn("OMP Deck fallback unavailable", { error: errorText(error) });
-      if (generation === lifecycleGeneration) scheduleReconnect(context);
+      scheduleReconnect(context, generation);
     }
   }
   function queueRestart(context: ExtensionContext): Promise<void> {
     // RPC owns its structured transport; only terminal hosts need this fallback.
     if (context.mode !== "tui") return lifecycleTail;
+    if (retryTimer) context.clearTimer(retryTimer);
+    retryTimer = undefined;
     const generation = ++lifecycleGeneration;
     lifecycleTail = lifecycleTail.then(() => start(context, generation)).catch((error) => {
       pi.logger.warn("OMP Deck fallback lifecycle failed", { error: errorText(error) });

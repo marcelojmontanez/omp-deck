@@ -412,9 +412,12 @@ class CollabAdapter:
         req_id = request.get("reqId")
         if not isinstance(req_id, int) or req_id in self._ui or req_id in self._settled_ui:
             return None
-        while len(self._ui_order) >= self._ui_limit:
-            old = self._ui_order.popleft()
-            self._ui.pop(old, None)
+        if len(self._ui_order) >= self._ui_limit:
+            self._ui_order = deque(req for req in self._ui_order if req in self._ui)
+            if len(self._ui_order) >= self._ui_limit:
+                # Capacity loss is not a user cancellation. Disconnect visibly
+                # rather than silently discarding or answering a host request.
+                raise AdapterIncompatibleError("pending UI request limit exceeded", kind="bounds")
         self._ui[req_id] = request
         self._ui_order.append(req_id)
         return request

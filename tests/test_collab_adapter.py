@@ -184,6 +184,22 @@ class CollabAdapterTests(unittest.TestCase):
         self.assertFalse(adapter.respond_ui(3, "y"))
         adapter.close()
 
+    def test_ui_queue_overflow_is_explicit_and_settled_requests_free_capacity(self):
+        adapter, _ = self.make([], ui_limit=1)
+        adapter._receive(host(WELCOME))
+        adapter._receive(host(CHUNK))
+        adapter._receive(host({"t": "ui-request", "request": {"kind": "editor", "title": "first", "reqId": 3}}))
+        second = host({"t": "ui-request", "request": {"kind": "editor", "title": "second", "reqId": 4}})
+
+        with self.assertRaises(AdapterIncompatibleError) as caught:
+            adapter._receive(second)
+
+        self.assertEqual(caught.exception.kind, "bounds")
+        self.assertEqual([request["reqId"] for request in adapter.snapshot().pending_ui_requests], [3])
+        adapter._receive(host({"t": "ui-request-end", "reqId": 3}))
+        adapter._receive(second)
+        self.assertEqual([request["reqId"] for request in adapter.snapshot().pending_ui_requests], [4])
+
     def test_streaming_behavior_is_rejected_before_send(self):
         adapter, sock = self.make([host(WELCOME), host(CHUNK)])
         adapter.start()

@@ -287,9 +287,12 @@ class TerminalSessionManager:
 
         adapter = CollabAdapter(link, guest_name, on_event=on_event)
         runtime = _Runtime(session_id, instance_id, generation, "collab", adapter)
-        previous = self._runtimes.install(runtime)
+        previous = self._runtimes.get(session_id)
         if previous is not None:
+            # Keep the existing owner discoverable until it has actually
+            # stopped; otherwise a failed close strands that live transport.
             previous.adapter.close()
+        self._runtimes.install(runtime)
         self.model.set_transport(
             session_id,
             instance_id=instance_id,

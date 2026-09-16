@@ -241,6 +241,7 @@ class LifecycleTests(unittest.TestCase):
             )
 
     def test_plugin_install_ignores_unrelated_doctor_warnings_and_uses_official_manager(self):
+        bundled = json.loads((lifecycle.PLUGIN_ROOT / "package.json").read_text(encoding="utf-8"))
         runner = FakeRunner(
             [
                 SimpleNamespace(returncode=0, stdout=""),
@@ -260,8 +261,8 @@ class LifecycleTests(unittest.TestCase):
                             "npm": [
                                 {
                                     "name": "omp-deck",
-                                    "version": "1.3.1",
-                                    "manifest": {"version": "1.3.1"},
+                                    "version": bundled["version"],
+                                    "manifest": {"version": bundled["version"]},
                                 }
                             ]
                         }

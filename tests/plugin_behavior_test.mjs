@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {mkdtemp, readFile, readdir, rm} from 'node:fs/promises';
+import {mkdir, mkdtemp, readFile, readdir, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
@@ -227,6 +227,7 @@ test('plugin events preserve sequence and synchronize active history', async () 
   }
 });
 
+
 test('RPC hosts never expose a terminal fallback through lifecycle changes', async () => {
   const root = await mkdtemp(path.join(process.platform === 'darwin' ? '/tmp' : tmpdir(), 'od-rpc-'));
   const stateVariable = process.platform === 'win32' ? 'LOCALAPPDATA' : 'XDG_STATE_HOME';
@@ -267,6 +268,91 @@ test('RPC hosts never expose a terminal fallback through lifecycle changes', asy
   } finally {
     await handlers.get('session_shutdown')?.();
     for (const timer of timers) clearInterval(timer);
+    if (previousStateHome === undefined) delete process.env[stateVariable];
+    else process.env[stateVariable] = previousStateHome;
+    await rm(root, {recursive: true, force: true});
+  }
+});
+
+test('a stale reconnect timer cannot replace a newer session endpoint', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const root = await mkdtemp(path.join(process.platform === 'darwin' ? '/tmp' : tmpdir(), 'od-retry-'));
+  const stateVariable = 'XDG_STATE_HOME';
+  const previousStateHome = process.env[stateVariable];
+  const blockedStateHome = path.join(root, 'state-home');
+  await writeFile(blockedStateHome, 'not a directory');
+  process.env[stateVariable] = blockedStateHome;
+  const handlers = new Map();
+  const timeouts = new Map();
+  const intervals = new Set();
+  let nextTimer = 0;
+  const timerMethods = {
+    setTimeout(callback) {
+      const timer = {kind: 'timeout', id: ++nextTimer};
+      timeouts.set(timer, callback);
+      return timer;
+    },
+    setInterval(callback) {
+      const timer = {kind: 'interval', id: ++nextTimer, callback};
+      intervals.add(timer);
+      return timer;
+    },
+    clearTimer(timer) {
+      timeouts.delete(timer);
+      intervals.delete(timer);
+    },
+  };
+  const context = sessionId => ({
+    ...timerMethods,
+    mode: 'tui',
+    cwd: `/work/${sessionId}`,
+    model: null,
+    sessionManager: {
+      getSessionId: () => sessionId,
+      getSessionFile: () => null,
+      getSessionName: () => sessionId,
+      getBranch: () => [],
+    },
+    isIdle: () => true,
+    hasPendingMessages: () => false,
+    getAsyncJobSnapshot: () => [],
+    abort() {},
+    shutdown() {},
+  });
+  try {
+    const {default: register} = await import(`${PLUGIN.href}?retry=${Date.now()}-${Math.random()}`);
+    register({
+      pi: {VERSION: 'test'},
+      logger: {warn() {}},
+      on(name, handler) { handlers.set(name, handler); },
+      getThinkingLevel() { return undefined; },
+      setThinkingLevel() {},
+      sendUserMessage() {},
+    });
+    const first = context('first-session');
+    const second = context('second-session');
+    await handlers.get('session_start')({}, first);
+    assert.equal(timeouts.size, 1);
+    const staleRetry = [...timeouts.values()][0];
+
+    await rm(blockedStateHome);
+    await mkdir(blockedStateHome);
+    await handlers.get('session_switch')({}, second);
+    const socketDirectory = path.join(blockedStateHome, 'omp-deck', 'sockets');
+    const readRegistration = async () => {
+      const metadataName = (await readdir(socketDirectory)).find(name => name.endsWith('.sock.json'));
+      assert(metadataName);
+      return JSON.parse(await readFile(path.join(socketDirectory, metadataName), 'utf8'));
+    };
+    assert.equal((await readRegistration()).sessionId, 'second-session');
+
+    staleRetry();
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    assert.equal((await readRegistration()).sessionId, 'second-session');
+  } finally {
+    await handlers.get('session_shutdown')?.();
     if (previousStateHome === undefined) delete process.env[stateVariable];
     else process.env[stateVariable] = previousStateHome;
     await rm(root, {recursive: true, force: true});

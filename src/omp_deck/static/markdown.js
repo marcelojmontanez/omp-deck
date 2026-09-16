@@ -1,7 +1,7 @@
 const escapeHtml = value => {
   const node = document.createElement('div');
   node.textContent = value ?? '';
-  return node.innerHTML;
+  return node.innerHTML.replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 };
 
 function renderInlineMarkdown(value) {

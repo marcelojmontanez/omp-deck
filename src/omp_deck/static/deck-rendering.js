@@ -114,6 +114,8 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
 
 
   function renderList() {
+    const focusedId = el['agent-list'].contains(document.activeElement)
+      ? document.activeElement.closest('[data-id]')?.dataset.id : null;
     const visible = state.agents.filter(matchesFilter).sort(compareAgents);
     const showMachine = ompDeckApi.machines().length > 1;
     el['agent-list'].innerHTML = visible.length ? visible.map(agent => {
@@ -149,6 +151,9 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
         ${subagents ? `<span class="subagent-progress">${children.length} working subagent${children.length === 1 ? '' : 's'}</span><span class="subagents" aria-label="Working subagents">${subagents}</span>` : ''}
       </button>`;
     }).join('') : `<div class="empty-card">${state.sessionScope === 'history' ? 'No saved conversation history.' : 'No ongoing OMPs match this filter.'}</div>`;
+    if (focusedId) {
+      el['agent-list'].querySelector(`[data-id="${CSS.escape(focusedId)}"]`)?.focus({preventScroll: true});
+    }
   }
 
   function renderDetail({selectionChanged = false} = {}) {

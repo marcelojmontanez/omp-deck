@@ -213,6 +213,13 @@ test('independent viewers route duplicate session IDs directly and survive one m
     ]);
   }
   const desktopId = await selectMachineSession(phone, 'Desktop');
+  await computer.focus(`#agent-list [data-id="${desktopId}"]`);
+  await phone.type('#message', 'Live update while choosing a session');
+  await phone.click('#send');
+  await computer.waitForFunction(id => state.agents.find(agent => agent.id === id)
+    ?.session.activity.some(event => event.detail === 'Live update while choosing a session'), {}, desktopId);
+  assert.equal(await computer.evaluate(() => document.activeElement.dataset.id), desktopId,
+    'A live update must preserve keyboard focus on the same session card');
   const coldDeepLink = await phone.evaluate(selectedId => {
     const requested = 'cold-machine:session-before-snapshot';
     const machine = ompDeckApi.machines()[0];

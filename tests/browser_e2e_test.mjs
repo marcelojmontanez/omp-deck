@@ -60,6 +60,9 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   const state = path.join(sandbox, 'state');
   const config = path.join(sandbox, 'config.json');
   const port = await unusedPort();
+  for (const directory of ['home', 'profile']) {
+    await mkdir(path.join(sandbox, directory), {recursive: true, mode: 0o700});
+  }
   await mkdir(path.join(projects, 'demo'), {recursive: true});
   await writeFile(path.join(projects, 'demo', 'pyproject.toml'), '[project]\nname="demo"\nversion="0"\n');
   await mkdir(path.join(projects, 'group', 'nested'), {recursive: true});
@@ -78,7 +81,10 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     omp_bin: process.execPath,
   }), {mode: 0o600});
   const environment = {
-    ...process.env,
+    PATH: process.env.PATH,
+    ...(process.env.SystemRoot ? {SystemRoot: process.env.SystemRoot} : {}),
+    HOME: path.join(sandbox, 'home'),
+    OMP_CONFIG_DIR: path.join(sandbox, 'profile'),
     PYTHONPATH: path.join(ROOT, 'src'),
     OMP_DECK_CONFIG: config,
     XDG_CONFIG_HOME: path.join(sandbox, 'xdg-config'),
@@ -1742,4 +1748,39 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   assert.equal(relaunched.pairingVisible, false);
   assert(relaunched.projects.includes('demo'));
   assert.deepEqual(pageErrors, [], 'browser recovery must not raise uncaught JavaScript errors');
+});
+
+test('renders quoted Markdown attributes without creating injected controls or handlers', async t => {
+  const browser = await puppeteer.launch({headless: true, args: ['--no-sandbox']});
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.addScriptTag({path: path.join(ROOT, 'src/omp_deck/static/markdown.js')});
+  const result = await page.evaluate(() => {
+    const language = 'text" data-audit-injected="yes';
+    const url = 'https://example.test/"onclick="alert';
+    const host = document.createElement('div');
+    host.innerHTML = renderMarkdown([
+      `\`\`\`${language}`, 'const text = "<tag> & \\"quoted\\"";', '```',
+      '', `[Open](${url})`, '', url,
+    ].join('\n'));
+    const code = host.querySelector('code');
+    return {
+      language: code.getAttribute('data-language'),
+      code: code.textContent,
+      injected: host.querySelector('[data-audit-injected], [onclick]') !== null,
+      links: [...host.querySelectorAll('a')].map(link => ({
+        href: link.getAttribute('href'),
+        target: link.target,
+        rel: link.rel,
+      })),
+    };
+  });
+  assert.equal(result.language, 'text" data-audit-injected="yes');
+  assert.equal(result.code, 'const text = "<tag> & \\"quoted\\"";');
+  assert.equal(result.injected, false);
+  assert.deepEqual(result.links, Array(2).fill({
+    href: 'https://example.test/"onclick="alert',
+    target: '_blank',
+    rel: 'noopener noreferrer',
+  }));
 });

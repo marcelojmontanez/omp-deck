@@ -152,8 +152,12 @@ async function verifyOfflineGallery(page, root) {
     const [chooser] = await Promise.all([page.waitForFileChooser({timeout: 2000}), page.tap('#attach')]);
     await chooser.accept([galleryFile]);
     await decodedImage(page, '#attachments');
-    assert.equal(await page.$eval('#send', button => button.disabled), true,
-      'Opening the local gallery must not enable offline delivery');
+    const offlineState = await page.evaluate(() => ({
+      disabled: el.send.disabled, online: navigator.onLine,
+      machine: ompDeckApi.machine(selectedAgent().machineId)?.status,
+    }));
+    assert.equal(offlineState.disabled, true,
+      `Opening the local gallery must not enable offline delivery: ${JSON.stringify(offlineState)}`);
     await page.tap('[data-remove-attachment]');
   } finally {
     await page.setOfflineMode(false);

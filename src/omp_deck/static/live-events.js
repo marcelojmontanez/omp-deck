@@ -106,7 +106,7 @@ async function connectEventStream(machineId, stream) {
   if (!isCurrent()) return;
   const machine = ompDeckApi.machine(machineId);
   if (!machine) return;
-  if (machine.status !== 'live') ompDeckApi.setMachineStatus(machineId, 'connecting');
+  if (machine.status === 'offline') ompDeckApi.setMachineStatus(machineId, 'connecting');
   try {
     const headers = {Accept: 'text/event-stream'};
     if (stream.lastEventId) headers['Last-Event-ID'] = stream.lastEventId;
@@ -121,6 +121,7 @@ async function connectEventStream(machineId, stream) {
       return;
     }
     if (!response.ok) throw new Error(`Event stream returned ${response.status}`);
+    ompDeckApi.setMachineStatus(machineId, 'live');
     await consumeSse(response, machineId, stream);
     if (isCurrent()) throw new Error('Event stream ended');
   } catch (error) {
@@ -157,6 +158,12 @@ function stopNodeEventStream(machineId) {
     node.stream = null;
   }
 }
+
+window.addEventListener('omp-deck-node-status', event => {
+  if (event.detail?.machine?.status === 'unavailable') {
+    stopNodeEventStream(event.detail.machine.id);
+  }
+});
 
 function startEventStreams() {
   const ids = new Set(ompDeckApi.machines()

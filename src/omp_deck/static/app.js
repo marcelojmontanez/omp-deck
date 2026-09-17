@@ -105,10 +105,7 @@ async function refreshNode(machineId, {replace = false} = {}) {
       applyFleetSnapshot(snapshot, requestedGeneration, machineId, requestedRevision);
     } catch (error) {
       if (request.controller.signal.aborted || node.refreshRequest !== request) return;
-      const machine = ompDeckApi.machine(machineId);
-      if (machine?.status !== 'unavailable') {
-        ompDeckApi.setMachineStatus(machineId, 'offline', error.message);
-      }
+      showToast('Session refresh failed; keeping the last received state.', 'error');
     } finally {
       if (node.refreshRequest === request) {
         node.refreshRequest = null;
@@ -226,9 +223,16 @@ el['agent-list'].addEventListener('click', event => {
   const card = event.target.closest('[data-id]');
   if (card) selectAgent(card.dataset.id);
 });
-function recoverLiveConnections() {
+let liveRecoveryGeneration = 0;
+async function recoverLiveConnections() {
   if (!ompDeckApi.authenticated()) return;
-  void ompDeckApi.recoverAccess().catch(() => {});
+  const generation = ++liveRecoveryGeneration;
+  try {
+    await ompDeckApi.recoverAccess();
+  } catch {
+    // Existing valid machine access can outlive a coordinator interruption.
+  }
+  if (generation !== liveRecoveryGeneration || !ompDeckApi.authenticated()) return;
   restartEventStreams();
   void refresh(null, {replace: true});
   if (state.selectedMachineId) recoverLaunchableProjects();
@@ -244,7 +248,11 @@ document.addEventListener('visibilitychange', () => {
   renderSummary();
   renderList();
 });
+window.addEventListener('offline', renderFleet);
 window.addEventListener('online', recoverLiveConnections);
+window.addEventListener('pageshow', event => {
+  if (event.persisted) void recoverLiveConnections();
+});
 window.addEventListener('popstate', event => {
   const session = event.state?.view === 'chat'
     ? event.state.session
@@ -358,6 +366,7 @@ el['scroll-newest'].addEventListener('click', () => {
 
 
 function resetApplication() {
+  liveRecoveryGeneration += 1;
   stopEventStreams();
   for (const node of state.nodes.values()) {
     node.refreshRequest?.controller.abort();
@@ -399,9 +408,10 @@ function resetApplication() {
 }
 
 async function showApplication() {
+  const opening = el.app.hidden;
   document.getElementById('auth-screen').hidden = true;
   el.app.hidden = false;
-  document.getElementById('dashboard-title').focus();
+  if (opening) document.getElementById('dashboard-title').focus();
   const requestedSession = new URL(location.href).searchParams.get('session');
   state.pendingSelection = requestedSession;
   if (requestedSession) {
@@ -420,7 +430,6 @@ async function showApplication() {
   if (!ompDeckApi.authenticated()) return;
   renderMachineControls();
   startEventStreams();
-  void refresh();
   void loadLaunchableProjects();
   void refreshUsage();
   if (!state.recoveryTimer) state.recoveryTimer = setInterval(refresh, 5 * 60_000);
@@ -430,5 +439,4 @@ authRecovery = createAuthRecovery({
   api: ompDeckApi,
   showApplication,
   resetApplication,
-  clearLocalData,
 });

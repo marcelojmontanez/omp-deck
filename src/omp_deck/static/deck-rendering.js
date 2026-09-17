@@ -168,7 +168,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
   function renderDetail({selectionChanged = false} = {}) {
     const agent = selectedAgent();
     const session = agent?.session || {};
-    const renderKey = `${session.updatedMs || ''}:${agent?.inboxState || ''}:${agent?.historyError || ''}:${state.showArchive}`;
+    const renderKey = `${session.updatedMs || ''}:${agent?.inboxState || ''}:${agent?.historyError || ''}:${state.showArchive}:${navigator.onLine}`;
     if (!selectionChanged
         && state.renderedSessionId === agent?.id
         && state.renderedUpdatedMs === renderKey
@@ -331,6 +331,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     const canCompose = Boolean(isLiveSession && capabilities.sendMessage);
     const canMessage = Boolean(
       canCompose
+      && navigator.onLine !== false
       && agent?.nodeAvailable !== false
       && agent?.bridgeConnected
     );
@@ -341,7 +342,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
       ? 'History is read-only'
       : canCompose && !canMessage ? 'Draft now; send when reconnected…'
         : agent && !canCompose ? 'Messaging is unavailable for this session' : 'Message this OMP…';
-    el.message.disabled = !canCompose;
+    el.message.disabled = !isLiveSession;
     el.attach.disabled = !canAttach;
     el.attach.title = canAttach ? '' : 'Attachments are unavailable for this session';
     el['attachment-status'].hidden = !canCompose || canAttach;

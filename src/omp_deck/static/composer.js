@@ -75,8 +75,6 @@ function createComposer({
     retryBatches.clear();
     queueTokens.clear();
     reconciledMessageIds.clear();
-    elements.message.value = '';
-    elements.message.blur();
     elements['send-state'].textContent = '';
     renderAttachments();
     commands.clear();
@@ -126,7 +124,6 @@ function createComposer({
   function select(id) {
     sessionId = id || null;
     elements.message.value = loadDraft(sessionId);
-    if (!sessionId) elements.message.blur();
     renderAttachments();
     commands.reset();
   }

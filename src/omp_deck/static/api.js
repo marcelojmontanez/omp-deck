@@ -16,6 +16,17 @@
   let rosterInitialized = false;
   let coordinatorAvailable = true;
   const {sessionKey, splitSessionKey, routeRequest} = createSessionRouting(() => mode === 'local');
+  const {validateMachine} = ompDeckFleetAccess;
+  const coordinatorStatusAuthority = ompDeckNetwork.createObservationAuthority();
+  const coordinatorAuthAuthority = ompDeckNetwork.createObservationAuthority();
+  const machineAuthAuthorities = new Map();
+
+  function machineAuthAuthority(machineId) {
+    if (!machineAuthAuthorities.has(machineId)) {
+      machineAuthAuthorities.set(machineId, ompDeckNetwork.createObservationAuthority());
+    }
+    return machineAuthAuthorities.get(machineId);
+  }
 
   function emit(name, detail = {}) {
     window.dispatchEvent(new CustomEvent(name, {detail}));
@@ -51,48 +62,13 @@
       status = 'unavailable';
       error = 'Machine access expired; reconnect to the coordinator';
     }
+    if (machine && status === 'live') machineAuthAuthority(machine.id).begin();
     if (!machine || (machine.status === status && machine.error === error)) return;
     machine.status = status;
     machine.error = error;
     emit('omp-deck-node-status', {machine: publicMachine(machine)});
   }
 
-  function validOrigin(value) {
-    if (typeof value !== 'string' || value.length > 2048) return null;
-    try {
-      const parsed = new URL(value);
-      if (
-        !['http:', 'https:'].includes(parsed.protocol)
-        || parsed.origin !== value
-        || parsed.username
-        || parsed.password
-        || parsed.pathname !== '/'
-        || parsed.search
-        || parsed.hash
-      ) return null;
-      return parsed.origin;
-    } catch {
-      return null;
-    }
-  }
-
-  function validateMachine(value, requireAccess) {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid machine roster');
-    const id = value.id;
-    const name = value.name;
-    const origin = validOrigin(value.origin);
-    if (
-      typeof id !== 'string' || !/^[a-f0-9]{32}$/.test(id)
-      || typeof name !== 'string' || !name.trim() || name.length > 80
-      || !origin
-    ) throw new Error('Invalid machine roster');
-    if (requireAccess && (
-      typeof value.accessToken !== 'string'
-      || !value.accessToken || value.accessToken.length > 4096
-      || !Number.isSafeInteger(value.expiresAt)
-    )) throw new Error('Invalid machine access response');
-    return {id, name, origin, accessToken: value.accessToken || null, expiresAt: value.expiresAt || 0};
-  }
 
   function initializeLocalMachine() {
     if (mode !== 'local') return;
@@ -156,6 +132,8 @@
 
   async function coordinatorRequest(path, options = {}) {
     const requestGeneration = authGeneration;
+    const statusObservation = coordinatorStatusAuthority.begin();
+    const authObservation = coordinatorAuthAuthority.begin();
     const headers = new Headers(options.headers || {});
     const method = (options.method || 'GET').toUpperCase();
     if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && csrfToken) {
@@ -165,21 +143,29 @@
     try {
       response = await fetch(path, {...options, headers, credentials: 'same-origin'});
       if (options.signal?.aborted) throw new DOMException('Request is stale', 'AbortError');
-      coordinatorAvailable = true;
-      emit('omp-deck-coordinator-status', {available: true});
+      if (coordinatorStatusAuthority.accept(statusObservation)) {
+        coordinatorAvailable = true;
+        emit('omp-deck-coordinator-status', {available: true});
+      }
     } catch (error) {
       if (error?.name === 'AbortError') throw error;
-      coordinatorAvailable = false;
-      emit('omp-deck-coordinator-status', {available: false, error: 'Coordinator is unreachable'});
+      if (coordinatorStatusAuthority.accept(statusObservation)) {
+        coordinatorAvailable = false;
+        emit('omp-deck-coordinator-status', {available: false, error: 'Coordinator is unreachable'});
+      }
       throw new Error(`Coordinator is unreachable: ${error.message}`);
     }
-    if (response.status === 401) authRequired(requestGeneration);
+    if (![401, 403].includes(response.status)) coordinatorAuthAuthority.accept(authObservation);
+    if (response.status === 401 && coordinatorAuthAuthority.isLatest(authObservation)) {
+      authRequired(requestGeneration);
+    }
     return response;
   }
 
   async function session(options = {}) {
     const requestGeneration = authGeneration;
     const requestSessionGeneration = ++sessionGeneration;
+    const authObservation = coordinatorAuthAuthority.begin();
     const modeRequest = ensureMode(options);
     const sessionRequest = ompDeckNetwork.fetchJsonBounded('/api/auth/session', {
       cache: 'no-store',
@@ -195,6 +181,7 @@
       || (payload.authenticated && (typeof payload.csrfToken !== 'string' || !payload.csrfToken))) {
       throw new Error('Invalid authentication response');
     }
+    coordinatorAuthAuthority.accept(authObservation);
     authenticated = payload.authenticated === true;
     csrfToken = authenticated ? payload.csrfToken : null;
     return payload;
@@ -314,6 +301,7 @@
         if (ids.size !== incoming.length) throw new Error('Invalid duplicate machine roster');
         const previousIds = new Set(machines.keys());
         const removedIds = [...previousIds].filter(id => !ids.has(id));
+        for (const id of removedIds) machineAuthAuthorities.delete(id);
         const addedIds = rosterInitialized
           ? incoming.filter(item => {
             const previous = machines.get(item.id);
@@ -343,10 +331,6 @@
         return machineList();
       } catch (error) {
         if (controller.signal.aborted || requestGeneration !== authGeneration) throw error;
-        if (authenticated) {
-          coordinatorAvailable = false;
-          emit('omp-deck-coordinator-status', {available: false, error: error.message});
-        }
         scheduleAccessTimers();
         clearTimeout(renewalTimer);
         if (authenticated) {
@@ -396,6 +380,8 @@
         throw new Error(`Access to ${machine?.name || 'machine'} has expired`);
       }
     }
+    const accessAuthority = machineAuthAuthority(machineId);
+    const accessObservation = accessAuthority.begin();
     const headers = new Headers(fetchOptions.headers || {});
     headers.set('Authorization', `Bearer ${machine.accessToken}`);
     const target = new URL(route.path, `${machine.origin}/`);
@@ -405,30 +391,36 @@
       response = await fetch(target.href, {...fetchOptions, headers, credentials: 'omit'});
     } catch (error) {
       if (error?.name === 'AbortError') throw error;
-      setMachineStatus(machines.get(machineId), 'offline', `Direct connection failed: ${error.message}`);
       throw new Error(`Cannot reach ${machine.name} directly. Check network, CORS, HTTPS, and private-network access.`);
     }
+    const currentMachine = machines.get(machineId);
     if (fetchOptions.signal?.aborted
-      || requestGeneration !== authGeneration || machines.get(machineId)?.origin !== machine.origin) {
+      || requestGeneration !== authGeneration || currentMachine?.origin !== machine.origin) {
       throw new DOMException('Machine request is stale', 'AbortError');
     }
+    if (
+      [401, 403].includes(response.status)
+      && currentMachine.accessToken !== machine.accessToken
+    ) {
+      return allowRenew ? directRequest(path, options, false) : response;
+    }
     if (response.status === 401 && allowRenew) {
-      setMachineStatus(machines.get(machineId), 'unavailable', 'Machine access was rejected; renewing');
       try {
         await renewAccess();
-        return directRequest(path, options, false);
       } catch {
-        setMachineStatus(machines.get(machineId), 'unavailable', 'Machine access was rejected and could not be renewed');
+        if (accessAuthority.isLatest(accessObservation)) {
+          setMachineStatus(machines.get(machineId), 'unavailable', 'Machine access was rejected and could not be renewed');
+        }
         return response;
       }
+      return directRequest(path, options, false);
     }
-    if (response.status === 401 && !allowRenew) {
+    if (response.status === 401 && accessAuthority.isLatest(accessObservation)) {
       setMachineStatus(machines.get(machineId), 'unavailable', 'Machine access was rejected after renewal');
     }
-    if (response.status === 403) {
+    if (response.status === 403 && accessAuthority.isLatest(accessObservation)) {
       setMachineStatus(machines.get(machineId), 'unavailable', 'Machine rejected this dashboard origin or access ticket');
     }
-    if (response.ok) setMachineStatus(machines.get(machineId), 'live');
     return response;
   }
 
@@ -464,6 +456,7 @@
     expiryTimer = null;
     rosterInitialized = false;
     const removedIds = [...machines.keys()];
+    for (const id of removedIds) machineAuthAuthorities.delete(id);
     machines.clear();
     initializeLocalMachine();
     notifyMachines(removedIds);
@@ -482,7 +475,7 @@
     initializeFleet,
     authenticated: () => authenticated,
     renewAccess,
-    recoverAccess: () => renewalPromise ? renewAccess({replace: true}) : Promise.resolve(machineList()),
+    recoverAccess: () => renewAccess({replace: renewalPromise !== null}),
     machines: machineList,
     machine: id => machines.has(id) ? publicMachine(machines.get(id)) : null,
     setMachineStatus: (id, status, error) => setMachineStatus(machines.get(id), status, error),

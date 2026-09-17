@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  function createAuthRecovery({api, showApplication, resetApplication, clearLocalData}) {
+  function createAuthRecovery({api, showApplication, resetApplication}) {
     const screen = document.getElementById('auth-screen');
     const app = document.getElementById('app');
     const form = document.getElementById('pair-form');
@@ -21,12 +21,26 @@
       generation += 1;
       checkController?.abort();
       checkController = new AbortController();
-      return {generation, signal: checkController.signal};
+      return {
+        generation,
+        signal: checkController.signal,
+        focusedElement: document.activeElement,
+      };
     };
 
     const isCurrent = request => (
       !request.signal.aborted && request.generation === generation
     );
+
+    const focusUnchanged = request => {
+      const active = document.activeElement;
+      return !active
+        || active === document.body
+        || active === document.documentElement
+        || active === request?.focusedElement
+        || !active.isConnected
+        || active.closest('[hidden]');
+    };
 
     const showScreen = () => {
       app.hidden = true;
@@ -54,7 +68,7 @@
       status.textContent = 'Checking connection…';
     };
 
-    const showRetry = message => {
+    const showRetry = (message, request) => {
       showScreen();
       hideActions();
       retry.hidden = false;
@@ -63,10 +77,11 @@
       status.textContent = '';
       error.textContent = message || 'Unable to reach OMP Deck.';
       error.hidden = false;
-      retry.focus();
+      if (focusUnchanged(request)) retry.focus();
     };
 
-    const showPairing = ({clearToken = false} = {}) => {
+    const showPairing = (options = {}, request) => {
+      const {clearToken = false} = options;
       showScreen();
       hideActions();
       clearMessage();
@@ -78,10 +93,11 @@
         ? 'omp-deck coordinator pair --config FILE'
         : 'omp-deck pair';
       if (clearToken) token.value = '';
-      token.focus();
+      if (focusUnchanged(request)) token.focus();
     };
 
-    const showTailscale = ({signedOut = false, retentionFailed = false, message = ''} = {}) => {
+    const showTailscale = (options = {}, request) => {
+      const {signedOut = false, retentionFailed = false, message = ''} = options;
       showScreen();
       hideActions();
       clearMessage();
@@ -101,7 +117,7 @@
         error.textContent = message;
         error.hidden = false;
       }
-      tailscaleSignIn.focus();
+      if (focusUnchanged(request)) tailscaleSignIn.focus();
     };
 
     const showTailscaleChecking = () => {
@@ -144,11 +160,11 @@
         if (!isCurrent(request)) return;
         checkController = null;
         if (caught.name === 'TailscaleAccessDeniedError') {
-          showTailscale({message: caught.message});
+          showTailscale({message: caught.message}, request);
         } else if (caught.name === 'SessionRetentionError') {
-          showTailscale({retentionFailed: true, message: caught.message});
+          showTailscale({retentionFailed: true, message: caught.message}, request);
         } else {
-          showRetry(caught.message);
+          showRetry(caught.message, request);
         }
       }
     };
@@ -168,13 +184,13 @@
             await signInWithTailscale(request);
           } else {
             checkController = null;
-            showPairing({clearToken: true});
+            showPairing({clearToken: true}, request);
           }
         }
       } catch (caught) {
         if (!isCurrent(request)) return;
         checkController = null;
-        showRetry(caught.message);
+        showRetry(caught.message, request);
       }
     };
 
@@ -200,7 +216,7 @@
         status.textContent = '';
         error.textContent = caught.message;
         error.hidden = false;
-        token.select();
+        if (focusUnchanged(request)) token.select();
       } finally {
         if (isCurrent(request)) submit.disabled = false;
       }
@@ -215,25 +231,25 @@
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') retryIfDisconnected();
     });
+    window.addEventListener('pageshow', event => {
+      if (event.persisted) retryIfDisconnected();
+    });
 
     window.addEventListener('omp-deck-auth-required', () => {
-      const request = begin();
       resetApplication();
       showChecking();
-      void clearLocalData().catch(() => {}).then(() => {
-        if (isCurrent(request)) void check();
-      });
+      void check();
     });
     document.addEventListener('DOMContentLoaded', () => { void check(); }, {once: true});
 
     return Object.freeze({
       check,
       requireAuthentication(options = {}) {
-        begin();
+        const request = begin();
         checkController = null;
         resetApplication();
-        if (api.authMode() === 'tailscale') showTailscale({signedOut: true});
-        else showPairing(options);
+        if (api.authMode() === 'tailscale') showTailscale({signedOut: true}, request);
+        else showPairing(options, request);
       },
     });
   }

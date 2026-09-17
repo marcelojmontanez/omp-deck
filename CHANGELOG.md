@@ -11,6 +11,9 @@
 - Add optional owner-account sign-in through Tailscale Serve for standalone nodes and shared dashboards. Pairing remains the default; opting in replaces codes with an explicit account allowlist while retaining browser cookies, CSRF protection, and fleet ticket checks.
 - Add server-persisted Deck display names and pinning for managed RPC, Collab, and extension sessions, with explicit machine/project labels and duplicate-session disambiguation.
 - Display standalone assistant Markdown references to existing private OMP image blobs through the authenticated, tap-to-enlarge image viewer. Local paths, external image URLs, user text, and code examples do not become image attachments.
+- Enable capability-advertised terminal image uploads, including image-only messages, through the documented OMP extension API. Extension 1.3.3 requires an idle restart and resume of already-running terminal sessions.
+- Retain private, bounded message recovery receipts on the owning node for seven days, with explicit restore and dismissal after a browser reload or lost response. Older fingerprint-only records cannot recover message content.
+- Add explicit per-session Steer and Queue choices on capable working sessions, preserving the selected intent through delivery races and uncertain retries.
 
 ### Changed
 
@@ -19,9 +22,18 @@
 - Qualify managed RPC recovery and the extension lifecycle against stock OMP 18.1.14 on macOS and 18.1.16 on Linux, alongside 18.1.10.
 - Keep session execution, transport connectivity, and history availability distinct; identify Deck connectivity separately and preserve last-known grouping during machine outages.
 - Identify a directly connected machine by its Deck address instead of `This machine`; preserve enrolled machine names.
+- Qualify stock OMP 18.2.1 on macOS, including managed restart/recovery and native shutdown. Report installed-version qualification separately from plugin presence; 18.2.0 remains unqualified.
+- Explain that Target machine controls new-session launches, terminal connections, and usage, while the session list remains fleet-wide.
 
 ### Fixed
 
+- Prevent stale access checks, superseded event streams, and incidental refresh failures from falsely marking a reachable machine unavailable or disrupting composer focus.
+- Reduce cold dashboard loading delays caused by simultaneous asset requests and remove a redundant initial session snapshot request.
+- Route messages through native idle/streaming handling so a turn ending during delivery cannot strand a follow-up. Show native acceptance separately from proven conversation delivery; preserve newer drafts and request identity after lost responses.
+- Keep the machine selector stable during live updates instead of repeatedly replacing its open options.
+- Acknowledge terminal Quit before native teardown, retire disconnected attachments promptly, and let Quit bypass blocked commands without interrupting another session.
+- Show bounded, session-scoped action progress and uncertainty without mistaking acceptance for native process exit.
+- Reflect native todo-tool updates while work continues, support clipboard image paste, and correct mobile rename-dialog Cancel sizing.
 - Keep writable-session drafts and supported image attachments editable while disconnected, preserve composer focus and text selection across reconnects, and never send automatically on reconnect.
 - Keep the composer focused after sending a message, and stop delayed send failures from stealing focus from another control.
 - Avoid transient machine-unavailable interruptions during access renewal, and preserve composer focus when tapping temporarily unavailable Send.
@@ -36,7 +48,7 @@
 - Reject user-controlled filesystem aliases in project roots, image-blob paths, and purge targets; refuse purging directories whose ownership or write permissions are no longer safe.
 - Preserve nested project identities during legacy migration, close recovery file descriptors after path-revalidation failures, and treat empty platform-directory variables as unset.
 - Keep the existing terminal transport owned when replacement cleanup fails, and report Collab pending-dialog overflow explicitly without fabricating a user cancellation.
-- Fence terminal-extension reconnect retries to their originating session. The bundled extension is now 1.3.2; rerun setup after upgrading and restart/resume terminal-owned OMP sessions when idle to load this fix.
+- Fence terminal-extension reconnect retries to their originating session. Restart/resume terminal-owned OMP sessions when idle after installing the updated extension.
 - Keep HTTP startup independent of reverse DNS, which could delay macOS readiness.
 - Avoid concurrent private-state lock creation failures on APFS.
 - Refuse purging configured XDG roots reached through filesystem aliases.

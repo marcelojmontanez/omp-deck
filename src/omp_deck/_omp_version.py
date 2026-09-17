@@ -1,0 +1,29 @@
+import re
+import subprocess
+
+QUALIFIED_OMP_VERSIONS = ("18.1.10", "18.1.14", "18.1.16", "18.2.1")
+_OMP_VERSION_PATTERN = re.compile(r"\Aomp/([0-9]+\.[0-9]+\.[0-9]+)\Z")
+
+
+def omp_version_qualification(version):
+    if version in QUALIFIED_OMP_VERSIONS:
+        return "qualified"
+    return "unqualified"
+
+
+def installed_omp_version(omp_bin, *, runner=subprocess.run, timeout=2):
+    try:
+        result = runner(
+            [omp_bin, "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if result.returncode:
+            return None
+        output = result.stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = _OMP_VERSION_PATTERN.fullmatch((output or "").strip())
+    return match.group(1) if match else None

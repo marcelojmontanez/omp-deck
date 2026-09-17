@@ -8,11 +8,13 @@ Deck is not a Collab replacement. It does not expose rooms, invite links, partic
 
 - Linux with a systemd user session, macOS with a logged-in graphical user session, or native Windows 11 with Task Scheduler, for managed background service operation
 - Python 3.11 or 3.12
-- stock OMP 18.1.10, 18.1.14, or 18.1.16 on `PATH` or in its official per-user install location
+- stock OMP 18.1.10, 18.1.14, 18.1.16, or 18.2.1 on `PATH` or in its official per-user install location
 - Bun 1.3.14 or newer for Linux and macOS OMP extension installation and removal
 - Tailscale only for the optional supported phone-access path
 
-The official Python `omp-rpc` client remains pinned to the OMP 18.1.10 source release. Managed RPC recovery and the extension lifecycle are qualified against the three stock OMP versions listed above; other versions are not claimed as supported until the same compatibility checks pass. Deck does not patch, fork, or replace OMP.
+The official Python `omp-rpc` client remains pinned to the OMP 18.1.10 source release. Managed RPC recovery and the extension lifecycle are qualified against the stock OMP versions listed above. The 18.2.1 checks were exercised on macOS, including native images, live todos, managed restart/recovery with preserved identities and conversation, and Quit during an outstanding command without stopping another session. This does not add a new native Windows version qualification; its CI gate remains pinned to 18.1.10.
+
+OMP 18.2.0 and all other versions are unqualified. Installing the Deck extension proves only that the package is present; it does not qualify the running native OMP version. Doctor reports installed-version qualification separately from extension installation and reports versions exposed by validated live extension metadata. It does not connect to, restart, or read transcripts from those sessions; without that metadata it cannot identify already-running versions. Unqualified sessions are reported, not disabled. Deck does not patch, fork, or replace OMP.
 
 Tmux is not required. Deck does not ship a tmux keystroke controller or interactive-TUI launcher; managed launches use RPC and terminal-owned sessions use Collab or the OMP extension.
 
@@ -33,7 +35,7 @@ Deck accepts HTTP requests while managed and imported terminal connections recov
 
 The extension fallback runs only in interactive terminal mode. RPC, JSON, and print-mode OMP processes do not publish fallback endpoints or appear as additional terminal sessions.
 
-Extension shutdown follows OMP's deferred shutdown request: it may wait for OMP's next idle boundary rather than immediately exit an idle terminal. Deck does not inject terminal input or force-kill that session.
+Quit requests OMP's native shutdown; acceptance is not proof that the process has exited. OMP controls graceful-exit timing, which can differ between supported versions. Deck moves an unattached record to History rather than deleting it, and never injects terminal input or force-kills a terminal-owned session.
 
 The green session connection indicator means the session transport is connected, regardless of transport type. The separate **Deck connected** label describes the browser's dashboard connection, not the health of every OMP session.
 
@@ -106,6 +108,8 @@ omp-deck serve
 - rename or reset a session’s Deck display name and pin or unpin it from the session menu, independently of whether its OMP transport supports native renaming;
 - answer pending RPC or Collab input requests in the request panel; extension-fallback requests remain terminal-only.
 
+**Target machine** chooses where to start a new OMP, connect a writable Collab link, and read usage. It is not a session filter: the list still includes every enrolled machine. Each session's machine label identifies its actual owner, independently of this selector.
+
 **Ongoing** is the default view. It includes sessions with a current transport owner and managed sessions whose recovery is still requested. **Needs attention** includes pending input, failures, unavailable machines, connection recovery, and incomplete history. Summary counts and filters apply to ongoing sessions, not old records.
 
 **History** is a secondary view of retained session records without a current attachment or managed recovery intent. Conversations are read-only; their Deck names and pins remain editable. Moving a record there does not delete it, prove that its terminal process ended, or promise a complete archived transcript. A restored live attachment returns it to Ongoing. Machine outages preserve the browser's last-known session grouping rather than reclassifying every session as history.
@@ -118,17 +122,27 @@ The conversation toolbar stays compact: provider-qualified model, effective thin
 
 The session light is green for connected managed RPC, amber for connected terminal transports, red for an unavailable ongoing connection, and neutral for history. Its accessible label and **Session details** identify the connection without relying on color. Actual machine, transport, and history failures remain visible. **Deck settings**, available from the dashboard or session menu, holds terminal connection setup, local-draft clearing, logout, and device revocation.
 
-Drafts and selected images stay with their session when you switch conversations. Drafts and images remain memory-only: reloading, logging out, or clearing local data discards them.
+Unsent drafts and selected images stay with their session when you switch conversations. They remain memory-only: reloading, logging out, or clearing local data discards them. Submitted messages are different: once the owning node saves the request, its private recovery receipt can survive a browser reload or Deck restart.
 
-Use the image button to open the browser's native photo picker directly, and tap a thumbnail to preview it. Cancelling or reopening the picker preserves your draft. Image uploads require an attachment-capable session: managed RPC or writable Collab. The terminal extension does not currently accept image uploads, so its image button remains disabled even when connected and the composer shows an explanation. The composer stays below the conversation; its text field grows to at most 130px. Enter inserts a newline on phones; desktop Enter sends, and Shift+Enter inserts a newline. Sending a message keeps the text field focused; a delayed delivery failure restores the draft without pulling focus away from another control. History has a read-only notice instead of disabled composer controls.
+Use the image button to open the browser's native photo picker, or paste copied images into the message field. Tap a thumbnail to preview it. Cancelling or reopening the picker preserves your draft. Image uploads require an explicitly advertised attachment capability: managed RPC, writable Collab, or the updated terminal extension. Images can be sent without text; each message is limited to four images and 700 KiB total. Extension 1.3.3 adds terminal uploads; already-running OMP processes must be restarted and resumed when idle. Installing the update or running `/reload-plugins` does not replace code inside those processes.
+
+The composer stays below the conversation; its text field grows to at most 130px. Enter inserts a newline on phones; desktop Enter sends, and Shift+Enter inserts a newline. Sending keeps the text field focused and lets you write the next draft immediately. Delayed acceptance does not erase newer edits, and a delivery failure restores the unsent content without pulling focus from another control. History has a read-only notice instead of disabled composer controls.
+
+On capable working sessions, choose **Steer** to send at the next native interruption point during the current run, or **Queue** to wait until it finishes. The choice is remembered per session for this browser tab. Idle sessions use **Send**; a queued message that reaches OMP after the run finishes starts normally instead of becoming stranded. An uncertain retry preserves its original delivery mode and request identity even if you change the current choice.
+
+**Accepted** means the native transport accepted the request, not that OMP displayed, consumed, or answered it. Receipts remain separate from the conversation; matching text is not delivery proof. **Delivery uncertain** means the response was lost or the outcome could not be established. Check the conversation before retrying. An unchanged uncertain retry keeps its request identity so the node cannot enqueue it twice. Reconnecting never resends automatically. **Restore draft** copies a receipt into the current draft without sending; **Dismiss receipt** removes its recovery copy but preserves request deduplication. New receipts retain message text and images privately on the owning node for seven days; older fingerprint-only records cannot recover missing content.
+
+Dismissing a receipt does not cancel OMP or delete conversation history. If an uncertain request stays unresolved, check OMP first. Restoring its content, dismissing its receipt, and then sending creates a new request and can duplicate work if the original actually arrived.
 
 Image downloads have an eight-second deadline, including the response body. A failed thumbnail offers **Retry**; returning to the browser or reconnecting also retries unavailable images. Downloaded images remain previewable in the selected conversation during a temporary outage. The local photo picker and supported draft attachments remain available offline, while sending waits for reconnection.
 
-Routine machine-access renewal keeps the composer available. During a genuine outage, Send remains unavailable, but tapping it does not dismiss the composer or change the draft or text selection. Reconnection never submits a draft automatically.
+Routine machine-access renewal keeps the composer available. Stale requests cannot override newer access checks, and an incidental failed refresh does not declare a healthy event stream unavailable. During a genuine outage, Send remains unavailable but the draft stays editable and retains focus and text selection. Browser-offline status is distinct from machine availability. Reconnection never submits a draft automatically.
 
 Assistant replies can display an existing private OMP image blob with a standalone Markdown line, `![Portrait](blob:sha256:<64 lowercase hex digest>)`. The image must already exist in that machine's active OMP blob store. Deck uses its authenticated image viewer; local file paths and external image URLs are not loaded. References inside code blocks or user text remain text.
 
 Type `/` to pick an available structured session action: `/compact`, `/interrupt`, `/quit`, or `/thinking <level>` using OMP's advertised choices. Arrow keys and Tab select a suggestion; Escape dismisses it. An exact action changes **Send** to **Run**. Compact and quit require confirmation. Cancelled or failed actions preserve the command draft, and delayed completion does not erase newer edits. Actions cannot be combined with image attachments. This is not a terminal command console and does not emulate unsupported OMP commands.
+
+Compact, Interrupt, and Quit show pending and accepted state for the selected session without disabling other sessions. If an action response or body stalls for eight seconds, Deck reports uncertainty; retrying checks the same request identity. A browser timeout does not cancel native work. Task progress from native todo-tool results updates during the run rather than waiting for a later reminder.
 
 The **thinking** control shows OMP's effective level. Tap it to cycle through the current model's supported choices when control is available. Missing state is shown as unavailable, not assumed to be `auto`. Changes are sent in order per session and reconcile to OMP's reported level. With the updated terminal extension, changes made directly in OMP also reach Deck on the next heartbeat, normally within 15 seconds. Already-running terminals need an idle restart and resume to load the updated extension.
 
@@ -335,6 +349,7 @@ Server state defaults to `~/.local/state/omp-deck` on Linux/macOS and `%LOCALAPP
 - `registry.json`: stable Deck session identities, custom display names and pins, and non-secret recovery metadata;
 - `auth.json`: installation verifier and hashed device credentials;
 - `cursors.json`: last-read message cursors;
+- `requests.json`: at most 1,000 request-deduplication records, with submitted message text and images retained for recovery until dismissed or seven days old, within a 24 MiB store limit. Expired recovery content is removed on the next ledger access; fingerprints and outcomes remain while their bounded deduplication records are retained. A full store refuses new requests before dispatch rather than silently losing recoverable content;
 - `collab.json`: protected Collab credentials while imported;
 - `sockets/`: extension registration metadata plus Unix sockets on Linux/macOS or same-user named-pipe endpoints on Windows.
 
@@ -364,7 +379,7 @@ are rejected and reported instead of being trusted. Accepted legacy values are
 rewritten into a mode-`0600` normalized cursor store.
 A migrated terminal session reconnects after that OMP process loads the new
 plugin. Wait until the session is idle, then restart OMP and resume it normally.
-`/reload-plugins` does not reload extension modules in OMP 18.1.14, 18.1.16, or 18.1.17;
+`/reload-plugins` does not reload extension modules in OMP 18.1.14, 18.1.16, 18.1.17, or 18.2.1;
 Deck never injects code or keystrokes into an already-running OMP process.
 
 For a copied-file legacy installation, before an authorized production
@@ -400,6 +415,8 @@ omp-deck service remove
 ```
 
 The first start of a release with Deck display names upgrades `registry.json` from schema 1 to schema 2. Older releases reject and quarantine schema 2, so reverting the package alone is not a safe rollback after deployment. With Deck stopped, preserve a private backup and convert the current registry to schema 1 by removing only `displayName`, `pinned`, and `presentationRevision` from each session and changing the envelope version to `1`; preserve current session identities, recovery metadata, and generations, and replace the file atomically with its original private permissions. This discards custom names and pins, not the sessions. Do not restore old authentication, trust, or request-ledger files to undo this feature: doing so can revive revoked access or lose newer request outcomes.
+
+Message recovery also upgrades `requests.json` to schema 2. Before reverting to a schema-1 release, stop Deck and archive the **current** ledger privately, including all post-upgrade records. Build the old-reader view from that current file: set `version` to `1`, remove only `createdAt`, `updatedAt`, and `recovery` from each record, and remove `acceptance` from non-null outcomes. Preserve record order, request IDs, scopes, fingerprints, pending/complete state, and all other outcome fields; replace atomically with the original private permissions. The archive retains the exact outcomes and recoverable message/image content and must be protected and deleted deliberately when no longer needed. Do not restore an older ledger or replace current records wholesale from the archive on a later upgrade: that can lose newer deduplication outcomes or revive evicted requests.
 
 Upgrade with the same tool manager, then run `omp-deck setup`. Setup snapshots
 the active OMP plugin and service unit before replacement, validates the new

@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from ._omp_version import installed_omp_version, omp_version_qualification
+from ._terminal_discovery import discover_extension_candidates
 from .auth import AuthManager, validate_auth_state
 from .lifecycle import (
     PLUGIN_VERSION,
@@ -215,6 +217,41 @@ def _health_diagnostic(settings):
     return True, f"http://{settings.host}:{settings.port}/healthz"
 
 
+def _version_detail(version):
+    if version is None:
+        return "version could not be verified: lookup failed, timed out, or returned unreadable stock output"
+    qualification = omp_version_qualification(version)
+    if qualification == "qualified":
+        return f"OMP {version} is qualified"
+    return f"OMP {version} is unqualified"
+
+
+def _running_omp_versions(settings):
+    try:
+        candidates = discover_extension_candidates(settings.socket_root, all_candidates=True)
+    except OSError:
+        return None
+    versions = set()
+    for options in candidates.values():
+        for _endpoint, metadata in options:
+            version = metadata.get("ompVersion")
+            versions.add(version if isinstance(version, str) and version else "<unreadable>")
+    return tuple(sorted(versions))
+
+
+def _running_versions_diagnostic(settings):
+    versions = _running_omp_versions(settings)
+    if versions is None:
+        return False, "live extension metadata is unreadable; doctor does not connect to sessions"
+    if not versions:
+        return True, "no live extension metadata; doctor does not connect to sessions"
+    details = [
+        f"{version} ({omp_version_qualification(version)})" if version != "<unreadable>" else version
+        for version in versions
+    ]
+    return all(omp_version_qualification(version) == "qualified" for version in versions), ", ".join(details)
+
+
 def doctor():
     checks = []
     try:
@@ -226,12 +263,22 @@ def doctor():
         checks.append(_check("Configuration", True, detail=str(config_path())))
 
     if settings is None:
-        blocked = ("Service", "Health", "OMP executable", "Extension fallback", "Authentication")
+        blocked = (
+            "Service",
+            "Health",
+            "OMP executable",
+            "Installed OMP qualification",
+            "Extension package",
+            "Running OMP versions",
+            "Authentication",
+        )
         for label in blocked:
             checks.append(_check(label, False, detail="blocked by invalid configuration"))
     else:
         health, health_detail = _health_diagnostic(settings)
         omp_available = shutil.which(settings.omp_bin) is not None or Path(settings.omp_bin).is_file()
+        omp_version = installed_omp_version(settings.omp_bin) if omp_available else None
+        running_qualified, running_detail = _running_versions_diagnostic(settings)
         service_check = _check(
             "Service",
             service_status() == 0,
@@ -241,9 +288,11 @@ def doctor():
             }.get(sys.platform, "systemd user service status"),
         )
         extension_check = _check(
-            "Extension fallback",
+            "Extension package",
             plugin_status(settings) if omp_available else False,
-            detail=f"expected omp-deck {PLUGIN_VERSION} for OMP 18.1.10, 18.1.14, or 18.1.16",
+            detail=(
+                f"expected omp-deck {PLUGIN_VERSION}; package installation does not qualify the native OMP version"
+            ),
         )
         checks.extend(
             (
@@ -254,7 +303,13 @@ def doctor():
                     omp_available,
                     detail=settings.omp_bin,
                 ),
+                _check(
+                    "Installed OMP qualification",
+                    omp_version is not None and omp_version_qualification(omp_version) == "qualified",
+                    detail=_version_detail(omp_version),
+                ),
                 extension_check,
+                _check("Running OMP versions", running_qualified, detail=running_detail),
                 _check(
                     "Authentication",
                     _auth_healthy(settings),

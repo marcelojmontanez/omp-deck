@@ -8,13 +8,15 @@ Deck is not a Collab replacement. It does not expose rooms, invite links, partic
 
 - Linux with a systemd user session, macOS with a logged-in graphical user session, or native Windows 11 with Task Scheduler, for managed background service operation
 - Python 3.11 or 3.12
-- stock OMP 18.1.10, 18.1.14, 18.1.16, or 18.2.1 on `PATH` or in its official per-user install location
+- stock OMP on `PATH` or in its official per-user install location; compatibility is checked through its documented protocols and advertised capabilities, not an exact-version allowlist
 - Bun 1.3.14 or newer for Linux and macOS OMP extension installation and removal
 - Tailscale only for the optional supported phone-access path
 
-The official Python `omp-rpc` client remains pinned to the OMP 18.1.10 source release. Managed RPC recovery and the extension lifecycle are qualified against the stock OMP versions listed above. The 18.2.1 checks were exercised on macOS, including native images, live todos, managed restart/recovery with preserved identities and conversation, and Quit during an outstanding command without stopping another session. This does not add a new native Windows version qualification; its CI gate remains pinned to 18.1.10.
+Keep updating OMP normally. A new version number does not block Deck or make doctor fail. The official Python `omp-rpc` client remains pinned to a reviewed upstream source revision; native OMP updates do not silently replace that dependency. RPC startup rejects incompatible protocol versions, and terminal adapters validate their wire format and advertised capabilities. A genuine connection or command failure is reported for the affected session rather than disabling every session.
 
-OMP 18.2.0 and all other versions are unqualified. Installing the Deck extension proves only that the package is present; it does not qualify the running native OMP version. Doctor reports installed-version qualification separately from extension installation and reports versions exposed by validated live extension metadata. It does not connect to, restart, or read transcripts from those sessions; without that metadata it cannot identify already-running versions. Unqualified sessions are reported, not disabled. Deck does not patch, fork, or replace OMP.
+Doctor shows installed OMP and already-running extension versions separately. An unreadable version is an optional diagnostic warning, not proof of incompatibility. Updating the executable does not replace code already loaded in a terminal process: restart and resume it when idle to load the new executable or extension. Doctor only reads validated extension metadata; it does not connect to or restart those sessions. Deck does not patch, fork, or replace OMP.
+
+Native 18.2.1 image delivery, todos, recovery, and shutdown were exercised on macOS; 18.2.4 additionally passed isolated RPC startup, identity-preserving recovery, and independent shutdown. These are observations, not a permanent support list or proof of every future feature. The latest-release CI workflow checks native RPC startup/recovery/shutdown on Linux and macOS every six hours and on main-branch pushes; it becomes active when the workflow is published to GitHub. Windows retains its separate pinned native gate.
 
 Tmux is not required. Deck does not ship a tmux keystroke controller or interactive-TUI launcher; managed launches use RPC and terminal-owned sessions use Collab or the OMP extension.
 
@@ -68,7 +70,7 @@ Deck refuses to modify Tailscale when any Serve route already exists. Review and
 
 #### macOS service behavior
 
-Use Python 3.11 or 3.12, not an older Apple-provided Python. Install the supported OMP version and Bun separately; Deck does not replace your OMP installation.
+Use Python 3.11 or 3.12, not an older Apple-provided Python. Install OMP and Bun separately; Deck does not replace your OMP installation.
 
 Setup installs `~/Library/LaunchAgents/com.omp-deck.agent.plist` in the current user's graphical login domain. Run it as your normal user, without `sudo`, while that user is logged into the Mac desktop. An SSH shell can manage the service while the graphical login exists. Headless SSH-only startup is not supported. The service starts at graphical login, restarts after failures, and stops at logout. A sleeping or powered-off Mac is not remotely available; Deck does not prevent sleep.
 
@@ -473,6 +475,8 @@ python3 tools/check.py --release
 `--release` requires the repository checks, isolated package-identity regression builds, actual Chromium scenarios, and extension checks to pass. Missing prerequisites fail the command; they are not silently skipped. `python3 tools/check.py` alone remains the repository-only gate. CI uses the complete release command.
 
 Browser regressions exercise persistent-cookie expiry and process restart, failed and superseded startup reads, resume-time stream replacement, stale responses, forbidden mutations without logout or resend, per-machine outage isolation, fragmented events, newest-first messages, mobile Enter as newline, quoted Markdown attribute safety, and keyboard focus during live session updates. These contracts protect the tested behaviors; they do not certify every Android/Brave eviction policy or every historical UX request.
+
+Run `PYTHONPATH=src python3 tools/check_omp.py --omp /path/to/omp` to exercise the actual installed executable through Deck's RPC adapter. It uses temporary profiles, projects, and state, sends no paid model prompts, and checks startup, identity-preserving recovery, and whether quitting one session leaves another connected. It does not certify image delivery, every tool, or terminal-extension behavior for that executable.
 
 Browser server scenarios use temporary homes, OMP profiles, configuration, state, and local listeners; extension scenarios use temporary endpoint directories. Native Windows tests exercise process containment and named pipes; native macOS LaunchAgent lifecycle tests require a graphical login and `OMP_DECK_MACOS_LAUNCHD_SMOKE=1`. Run native gates on their actual operating systems; skipped native tests do not establish portability.
 

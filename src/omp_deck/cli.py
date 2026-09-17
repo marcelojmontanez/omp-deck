@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from . import build_identity
-from ._omp_version import installed_omp_version, omp_version_qualification
+from ._omp_version import installed_omp_version
 from ._terminal_discovery import discover_extension_candidates
 from .auth import AuthManager, validate_auth_state
 from .lifecycle import (
@@ -221,10 +221,7 @@ def _health_diagnostic(settings):
 def _version_detail(version):
     if version is None:
         return "version could not be verified: lookup failed, timed out, or returned unreadable stock output"
-    qualification = omp_version_qualification(version)
-    if qualification == "qualified":
-        return f"OMP {version} is qualified"
-    return f"OMP {version} is unqualified"
+    return f"OMP {version} reported by executable"
 
 
 def _running_omp_versions(settings):
@@ -246,11 +243,7 @@ def _running_versions_diagnostic(settings):
         return False, "live extension metadata is unreadable; doctor does not connect to sessions"
     if not versions:
         return True, "no live extension metadata; doctor does not connect to sessions"
-    details = [
-        f"{version} ({omp_version_qualification(version)})" if version != "<unreadable>" else version
-        for version in versions
-    ]
-    return all(omp_version_qualification(version) == "qualified" for version in versions), ", ".join(details)
+    return all(version != "<unreadable>" for version in versions), ", ".join(versions)
 
 
 def doctor():
@@ -268,7 +261,7 @@ def doctor():
             "Service",
             "Health",
             "OMP executable",
-            "Installed OMP qualification",
+            "Installed OMP version",
             "Extension package",
             "Running OMP versions",
             "Authentication",
@@ -279,7 +272,7 @@ def doctor():
         health, health_detail = _health_diagnostic(settings)
         omp_available = shutil.which(settings.omp_bin) is not None or Path(settings.omp_bin).is_file()
         omp_version = installed_omp_version(settings.omp_bin) if omp_available else None
-        running_qualified, running_detail = _running_versions_diagnostic(settings)
+        running_healthy, running_detail = _running_versions_diagnostic(settings)
         service_check = _check(
             "Service",
             service_status() == 0,
@@ -291,9 +284,7 @@ def doctor():
         extension_check = _check(
             "Extension package",
             plugin_status(settings) if omp_available else False,
-            detail=(
-                f"expected omp-deck {PLUGIN_VERSION}; package installation does not qualify the native OMP version"
-            ),
+            detail=f"expected omp-deck {PLUGIN_VERSION}",
         )
         checks.extend(
             (
@@ -305,12 +296,18 @@ def doctor():
                     detail=settings.omp_bin,
                 ),
                 _check(
-                    "Installed OMP qualification",
-                    omp_version is not None and omp_version_qualification(omp_version) == "qualified",
+                    "Installed OMP version",
+                    omp_version is not None,
+                    optional=True,
                     detail=_version_detail(omp_version),
                 ),
                 extension_check,
-                _check("Running OMP versions", running_qualified, detail=running_detail),
+                _check(
+                    "Running OMP versions",
+                    running_healthy,
+                    optional=True,
+                    detail=running_detail,
+                ),
                 _check(
                     "Authentication",
                     _auth_healthy(settings),

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from omp_deck import cli, lifecycle
-from omp_deck._omp_version import installed_omp_version, omp_version_qualification
+from omp_deck._omp_version import installed_omp_version
 from omp_deck.installation_paths import installation_paths
 from omp_deck.settings import load_settings
 
@@ -130,21 +130,19 @@ class CommandTests(unittest.TestCase):
             self.assertEqual(cli.main(["purge"]), 0)
         purge.assert_called_once_with("omp")
 
-    def test_stock_omp_version_output_is_classified_from_authoritative_metadata(self):
-        for output, expected, qualification in (
-            ("omp/18.1.16\n", "18.1.16", "qualified"),
-            ("omp/18.2.1\n", "18.2.1", "qualified"),
-            ("omp/18.2.0\n", "18.2.0", "unqualified"),
-            ("18.1.16\n", None, None),
+    def test_stock_omp_version_output_accepts_future_versions_from_authoritative_metadata(self):
+        for output, expected in (
+            ("omp/18.1.16\n", "18.1.16"),
+            ("omp/99.42.7\n", "99.42.7"),
+            ("omp/99.42.7-rc.1+build.abc\n", "99.42.7-rc.1+build.abc"),
+            ("18.1.16\n", None),
+            ("omp/not-a-version\n", None),
         ):
             with self.subTest(output=output):
                 runner = Mock(return_value=SimpleNamespace(stdout=output, returncode=0))
-                version = installed_omp_version("/opt/omp", runner=runner)
-                self.assertEqual(version, expected)
-                if version is not None:
-                    self.assertEqual(omp_version_qualification(version), qualification)
+                self.assertEqual(installed_omp_version("/opt/omp", runner=runner), expected)
 
-    def test_failed_version_query_never_qualifies_partial_output(self):
+    def test_failed_version_query_rejects_partial_output(self):
         for error in (
             FileNotFoundError(),
             subprocess.TimeoutExpired(["omp", "--version"], 2, output=b"omp/18.2.1\n"),
@@ -155,7 +153,7 @@ class CommandTests(unittest.TestCase):
         failed = Mock(return_value=SimpleNamespace(stdout="omp/18.2.1\n", returncode=1))
         self.assertIsNone(installed_omp_version("omp", runner=failed))
 
-    def test_doctor_qualifies_native_version_separately_from_installed_plugin(self):
+    def test_doctor_treats_native_versions_as_observations_separate_from_plugin_health(self):
         settings = SimpleNamespace(
             omp_bin="/opt/omp",
             socket_root=Path("/private/sockets"),
@@ -163,7 +161,11 @@ class CommandTests(unittest.TestCase):
             host="127.0.0.1",
             port=8787,
         )
-        for version, expected in (("18.2.1", 0), ("18.2.0", 1), (None, 1)):
+        cases = (
+            ("99.42.7", True, "OK", "OK"),
+            (None, False, "OPTIONAL", "OPTIONAL"),
+        )
+        for version, running_healthy, installed_state, running_state in cases:
             output = io.StringIO()
             with (
                 self.subTest(version=version),
@@ -172,29 +174,45 @@ class CommandTests(unittest.TestCase):
                 patch.object(cli, "_health_diagnostic", return_value=(True, "healthy")),
                 patch.object(cli.shutil, "which", return_value="/opt/omp"),
                 patch.object(cli, "installed_omp_version", return_value=version),
-                patch.object(cli, "_running_versions_diagnostic", return_value=(True, "no live metadata")),
+                patch.object(
+                    cli,
+                    "_running_versions_diagnostic",
+                    return_value=(running_healthy, "live metadata observation"),
+                ),
                 patch.object(cli, "service_status", return_value=0),
                 patch.object(cli, "plugin_status", return_value=True),
                 patch.object(cli, "_auth_healthy", return_value=True),
                 redirect_stdout(output),
             ):
-                self.assertEqual(cli.doctor(), expected)
+                self.assertEqual(cli.doctor(), 0)
                 self.assertRegex(output.getvalue(), r"OK\s+Extension package")
-                status = "OK" if expected == 0 else "FAIL"
-                self.assertRegex(output.getvalue(), rf"{status}\s+Installed OMP qualification")
+                self.assertRegex(output.getvalue(), rf"{installed_state}\s+Installed OMP version")
+                self.assertRegex(output.getvalue(), rf"{running_state}\s+Running OMP versions")
 
     def test_live_extension_versions_are_reported_without_connecting(self):
         settings = SimpleNamespace(socket_root=Path("/private/sockets"))
         candidates = {
-            "session": ((Path("/private/sockets/live.sock"), {"ompVersion": "18.2.0"}),),
+            "session": ((Path("/private/sockets/live.sock"), {"ompVersion": "99.42.7"}),),
             "older": ((Path("/private/sockets/older.sock"), {"ompVersion": "18.1.16"}),),
         }
         with patch.object(cli, "discover_extension_candidates", return_value=candidates) as discover:
             healthy, detail = cli._running_versions_diagnostic(settings)
 
-        self.assertFalse(healthy)
-        self.assertEqual(detail, "18.1.16 (qualified), 18.2.0 (unqualified)")
+        self.assertTrue(healthy)
+        self.assertIn("18.1.16", detail)
+        self.assertIn("99.42.7", detail)
         discover.assert_called_once_with(settings.socket_root, all_candidates=True)
+
+    def test_live_extension_version_diagnostic_rejects_unreadable_metadata(self):
+        settings = SimpleNamespace(socket_root=Path("/private/sockets"))
+        candidates = {
+            "session": ((Path("/private/sockets/live.sock"), {"ompVersion": None}),),
+        }
+        with patch.object(cli, "discover_extension_candidates", return_value=candidates):
+            healthy, detail = cli._running_versions_diagnostic(settings)
+
+        self.assertFalse(healthy)
+        self.assertTrue(detail)
 
     def test_setup_orders_plugin_service_health_and_pairing(self):
         settings = SimpleNamespace(

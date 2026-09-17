@@ -23,7 +23,7 @@
 - Qualify managed RPC recovery and the extension lifecycle against stock OMP 18.1.14 on macOS and 18.1.16 on Linux, alongside 18.1.10.
 - Keep session execution, transport connectivity, and history availability distinct; identify Deck connectivity separately and preserve last-known grouping during machine outages.
 - Identify a directly connected machine by its Deck address instead of `This machine`; preserve enrolled machine names.
-- Qualify stock OMP 18.2.1 on macOS, including managed restart/recovery and native shutdown. Report installed-version qualification separately from plugin presence; 18.2.0 remains unqualified.
+- Allow newer OMP versions without a manually maintained version list. Doctor distinguishes installed and running versions; unknown version text is a warning, while actual protocol and capability failures remain explicit.
 - Explain that Target machine controls new-session launches, terminal connections, and usage, while the session list remains fleet-wide.
 - Derive each Deck package version automatically from its committed source revision. Reject dirty or ambiguous builds, and preserve verified source identity through source-distribution rebuilds.
 

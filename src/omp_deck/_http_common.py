@@ -26,6 +26,9 @@ class ThreadingHTTPServer(_ThreadingHTTPServer):
     body_timeout = 30.0
 
     def __init__(self, server_address, handler, bind_and_activate=True):
+        # A browser asset burst overflows TCPServer's backlog of 5, adding
+        # measured one-second TCP retries despite spare request workers.
+        self.request_queue_size = self.max_connections
         self._connections = threading.BoundedSemaphore(self.max_connections)
         if ":" in server_address[0]:
             self.address_family = socket.AF_INET6

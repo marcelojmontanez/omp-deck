@@ -4,6 +4,115 @@ export async function verifyConnectionRecovery(page) {
   await page.focus('#message');
   await page.type('#message', 'Keep this draft and selection during recovery');
   await page.$eval('#message', input => input.setSelectionRange(5, 15));
+  await page.setOfflineMode(true);
+  await page.evaluate(async () => {
+    const id = selectedAgent().machineId;
+    stopNodeEventStream(id);
+    await refresh(id, {replace: true});
+    ompDeckApi.setMachineStatus(id, 'unavailable', 'Connection temporarily unavailable');
+  });
+  let unavailableTap;
+  try {
+    await page.tap('#send');
+    unavailableTap = await page.evaluate(() => ({
+      focused: document.activeElement === el.message,
+      draft: el.message.value,
+      selection: [el.message.selectionStart, el.message.selectionEnd],
+    }));
+  } finally {
+    await page.setOfflineMode(false);
+    await page.evaluate(async () => {
+      const id = selectedAgent().machineId;
+      await refresh(id);
+      startNodeEventStream(id);
+    });
+  }
+  assert.deepEqual(unavailableTap, {
+    focused: true,
+    draft: 'Keep this draft and selection during recovery',
+    selection: [5, 15],
+  }, 'Tapping temporarily unavailable Send must not dismiss the composer or its selection');
+  const renewal = await page.evaluate(async () => {
+    const originalFetch = window.fetch;
+    const id = selectedAgent().machineId;
+    const origin = ompDeckApi.machine(id).origin;
+    let intercepted = false;
+    let expirePreviousStream;
+    let opened;
+    let openedTimer;
+    const previousOpened = new Promise(resolve => { opened = resolve; });
+    window.fetch = async (input, options) => {
+      const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+      const intercept = !intercepted && url.origin === origin && url.pathname === '/api/events';
+      if (intercept) intercepted = true;
+      const response = await originalFetch(input, options);
+      if (!intercept) return response;
+      const reader = response.body.getReader();
+      let closed = false;
+      const body = new ReadableStream({
+        start(controller) {
+          expirePreviousStream = () => {
+            if (closed) return;
+            closed = true;
+            controller.close();
+            void reader.cancel().catch(() => {});
+          };
+          void (async () => {
+            try {
+              while (!closed) {
+                const {value, done} = await reader.read();
+                if (closed) return;
+                if (done) { closed = true; controller.close(); return; }
+                controller.enqueue(value);
+              }
+            } catch (error) {
+              if (!closed) { closed = true; controller.error(error); }
+            } finally {
+              reader.releaseLock();
+            }
+          })();
+          opened();
+        },
+        cancel() { closed = true; return reader.cancel(); },
+      });
+      return new Response(body, {status: response.status, headers: response.headers});
+    };
+    try {
+      stopNodeEventStream(id);
+      startNodeEventStream(id);
+      await Promise.race([
+        previousOpened,
+        new Promise((_, reject) => {
+          openedTimer = setTimeout(() => reject(new Error('Event stream did not open')), 10_000);
+        }),
+      ]);
+      // Signed tickets use whole seconds; the next issue must be a new credential.
+      await new Promise(resolve => setTimeout(resolve, 1100));
+      await ompDeckApi.renewAccess();
+      expirePreviousStream();
+      await new Promise(resolve => setTimeout(resolve, 100));
+      return {
+        available: ompDeckApi.machine(id).status === 'live',
+        canSend: !el.send.disabled,
+        focused: document.activeElement === el.message,
+        draft: el.message.value,
+        selection: [el.message.selectionStart, el.message.selectionEnd],
+      };
+    } finally {
+      clearTimeout(openedTimer);
+      window.fetch = originalFetch;
+      stopNodeEventStream(id);
+      await refresh(id);
+      startNodeEventStream(id);
+    }
+  });
+  assert.deepEqual(renewal, {
+    available: true,
+    canSend: true,
+    focused: true,
+    draft: 'Keep this draft and selection during recovery',
+    selection: [5, 15],
+  }, 'Expiry of a replaced ticket must not interrupt a healthy composer');
   for (const stage of ['access-headers', 'access-body', 'sessions-body', 'projects-body', 'stream-headers']) {
     const outcome = await page.evaluate(async stage => {
       const originalFetch = window.fetch;

@@ -37,8 +37,8 @@
     return [...machines.values()].map(publicMachine);
   }
 
-  function notifyMachines(removedIds = [], addedIds = []) {
-    emit('omp-deck-machines-changed', {machines: machineList(), removedIds, addedIds});
+  function notifyMachines(removedIds = [], addedIds = [], renewedIds = []) {
+    emit('omp-deck-machines-changed', {machines: machineList(), removedIds, addedIds, renewedIds});
   }
 
   function setMachineStatus(machine, status, error = '') {
@@ -322,8 +322,10 @@
           : [];
         const next = new Map();
         const addedSet = new Set(addedIds);
+        const renewedIds = [];
         for (const item of incoming) {
           const previous = machines.get(item.id);
+          if (previous?.origin === item.origin && previous.accessToken !== item.accessToken) renewedIds.push(item.id);
           next.set(item.id, {
             ...item,
             local: false,
@@ -336,7 +338,7 @@
         for (const [id, machine] of next) machines.set(id, machine);
         coordinatorAvailable = true;
         rosterInitialized = true;
-        notifyMachines(removedIds, addedIds);
+        notifyMachines(removedIds, addedIds, renewedIds);
         scheduleAccessTimers();
         return machineList();
       } catch (error) {

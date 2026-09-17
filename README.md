@@ -124,6 +124,8 @@ Use the image button to open the browser's native photo picker directly, and tap
 
 Image downloads have an eight-second deadline, including the response body. A failed thumbnail offers **Retry**; returning to the browser or reconnecting also retries unavailable images. Downloaded images remain previewable in the selected conversation during a temporary outage. The local photo picker and supported draft attachments remain available offline, while sending waits for reconnection.
 
+Routine machine-access renewal keeps the composer available. During a genuine outage, Send remains unavailable, but tapping it does not dismiss the composer or change the draft or text selection. Reconnection never submits a draft automatically.
+
 Assistant replies can display an existing private OMP image blob with a standalone Markdown line, `![Portrait](blob:sha256:<64 lowercase hex digest>)`. The image must already exist in that machine's active OMP blob store. Deck uses its authenticated image viewer; local file paths and external image URLs are not loaded. References inside code blocks or user text remain text.
 
 Type `/` to pick an available structured session action: `/compact`, `/interrupt`, `/quit`, or `/thinking <level>` using OMP's advertised choices. Arrow keys and Tab select a suggestion; Escape dismisses it. An exact action changes **Send** to **Run**. Compact and quit require confirmation. Cancelled or failed actions preserve the command draft, and delayed completion does not erase newer edits. Actions cannot be combined with image attachments. This is not a terminal command console and does not emulate unsupported OMP commands.

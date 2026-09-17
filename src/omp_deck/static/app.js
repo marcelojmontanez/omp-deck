@@ -189,6 +189,8 @@ function removeMachinePresentation(machineId) {
 window.addEventListener('omp-deck-machines-changed', event => {
   const previousSelection = state.selectedMachineId;
   for (const machineId of event.detail?.removedIds || []) removeMachinePresentation(machineId);
+  // An open SSE connection still carries its original, short-lived ticket.
+  for (const machineId of event.detail?.renewedIds || []) stopNodeEventStream(machineId);
   const addedIds = event.detail?.addedIds || [];
   for (const machineId of addedIds) {
     state.reloadRequiredMachines.add(machineId);
@@ -307,6 +309,9 @@ composer = createComposer({
   renderDetail,
   refresh,
   escapeHtml,
+});
+el.composer.addEventListener('pointerdown', event => {
+  if (event.target === el.send && document.activeElement === el.message) event.preventDefault();
 });
 document.querySelector('.detail-header').addEventListener('click', event => {
   const todoButton = event.target.closest('[data-toggle-todo]');

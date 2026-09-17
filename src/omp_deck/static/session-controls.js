@@ -1,6 +1,7 @@
-
 let sessionActionGeneration = 0;
 const sessionActionAttempts = new Map();
+const sessionActionOperations = new Map();
+const sessionActionStates = new Map();
 const dialogReturnFocus = new WeakMap();
 let settingsBusy = false;
 let sessionNameTarget = null;
@@ -8,9 +9,15 @@ let presentationOperation = null;
 
 function clearSessionActionAttempts() {
   sessionActionAttempts.clear();
+  sessionActionOperations.clear();
+  sessionActionStates.clear();
   sessionActionGeneration += 1;
+  syncSessionActionControls();
 }
 
+function sessionActionKey(agent, route) {
+  return `${agent.id}:${route}`;
+}
 
 function sessionActionOptions(agent) {
   const ongoing = agent?.lifecycle === 'ongoing';
@@ -18,30 +25,40 @@ function sessionActionOptions(agent) {
   const bridgeConnected = Boolean(agent?.bridgeConnected);
   const capabilities = agent?.capabilities || {};
   const working = (agent?.executionState || agent?.status) === 'working';
+  const available = (route, allowed) => Boolean(
+    allowed && !sessionActionOperations.has(sessionActionKey(agent, route))
+  );
   return [
     {
-      action: 'compact',
-      command: '/compact',
-      label: 'Compact context',
-      enabled: Boolean(ongoing && nodeAvailable && bridgeConnected && capabilities.compact),
+      action: 'compact', route: 'compact', command: '/compact', label: 'Compact context',
+      enabled: available('compact', ongoing && nodeAvailable && bridgeConnected && capabilities.compact),
     },
     {
-      action: 'interrupt',
-      command: '/interrupt',
-      label: 'Interrupt',
-      enabled: Boolean(
-        ongoing && nodeAvailable && bridgeConnected && capabilities.interrupt && working
+      action: 'interrupt', route: 'interrupt', command: '/interrupt', label: 'Interrupt',
+      enabled: available(
+        'interrupt', ongoing && nodeAvailable && bridgeConnected && capabilities.interrupt && working
       ),
     },
     {
-      action: 'quit',
-      command: '/quit',
-      label: 'Quit',
-      enabled: Boolean(ongoing && nodeAvailable && capabilities.shutdown),
+      action: 'quit', route: 'shutdown', command: '/quit', label: 'Quit',
+      enabled: available('shutdown', ongoing && nodeAvailable && capabilities.shutdown),
     },
   ];
 }
-
+function syncSessionActionControls(agent = selectedAgent()) {
+  for (const option of sessionActionOptions(agent)) {
+    const button = el['session-menu'].querySelector(`[data-session-action="${option.action}"]`);
+    const status = agent && sessionActionStates.get(sessionActionKey(agent, option.route));
+    button.disabled = !option.enabled;
+    button.hidden = !option.enabled && status !== 'pending';
+    button.textContent = status === 'pending' ? `${option.label}…`
+      : status === 'accepted' ? `${option.label} accepted`
+        : ['failed', 'uncertain'].includes(status) ? `Retry ${option.label.toLowerCase()}`
+          : option.label;
+    button.title = status === 'uncertain'
+      ? 'The outcome is uncertain. Retry safely checks the same request.' : '';
+  }
+}
 async function runSessionAction(action, agent = selectedAgent()) {
   const option = sessionActionOptions(agent).find(item => item.action === action);
   if (!agent || !option?.enabled) return false;
@@ -50,42 +67,65 @@ async function runSessionAction(action, agent = selectedAgent()) {
     || (action === 'quit' && !confirm('Shut down this OMP session?'))
   ) return false;
 
-  const route = {compact: 'compact', interrupt: 'interrupt', quit: 'shutdown'}[action];
   const generation = sessionActionGeneration;
-  const attemptKey = `${agent.id}:${route}`;
+  const attemptKey = sessionActionKey(agent, option.route);
   const operationRequestId = sessionActionAttempts.get(attemptKey) || requestId();
+  const operation = {};
   sessionActionAttempts.set(attemptKey, operationRequestId);
+  sessionActionOperations.set(attemptKey, operation);
+  sessionActionStates.set(attemptKey, 'pending');
+  if (selectedAgent()?.id === agent.id) syncSessionActionControls(agent);
+  showToast(`${agent.label || 'Session'}: Requesting ${option.label.toLowerCase()}…`);
   try {
-    const response = await ompDeckApi.request(
-      `/api/sessions/${encodeURIComponent(agent.id)}/${route}`,
+    const {response, payload} = await ompDeckNetwork.fetchJsonBounded(
+      `/api/sessions/${encodeURIComponent(agent.id)}/${option.route}`,
       {
         method: 'POST',
+        machineId: agent.machineId,
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({requestId: operationRequestId}),
-      }
+      },
+      ompDeckNetwork.STARTUP_TIMEOUT_MS,
+      ompDeckApi.request,
     );
     if (
       generation !== sessionActionGeneration
-      || sessionActionAttempts.get(attemptKey) !== operationRequestId
+      || sessionActionOperations.get(attemptKey) !== operation
       || !ompDeckApi.authenticated()
     ) return false;
     if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      const error = new Error(payload.error || `Action failed (${response.status})`);
-      error.reuseRequestId = ompDeckApi.shouldReuseRequestId(response, payload);
+      const error = new Error(payload?.error || `Action failed (${response.status})`);
+      error.reuseRequestId = ompDeckApi.shouldReuseRequestId(response, payload || {});
+      throw error;
+    }
+    if (payload?.requestId !== operationRequestId || payload.status !== 'accepted') {
+      const error = new Error('Server did not confirm action acceptance');
+      error.reuseRequestId = true;
       throw error;
     }
     sessionActionAttempts.delete(attemptKey);
-    showToast(`${option.label} requested`, 'success');
+    sessionActionStates.set(attemptKey, 'accepted');
+    showToast(`${agent.label || 'Session'}: ${option.label} accepted`, 'success');
     return true;
   } catch (error) {
     if (
       generation !== sessionActionGeneration
-      || sessionActionAttempts.get(attemptKey) !== operationRequestId
+      || sessionActionOperations.get(attemptKey) !== operation
     ) return false;
-    if (error.reuseRequestId === false) sessionActionAttempts.delete(attemptKey);
-    if (ompDeckApi.authenticated()) showToast(error.message, 'error');
+    const uncertain = error?.reuseRequestId !== false;
+    if (!uncertain) sessionActionAttempts.delete(attemptKey);
+    sessionActionStates.set(attemptKey, uncertain ? 'uncertain' : 'failed');
+    const message = error?.message || 'Action failed';
+    if (ompDeckApi.authenticated()) showToast(
+      `${agent.label || 'Session'}: ${message}${uncertain ? '. Retry will use the same request.' : ''}`,
+      'error',
+    );
     return false;
+  } finally {
+    if (sessionActionOperations.get(attemptKey) === operation) {
+      sessionActionOperations.delete(attemptKey);
+      if (selectedAgent()?.id === agent.id) syncSessionActionControls(agent);
+    }
   }
 }
 
@@ -101,6 +141,7 @@ function closeSessionMenu({restoreFocus = false} = {}) {
 }
 
 function openSessionMenu() {
+  syncSessionActionControls();
   el['session-menu'].hidden = false;
   el['overflow-button'].setAttribute('aria-expanded', 'true');
   visibleMenuItems()[0]?.focus();

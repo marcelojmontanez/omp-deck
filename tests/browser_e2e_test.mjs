@@ -8,6 +8,7 @@ import net from 'node:net';
 import test from 'node:test';
 import puppeteer from 'puppeteer';
 import {verifyComposerParity} from './composer_parity_cases.mjs';
+import {verifySessionActions} from './session_action_cases.mjs';
 import {verifyMachineSelector} from './machine_selector_cases.mjs';
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
@@ -1688,60 +1689,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   });
   assert.equal(askRetryIds[0], askRetryIds[1]);
 
-  const controlRetryIds = await page.evaluate(async () => {
-    const originalRequest = ompDeckApi.request;
-    const originalConfirm = globalThis.confirm;
-    const agent = {
-      id: 'control-retry-session',
-      project: 'demo',
-      label: 'Control retry',
-      lifecycle: 'ongoing',
-      bridgeConnected: true,
-      executionState: 'idle',
-      inboxState: 'read',
-      capabilities: {compact: true},
-      transport: {kind: 'rpc', status: 'connected', label: 'RPC'},
-      pendingUiRequest: null,
-      subagents: [],
-      session: {activity: [], archiveActivity: [], updatedMs: Date.now()},
-    };
-    state.agents = [agent];
-    state.selectedId = agent.id;
-    renderDetail({selectionChanged: true});
-    const button = el['session-menu'].querySelector('[data-session-action="compact"]');
-    const ids = [];
-    const waitForAttempt = async count => {
-      const deadline = Date.now() + 1000;
-      while (ids.length < count) {
-        if (Date.now() >= deadline) throw new Error('control retry timed out');
-        await new Promise(resolve => setTimeout(resolve, 0));
-      }
-      await new Promise(resolve => setTimeout(resolve, 0));
-    };
-    try {
-      globalThis.confirm = () => true;
-      ompDeckApi.request = async (_path, options) => {
-        ids.push(JSON.parse(options.body).requestId);
-        if (ids.length === 1) {
-          return {
-            ok: false,
-            status: 502,
-            json: async () => ({error: 'response lost'}),
-          };
-        }
-        return {ok: true, status: 202, json: async () => ({})};
-      };
-      button.click();
-      await waitForAttempt(1);
-      button.click();
-      await waitForAttempt(2);
-      return ids;
-    } finally {
-      ompDeckApi.request = originalRequest;
-      globalThis.confirm = originalConfirm;
-    }
-  });
-  assert.equal(controlRetryIds[0], controlRetryIds[1]);
+  await verifySessionActions(page);
 
   const retryClassification = await page.evaluate(() => ({
     unknownServerError: ompDeckApi.shouldReuseRequestId(

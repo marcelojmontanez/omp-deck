@@ -6,6 +6,19 @@
   border-top: 1px solid var(--line);
   background: #0c1019;
 }
+.delivery-mode { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.delivery-mode > span:not(.sr-only) { color: var(--muted); font-size: 12px; margin-right: auto; }
+.delivery-mode button {
+  min-height: 44px;
+  padding: 8px 14px;
+  border: 2px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-solid);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+.delivery-mode button[aria-pressed="true"] { border-color: var(--cyan); font-weight: 850; }
 .attachments { display: flex; gap: 9px; padding: 7px 7px 11px; overflow-x: auto; }
 .attachments:empty { display: none; }
 .attachment {

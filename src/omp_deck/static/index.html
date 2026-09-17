@@ -130,6 +130,12 @@
         <button class="scroll-newest" id="scroll-newest" type="button" hidden>↑ Newest</button>
         <form class="composer" id="composer">
           <div class="attachments" id="attachments"></div>
+          <div class="delivery-mode" id="delivery-mode" role="group" aria-label="Message delivery while OMP is working" aria-describedby="delivery-mode-help" hidden>
+            <span>While working</span>
+            <button type="button" data-delivery-mode="steer" aria-pressed="true" title="Send at the next interruption point in the current run">Steer</button>
+            <button type="button" data-delivery-mode="queue" aria-pressed="false" title="Wait until the current run finishes">Queue</button>
+            <span class="sr-only" id="delivery-mode-help">Steer sends at the next interruption point. Queue waits until the current run finishes.</span>
+          </div>
             <div class="command-menu" id="command-menu" role="listbox" aria-label="Session actions" hidden></div>
           <div class="composer-shell">
             <label class="attach">
@@ -202,6 +208,7 @@
   <script src="/ui-helpers.js"></script>
   <script src="/composer-commands.js"></script>
   <script src="/composer-recovery.js"></script>
+  <script src="/composer-delivery-mode.js"></script>
   <script src="/composer.js"></script>
   <script src="/deck-rendering.js"></script>
   <script src="/auth-bootstrap.js"></script>

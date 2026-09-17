@@ -35,6 +35,7 @@ function createComposer({
     showToast,
     hasAttachments: () => attachmentsFor(sessionId).length > 0,
   });
+  const deliveryMode = createComposerDeliveryMode({elements, selectedAgent});
   const queueToken = id => queueTokens.get(id) || queueTokens.set(id, {}).get(id);
   const recovery = createComposerRecovery({
     elements,
@@ -84,6 +85,7 @@ function createComposer({
     outboundQueues.clear();
     retryBatches.clear();
     recovery.clear();
+    deliveryMode.clear();
     elements['send-state'].textContent = '';
     renderAttachments();
     commands.clear();
@@ -116,6 +118,7 @@ function createComposer({
       </span>`
     ).join('');
     commands.sync({showSuggestions: false});
+    deliveryMode.sync(selectedAgent());
   }
 
   function select(id) {
@@ -350,6 +353,7 @@ function createComposer({
     }
     const message = commandDraft.trim();
     if (!message && !outgoingAttachments.length) return;
+    const action = deliveryMode.capture(agent);
     elements.message.focus({preventScroll: true});
     const retry = retryBatches.get(id);
     const retryAttachments = retry
@@ -393,6 +397,7 @@ function createComposer({
       id: requestId(),
       text: message,
       attachments: outgoingAttachments,
+      action,
       createdAt: Date.now(),
       accepted: false,
       state: 'submitting',
@@ -407,6 +412,7 @@ function createComposer({
       id,
       message,
       outgoingAttachments,
+      action,
       pending,
       generation: dataGeneration,
       token: queueToken(id),
@@ -417,6 +423,7 @@ function createComposer({
   elements.message.addEventListener('input', () => {
     saveDraft(sessionId, elements.message.value);
     commands.inputChanged();
+    deliveryMode.sync(selectedAgent());
   });
   elements.attach.addEventListener('change', async event => {
     const pending = addAttachments(event.target.files);
@@ -464,6 +471,7 @@ function createComposer({
     (outboundQueues.get(id) || []).flatMap(job => job.outgoingAttachments || []).forEach(revokeAttachment);
     drafts.delete(id);
     attachments.delete(id);
+    deliveryMode.remove(id);
     pendingMessages.delete(id);
     outboundQueues.delete(id);
     queueTokens.delete(id);
@@ -472,6 +480,7 @@ function createComposer({
 
   function prune(validIds) {
     commands.prune(validIds);
+    deliveryMode.prune(new Set(validIds));
   }
 
   return {
@@ -481,6 +490,7 @@ function createComposer({
     recover: recovery.recover,
     restoreDelivery: recovery.restoreDelivery,
     dismissDelivery: recovery.dismissDelivery,
+    syncDeliveryMode: deliveryMode.sync,
     remove,
     prune,
     select,

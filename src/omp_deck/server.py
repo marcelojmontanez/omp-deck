@@ -130,6 +130,11 @@ def dispatch_session_command(session_id, request_id, action, payload):
     return terminal_manager().command(session_id, request_id, action, payload)
 
 
+def delivery_manager(session_id):
+    session = _fleet_model.get(session_id)
+    return rpc_manager() if session["transport"]["kind"] == "rpc" else terminal_manager()
+
+
 def project_path(project, *, must_exist=True):
     return resolve_project_path(DEV_ROOT, project, must_exist=must_exist)
 
@@ -165,6 +170,10 @@ def action_dispatcher():
         launch_project=launch_rpc_project,
         dispatch_command=dispatch_session_command,
         terminal_manager=terminal_manager,
+        delivery_recoveries=lambda session_id: delivery_manager(session_id).deliveries(session_id),
+        dismiss_delivery=lambda session_id, request_id: delivery_manager(session_id).dismiss_delivery(
+            session_id, request_id
+        ),
     )
 
 
@@ -240,6 +249,7 @@ class Handler(DeckHttpHandler):
                     "/api/usage",
                 }
                 or re.fullmatch(r"/api/blob/[^/]+", path) is not None
+                or re.fullmatch(r"/api/sessions/[^/]+/deliveries", path) is not None
             )
         if method != "POST":
             return False
@@ -252,6 +262,7 @@ class Handler(DeckHttpHandler):
             )
             is not None
             or re.fullmatch(r"/api/sessions/[^/]+/ui-requests/[^/]+/(respond|cancel)", path) is not None
+            or re.fullmatch(r"/api/sessions/[^/]+/deliveries/[^/]+/dismiss", path) is not None
         )
 
     def do_OPTIONS(self):
@@ -361,6 +372,17 @@ class Handler(DeckHttpHandler):
                 self.reply(200, _fleet_model.snapshot())
             except Exception:
                 self.reply(503, {"error": "session state unavailable"})
+            return
+        if request_path.startswith("/api/sessions/") and request_path.endswith("/deliveries"):
+            try:
+                result = action_dispatcher().recover(request_path)
+            except KeyError:
+                result = (404, {"error": "session not found"})
+            except ValueError:
+                result = (400, {"error": "invalid session"})
+            except (OSError, RuntimeError):
+                result = (503, {"error": "delivery recovery unavailable"})
+            self.reply(*(result or (404, {"error": "not found"})))
             return
         if request_path == "/api/usage":
             self.reply(200, _usage_service.snapshot())

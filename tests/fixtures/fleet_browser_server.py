@@ -3,9 +3,11 @@
 import argparse
 import base64
 import hashlib
+import json
 import signal
 
 from omp_deck import attachments, server
+from omp_deck.request_ledger import RequestLedger
 from omp_deck.rpc_adapter import AdapterSnapshot
 
 SESSION_ID = "same-local-session"
@@ -17,6 +19,7 @@ class BrowserSession:
         self.sequence = 0
         self.thinking = "medium"
         self.messages = [{"role": "assistant", "content": f"{label} reply"}]
+        self.requests = RequestLedger(server.SETTINGS.state_root / "requests.json")
         blob = base64.b64decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aM1sAAAAASUVORK5CYII="
         )
@@ -65,17 +68,41 @@ class BrowserSession:
         # The fixture publishes synchronously; no external OMP process to refresh.
         return None
 
+    def deliveries(self, session_id):
+        return self.requests.deliveries(session_id)
+
+    def dismiss_delivery(self, session_id, request_id):
+        return self.requests.dismiss_delivery(session_id, request_id)
+
     def dispatch(self, session_id, request_id, action, payload):
         if session_id != SESSION_ID:
             raise KeyError(session_id)
         if action in {"sendMessage", "followUp"}:
+            fingerprint = hashlib.sha256(json.dumps([action, payload], sort_keys=True).encode()).hexdigest()
+            existing = self.requests.reserve(
+                SESSION_ID,
+                request_id,
+                fingerprint,
+                recovery={
+                    "kind": "message",
+                    "sessionId": session_id,
+                    "action": action,
+                    "message": payload["message"],
+                    "images": payload.get("images") or [],
+                },
+            )
+            if existing is not None:
+                return existing
             self.messages.append({"role": "user", "content": payload["message"]})
         elif action == "setThinking":
             self.thinking = payload["level"]
         else:
             raise ValueError("unsupported fixture operation")
         self.publish()
-        return {"requestId": request_id, "status": "accepted"}
+        outcome = {"requestId": request_id, "status": "accepted", "acceptance": "accepted"}
+        if action in {"sendMessage", "followUp"}:
+            self.requests.complete(SESSION_ID, request_id, fingerprint, outcome)
+        return outcome
 
 
 def main():

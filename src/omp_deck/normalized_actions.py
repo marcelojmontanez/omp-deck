@@ -31,6 +31,9 @@ _READ_ROUTE = re.compile(r"/api/sessions/([^/]+)/read")
 _REMOVE_ROUTE = re.compile(r"/api/sessions/([^/]+)/remove")
 _PRESENTATION_ROUTE = re.compile(r"/api/sessions/([^/]+)/presentation")
 
+_DELIVERY_ROUTE = re.compile(r"/api/sessions/([^/]+)/deliveries")
+_DELIVERY_DISMISS_ROUTE = re.compile(r"/api/sessions/([^/]+)/deliveries/([^/]+)/dismiss")
+
 
 class NormalizedActionDispatcher:
     def __init__(
@@ -42,6 +45,8 @@ class NormalizedActionDispatcher:
         launch_project,
         dispatch_command,
         terminal_manager,
+        delivery_recoveries,
+        dismiss_delivery,
     ):
         self.fleet_model = fleet_model
         self.registry = registry
@@ -49,8 +54,13 @@ class NormalizedActionDispatcher:
         self.launch_project = launch_project
         self.dispatch_command = dispatch_command
         self.terminal_manager = terminal_manager
+        self.delivery_recoveries = delivery_recoveries
+        self.dismiss_delivery = dismiss_delivery
 
     def dispatch(self, request_path, data):
+        match = _DELIVERY_DISMISS_ROUTE.fullmatch(request_path)
+        if match:
+            return self._dismiss_delivery(match, data)
         if request_path == "/api/terminal-sessions/collab":
             return self._add_collab(data)
         match = _PRESENTATION_ROUTE.fullmatch(request_path)
@@ -72,6 +82,24 @@ class NormalizedActionDispatcher:
         if match:
             return self._session_action(match, data)
         return None
+
+    def recover(self, request_path):
+        match = _DELIVERY_ROUTE.fullmatch(request_path)
+        if match is None:
+            return None
+        session_id = decoded_segment(match.group(1), "session")
+        self.fleet_model.get(session_id)
+        deliveries = self.delivery_recoveries(session_id)
+        return 200, {"version": 1, "deliveries": deliveries}
+
+    def _dismiss_delivery(self, match, data):
+        if data:
+            raise ValueError("request body must be empty")
+        session_id = decoded_segment(match.group(1), "session")
+        request_id = decoded_segment(match.group(2), "request")
+        self.fleet_model.get(session_id)
+        self.dismiss_delivery(session_id, request_id)
+        return 200, {"requestId": request_id, "status": "dismissed"}
 
     def _update_presentation(self, match, data):
         session_id = decoded_segment(match.group(1), "session")
@@ -159,6 +187,8 @@ class NormalizedActionDispatcher:
             return 409, _failed(request_id, "attachments_unsupported")
         result = self.dispatch_command(session_id, request_id, action, payload)
         if result["status"] == "accepted":
+            if action in {"sendMessage", "followUp"}:
+                result = {**result, "acceptance": result.get("acceptance", "accepted")}
             return 202, result
         if ui or result["status"] in {"stale", "cancelled"}:
             return 409, result

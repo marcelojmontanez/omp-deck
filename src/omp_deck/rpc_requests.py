@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import threading
@@ -109,16 +110,22 @@ class RpcRequestCoordinator:
         priority: bool = False,
     ) -> dict[str, Any]:
         fingerprint = _fingerprint({"action": action, "payload": payload})
+        scope = f"rpc-command:{session_id}"
+        recovery = self._message_recovery(session_id, action, payload)
         with self._lock:
             locks = self._priority_command_locks if priority else self._command_locks
             command_lock = locks.setdefault(session_id, threading.Lock())
         with command_lock:
-            scope = f"rpc-command:{session_id}"
             persisted = self.ledger.lookup(scope, request_id, fingerprint)
             if persisted is not None:
                 return persisted
             prepared = prepare() if prepare is not None else session_id
-            persisted = self.ledger.reserve(scope, request_id, fingerprint)
+            persisted = self.ledger.reserve(
+                scope,
+                request_id,
+                fingerprint,
+                recovery=recovery,
+            )
             if persisted is not None:
                 return persisted
             try:
@@ -130,8 +137,11 @@ class RpcRequestCoordinator:
                     "status": status,
                     "result": outcome,
                 }
+                if recovery is not None and status == "accepted":
+                    result["acceptance"] = "accepted"
             except AdapterError as error:
                 if error.kind not in {"cancelled", "command"}:
+                    self.ledger.mark_uncertain(scope, request_id, fingerprint)
                     return {
                         "requestId": request_id,
                         "status": "uncertain",
@@ -147,4 +157,26 @@ class RpcRequestCoordinator:
             if durable.get("status") == "accepted":
                 durable["result"] = None
             self.ledger.complete(scope, request_id, fingerprint, durable)
-            return result
+            return self.ledger.lookup(scope, request_id, fingerprint) or result
+
+    def deliveries(self, session_id: str) -> list[dict[str, Any]]:
+        return self.ledger.deliveries(session_id)
+
+    def dismiss_delivery(self, session_id: str, request_id: str) -> bool:
+        return self.ledger.dismiss_delivery(session_id, request_id)
+
+    def _message_recovery(
+        self,
+        session_id: str,
+        action: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        if action not in {"sendMessage", "followUp"}:
+            return None
+        return {
+            "kind": "message",
+            "sessionId": session_id,
+            "action": action,
+            "message": payload["message"],
+            "images": copy.deepcopy(payload.get("images") or []),
+        }

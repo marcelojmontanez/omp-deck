@@ -1171,13 +1171,13 @@ class TerminalSessionManagerTests(unittest.TestCase):
         manager.command(session_id, "interrupt", "interrupt", {})
         manager.command(session_id, "shutdown", "shutdown", {})
         image = {"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"}
-        manager.command(
+        image_result = manager.command(
             session_id,
             "image-only",
             "sendMessage",
             {"message": "", "images": [image]},
         )
-        manager.command(
+        follow_image_result = manager.command(
             session_id,
             "follow-image",
             "followUp",
@@ -1193,9 +1193,37 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.assertIn(("send_message", "now", None), adapter.calls)
         self.assertIn(("send_message", "later", "followUp"), adapter.calls)
         self.assertIn(("send_message", "queued", "followUp"), adapter.calls)
+        self.assertEqual(image_result["acceptance"], "accepted")
+        self.assertEqual(follow_image_result["acceptance"], "accepted")
         self.assertIn(("send_message", "", None, [image]), adapter.calls)
         self.assertIn(("send_message", "inspect", "followUp", [image]), adapter.calls)
         self.assertIn(("interrupt",), adapter.calls)
+        image_delivery = next(item for item in manager.deliveries(session_id) if item["requestId"] == "image-only")
+        self.assertEqual(
+            (image_delivery["state"], image_delivery["message"]),
+            ("accepted", ""),
+        )
+        self.assertEqual(
+            image_delivery["attachments"],
+            [
+                {
+                    "name": "Recovered image 1",
+                    "type": "image/png",
+                    "data": "data:image/png;base64,iVBORw0KGgo=",
+                }
+            ],
+        )
+        self.assertTrue(manager.dismiss_delivery(session_id, "image-only"))
+        self.assertFalse(manager.dismiss_delivery(session_id, "image-only"))
+        self.assertFalse(any(item["requestId"] == "image-only" for item in manager.deliveries(session_id)))
+        duplicate_image = manager.command(
+            session_id,
+            "image-only",
+            "sendMessage",
+            {"message": "", "images": [image]},
+        )
+        self.assertEqual(duplicate_image, image_result)
+        self.assertEqual(adapter.calls.count(("send_message", "", None, [image])), 1)
         self.assertIn(("shutdown_session",), adapter.calls)
         adapter.callback(
             {
@@ -1266,6 +1294,35 @@ class TerminalSessionManagerTests(unittest.TestCase):
             with self.subTest(action=action):
                 with self.assertRaises(ValueError):
                     manager.command(session_id, f"unsupported-{index}", action, payload)
+
+    def test_uncertain_extension_send_retains_private_recovery_without_replay(self):
+        manager = self.manager()
+        session_id, _, adapter = self.connect_extension(manager)
+        calls = 0
+
+        def disconnect(_message, _behavior=None, *, images=None):
+            nonlocal calls
+            calls += 1
+            raise ExtensionDisconnected("connection lost after write")
+
+        adapter.send_message = disconnect
+        payload = {"message": "keep this", "images": None}
+        with self.assertRaises(ExtensionDisconnected):
+            manager.command(session_id, "uncertain-send", "sendMessage", payload)
+        delivery = next(item for item in manager.deliveries(session_id) if item["requestId"] == "uncertain-send")
+        self.assertEqual(
+            (delivery["state"], delivery["message"], delivery["errorCode"]),
+            ("uncertain", "keep this", "outcome_unknown"),
+        )
+        self.assertEqual(
+            manager.command(session_id, "uncertain-send", "sendMessage", payload),
+            {
+                "requestId": "uncertain-send",
+                "status": "uncertain",
+                "errorCode": "outcome_unknown",
+            },
+        )
+        self.assertEqual(calls, 1)
 
     def test_callbacks_and_refresh_normalize_messages_subagents_and_ui(self):
         manager = self.manager()

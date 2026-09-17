@@ -46,6 +46,100 @@ class RequestLedgerTests(unittest.TestCase):
                 self.assertEqual(path.stat().st_mode & 0o777, 0o600)
                 self.assertEqual(first.lock_path.stat().st_mode & 0o777, 0o600)
 
+    def test_accepted_message_receipt_survives_restart_until_explicit_dismissal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "requests.json"
+            ledger = RequestLedger(path, clock=lambda: 100.0)
+            recovery = {
+                "kind": "message",
+                "sessionId": "session",
+                "action": "sendMessage",
+                "message": "same text",
+                "images": [],
+            }
+            self.assertIsNone(
+                ledger.reserve(
+                    "rpc-command:session",
+                    "message-1",
+                    "a" * 64,
+                    recovery=recovery,
+                )
+            )
+            ledger.complete(
+                "rpc-command:session",
+                "message-1",
+                "a" * 64,
+                {
+                    "requestId": "message-1",
+                    "status": "accepted",
+                    "acceptance": "accepted",
+                    "result": None,
+                },
+            )
+
+            restarted = RequestLedger(path, clock=lambda: 101.0)
+            accepted = restarted.deliveries("session")
+            self.assertEqual(
+                (accepted[0]["requestId"], accepted[0]["state"], accepted[0]["message"]),
+                ("message-1", "accepted", "same text"),
+            )
+            self.assertEqual(accepted[0]["expiresAt"], 100_000 + 7 * 24 * 60 * 60 * 1_000)
+
+            self.assertTrue(restarted.dismiss_delivery("session", "message-1"))
+            self.assertEqual(restarted.deliveries("session"), [])
+            self.assertFalse(restarted.dismiss_delivery("session", "message-1"))
+            self.assertEqual(
+                restarted.lookup("rpc-command:session", "message-1", "a" * 64),
+                {
+                    "requestId": "message-1",
+                    "status": "accepted",
+                    "acceptance": "accepted",
+                    "result": None,
+                },
+            )
+
+    def test_uncertain_identical_messages_remain_distinct_without_text_or_order_inference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = RequestLedger(Path(directory) / "requests.json")
+            for index in (1, 2):
+                request_id = f"message-{index}"
+                fingerprint = str(index) * 64
+                ledger.reserve(
+                    "rpc-command:session",
+                    request_id,
+                    fingerprint,
+                    recovery={
+                        "kind": "message",
+                        "sessionId": "session",
+                        "action": "sendMessage",
+                        "message": "identical",
+                        "images": [],
+                    },
+                )
+                ledger.mark_uncertain("rpc-command:session", request_id, fingerprint)
+
+            restarted = RequestLedger(ledger.path)
+            self.assertEqual(
+                [(item["requestId"], item["state"], item["message"]) for item in restarted.deliveries("session")],
+                [
+                    ("message-1", "uncertain", "identical"),
+                    ("message-2", "uncertain", "identical"),
+                ],
+            )
+            self.assertEqual(
+                restarted.reserve("rpc-command:session", "message-1", "1" * 64),
+                {
+                    "requestId": "message-1",
+                    "status": "uncertain",
+                    "errorCode": "outcome_unknown",
+                },
+            )
+            self.assertTrue(restarted.dismiss_delivery("session", "message-1"))
+            self.assertEqual(
+                [item["requestId"] for item in restarted.deliveries("session")],
+                ["message-2"],
+            )
+
     def test_stale_temporary_file_does_not_block_future_writes(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "requests.json"

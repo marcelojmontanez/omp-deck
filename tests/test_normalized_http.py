@@ -15,6 +15,7 @@ from omp_deck._rpc_dispatch import SessionCommandConflictError
 from omp_deck._terminal_commands import TerminalCommandConflict
 from omp_deck.auth_policy import AuthPolicy
 from omp_deck.fleet_model import FleetModel
+from omp_deck.request_ledger import RequestLedger
 
 
 class _Manager:
@@ -344,6 +345,46 @@ class NormalizedHttpTests(unittest.TestCase):
         self.assertEqual(status, 409)
         self.assertEqual(payload["errorCode"], "request_conflict")
         self.assertNotIn("different", payload["error"])
+
+    def test_message_receipts_require_authentication_and_scoped_csrf_protected_dismissal(self):
+        ledger = RequestLedger(Path(self.directory.name) / "receipts.json")
+        fingerprint = "a" * 64
+        outcome = {"requestId": "receipt-1", "status": "accepted", "acceptance": "accepted"}
+        ledger.reserve(
+            "rpc-command:rpc-1",
+            "receipt-1",
+            fingerprint,
+            recovery={
+                "kind": "message",
+                "sessionId": "rpc-1",
+                "action": "sendMessage",
+                "message": "Keep this recoverable",
+                "images": [],
+            },
+        )
+        ledger.complete("rpc-command:rpc-1", "receipt-1", fingerprint, outcome)
+        route = "/api/sessions/rpc-1/deliveries"
+        with contextlib.ExitStack() as stack:
+            for manager in (self.rpc, self.terminal):
+                stack.enter_context(patch.object(manager, "deliveries", ledger.deliveries, create=True))
+                stack.enter_context(patch.object(manager, "dismiss_delivery", ledger.dismiss_delivery, create=True))
+            status, headers, payload = self.request("GET", route)
+            self.assertEqual(status, 401)
+            self.assertEqual(headers["Cache-Control"], "no-store")
+            self.assertNotIn("Keep this recoverable", json.dumps(payload))
+            status, headers, payload = self.request("GET", route, headers={"Cookie": self.cookie})
+            self.assertEqual((status, headers["Cache-Control"]), (200, "no-store"))
+            self.assertEqual(payload["deliveries"][0]["message"], "Keep this recoverable")
+            dismissal = route + "/receipt-1/dismiss"
+            missing_csrf = {"Cookie": self.cookie, "Origin": self.origin}
+            self.assertEqual(self.post(dismissal, {}, missing_csrf)[0], 403)
+            self.assertEqual(self.post("/api/sessions/terminal-1/deliveries/receipt-1/dismiss", {})[0], 200)
+            self.assertEqual(ledger.deliveries("rpc-1")[0]["requestId"], "receipt-1")
+            self.assertEqual(self.post(dismissal, {"message": "unexpected"})[0], 400)
+            self.assertEqual(self.post(dismissal, {})[0], 200)
+            self.assertEqual(self.post(dismissal, {})[0], 200)
+            self.assertEqual(ledger.deliveries("rpc-1"), [])
+            self.assertEqual(ledger.lookup("rpc-command:rpc-1", "receipt-1", fingerprint), outcome)
 
     def test_message_and_follow_up_decode_images_to_exact_manager_wire_shape(self):
         self.enable("rpc-1", "attachments")

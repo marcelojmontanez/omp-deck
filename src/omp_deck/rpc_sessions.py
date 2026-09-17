@@ -193,6 +193,12 @@ class RpcSessionManager:
             _rpc_dispatch.SessionNotConnectedError,
         )
 
+    def deliveries(self, session_id: str) -> list[dict[str, Any]]:
+        return self._requests.deliveries(session_id)
+
+    def dismiss_delivery(self, session_id: str, request_id: str) -> bool:
+        return self._requests.dismiss_delivery(session_id, request_id)
+
     def command(self, session_id: str, action: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         return _rpc_dispatch.command(self, session_id, action, payload, _rpc_dispatch.SessionNotConnectedError)
 

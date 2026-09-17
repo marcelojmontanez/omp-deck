@@ -247,6 +247,12 @@ class TerminalSessionManager:
             self._runtimes.require,
         )
 
+    def deliveries(self, session_id: str) -> list[dict[str, Any]]:
+        return self._commands.deliveries(session_id)
+
+    def dismiss_delivery(self, session_id: str, request_id: str) -> bool:
+        return self._commands.dismiss_delivery(session_id, request_id)
+
     def _connect_collab(self, record: Mapping[str, Any], link: str, *, guest_name: str = "OMP Deck") -> None:
         session_id = str(record["id"])
         instance_id = uuid.uuid4().hex

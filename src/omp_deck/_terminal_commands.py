@@ -94,11 +94,46 @@ class TerminalCommandCoordinator:
                 raise ValueError("unsupported thinking level")
             active = runtime(session_id)
             prepared = self._prepare(active, action, payload)
-            self.requests.reserve(scope, request_id, request_fingerprint)
-            result = self._execute(active, request_id, action, payload, prepared)
+            recovery = self._message_recovery(session_id, action, payload)
+            persisted = self.requests.reserve(
+                scope,
+                request_id,
+                request_fingerprint,
+                recovery=recovery,
+            )
+            if persisted is not None:
+                return persisted
+            try:
+                result = self._execute(active, request_id, action, payload, prepared)
+            except Exception:
+                if recovery is not None:
+                    self.requests.mark_uncertain(scope, request_id, request_fingerprint)
+                raise
             self.requests.complete(scope, request_id, request_fingerprint, result)
             self._remember(key, request_fingerprint, result)
             return dict(result)
+
+    def deliveries(self, session_id: str) -> list[dict[str, Any]]:
+        return self.requests.deliveries(session_id)
+
+    def dismiss_delivery(self, session_id: str, request_id: str) -> bool:
+        return self.requests.dismiss_delivery(session_id, request_id)
+
+    @staticmethod
+    def _message_recovery(
+        session_id: str,
+        action: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        if action not in {"sendMessage", "followUp"}:
+            return None
+        return {
+            "kind": "message",
+            "sessionId": session_id,
+            "action": action,
+            "message": payload["message"],
+            "images": payload.get("images") or [],
+        }
 
     def _cached_result(
         self,
@@ -161,8 +196,18 @@ class TerminalCommandCoordinator:
                 )
             else:
                 adapter.send_message(payload["message"], images=payload.get("images"))
+            return {
+                "requestId": request_id,
+                "status": "accepted",
+                "acceptance": "accepted",
+            }
         elif action == "followUp":
             adapter.send_message(payload["message"], "followUp", images=payload.get("images"))
+            return {
+                "requestId": request_id,
+                "status": "accepted",
+                "acceptance": "accepted",
+            }
         elif action == "interrupt":
             adapter.interrupt()
         elif action == "shutdown":

@@ -20,6 +20,7 @@
   background: var(--panel-solid);
   color: var(--text);
 }
+.machine-picker-help { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
 .machine-status-list { min-width: 0; display: flex; flex-wrap: wrap; gap: 6px; }
 .machine-status {
   display: inline-flex;

@@ -126,46 +126,6 @@ async function refresh(machineId = null, options = {}) {
     .filter(id => !state.reloadRequiredMachines.has(id));
   await Promise.allSettled(targets.map(id => refreshNode(id, options)));
 }
-function machineStatusLabel(status) {
-  return {
-    connecting: 'Connecting',
-    live: 'Live',
-    offline: 'Offline',
-    unavailable: 'Access unavailable',
-  }[status] || 'Unavailable';
-}
-
-function renderMachineControls() {
-  const machines = ompDeckApi.machines();
-  const coordinatorMode = ompDeckApi.mode() === 'coordinator';
-  el['machine-panel'].hidden = !coordinatorMode;
-  const previous = state.selectedMachineId;
-  el['machine-select'].replaceChildren(...machines.map(machine =>
-    new Option(`${machine.name} — ${machineStatusLabel(machine.status)}`, machine.id)
-  ));
-  state.selectedMachineId = machines.some(machine => machine.id === previous)
-    ? previous
-    : machines[0]?.id || null;
-  el['machine-select'].value = state.selectedMachineId || '';
-  el['machine-select'].disabled = machines.length === 0;
-  const connectionTarget = machines.find(machine => machine.id === state.selectedMachineId);
-  document.getElementById('collab-label').textContent = `Writable Collab link${connectionTarget ? ` for ${connectionTarget.name}` : ''}`;
-  el['machine-status-list'].innerHTML = machines.length
-    ? machines.map(machine => `<span class="machine-status ${escapeHtml(machine.status)}" title="${escapeHtml(machine.error || `${machine.name} is ${machineStatusLabel(machine.status).toLowerCase()}`)}"><i aria-hidden="true"></i><strong>${escapeHtml(machine.name)}</strong> ${escapeHtml(machineStatusLabel(machine.status))}</span>`).join('')
-    : '<span class="machine-empty">No machines are enrolled.</span>';
-  const live = machines.filter(machine => machine.status === 'live').length;
-  if (coordinatorMode && state.coordinatorAvailable === false) {
-    el.connection.classList.add('offline');
-    el['connection-text'].textContent = 'Deck coordinator unavailable; machine access may expire';
-  } else {
-    el.connection.classList.toggle('offline', machines.length > 0 && live === 0);
-    el['connection-text'].textContent = coordinatorMode
-      ? `Deck connected · ${live}/${machines.length} machines reachable`
-      : (machines[0]?.status === 'live'
-        ? 'Deck connected'
-        : `Deck ${machineStatusLabel(machines[0]?.status).toLowerCase()}`);
-  }
-}
 
 function removeMachinePresentation(machineId) {
   stopNodeEventStream(machineId);

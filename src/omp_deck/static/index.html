@@ -60,8 +60,9 @@
     </section>
     <section class="machine-panel" id="machine-panel" aria-labelledby="machine-panel-title" hidden>
       <div class="machine-picker">
-        <label id="machine-panel-title" for="machine-select">Control machine</label>
-        <select id="machine-select" aria-describedby="machine-status-list" disabled></select>
+        <label id="machine-panel-title" for="machine-select">Target machine</label>
+        <select id="machine-select" aria-describedby="machine-picker-help machine-status-list" disabled></select>
+        <p class="machine-picker-help" id="machine-picker-help">New OMPs, Collab connections, and usage use this machine. Sessions below include all machines.</p>
       </div>
       <div class="machine-status-list" id="machine-status-list" role="status" aria-live="polite"></div>
       <div class="fleet-reload" id="fleet-reload" role="alert" hidden>
@@ -202,6 +203,7 @@
   <script src="/composer.js"></script>
   <script src="/deck-rendering.js"></script>
   <script src="/auth-bootstrap.js"></script>
+  <script src="/machine-controls.js"></script>
   <script src="/app.js"></script>
   <script src="/session-controls.js"></script>
   <script src="/launcher.js"></script>

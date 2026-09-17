@@ -1,5 +1,3 @@
-import base64
-import binascii
 import json
 import re
 import socket
@@ -9,7 +7,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from ._thinking import REQUEST_THINKING_LEVELS
-from .attachments import detect_image_mime
+from .attachments import validated_image_content
 from .auth import COOKIE_NAME
 
 
@@ -90,27 +88,20 @@ def message_payload(data, *, streaming_behavior=None):
     if not isinstance(message, str):
         raise ValueError("message must be text")
     message = message.strip()
-    if not message or len(message) > 4000:
-        raise ValueError("message must contain 1 to 4000 characters")
+    images = _image_payloads(data.get("attachments") or [])
+    if len(message) > 4000 or not (message or images):
+        raise ValueError("message must contain text or images and at most 4000 characters")
     return {
         "message": message,
         "streamingBehavior": streaming_behavior,
-        "images": _image_payloads(data.get("attachments") or []) or None,
+        "images": images or None,
     }
 
 
 def _image_payloads(attachments):
     if not isinstance(attachments, list) or len(attachments) > 4:
         raise ValueError("invalid attachments")
-    images = []
-    decoded_bytes = 0
-    for attachment in attachments:
-        image, byte_count = _decode_image(attachment)
-        decoded_bytes += byte_count
-        if decoded_bytes > 700 * 1024:
-            raise ValueError("image attachments exceed 700 KiB")
-        images.append(image)
-    return images
+    return validated_image_content([_decode_image(attachment) for attachment in attachments])
 
 
 def _decode_image(attachment):
@@ -124,13 +115,7 @@ def _decode_image(attachment):
     if not encoded.startswith(prefix):
         raise ValueError("invalid image attachment")
     payload = encoded[len(prefix) :]
-    try:
-        raw = base64.b64decode(payload, validate=True)
-    except (ValueError, binascii.Error):
-        raise ValueError("invalid image attachment") from None
-    if detect_image_mime(raw) != mime_type:
-        raise ValueError("invalid image attachment")
-    return {"type": "image", "data": payload, "mimeType": mime_type}, len(raw)
+    return {"type": "image", "data": payload, "mimeType": mime_type}
 
 
 def _valid_encoded_image(mime_type, encoded):

@@ -25,9 +25,11 @@ from ._extension_protocol import (
     _object,
     _Pending,
     parse_registration,
+    parse_response,
     parse_thinking_state,
     snapshot_from_data,
 )
+from .attachments import validated_image_content
 
 PROTOCOL = "omp-deck-fallback-v1"
 _MISSING = object()
@@ -180,12 +182,30 @@ class ExtensionAdapter:
             self._events.clear()
             return events
 
-    def send_message(self, message: str, streaming_behavior: str | None = None) -> Any:
-        if not isinstance(message, str) or not message or len(message.encode("utf-8")) > self._frame_limit // 2:
-            raise ValueError("message must be a non-empty bounded string")
+    def send_message(
+        self,
+        message: str,
+        streaming_behavior: str | None = None,
+        *,
+        images: Any = None,
+    ) -> Any:
+        normalized_images = validated_image_content(images)
+        if (
+            not isinstance(message, str)
+            or (not message and not normalized_images)
+            or len(message.encode("utf-8")) > self._frame_limit // 2
+        ):
+            raise ValueError("message content must be non-empty and bounded")
         if streaming_behavior not in (None, "steer", "followUp"):
             raise ValueError("streaming_behavior must be None, 'steer', or 'followUp'")
-        return self._request("followUp" if streaming_behavior == "followUp" else "sendMessage", message=message)
+        if normalized_images:
+            registration = self.registration
+            if registration is None or registration.capabilities.get("attachments") is not True:
+                raise ExtensionAdapterError("image attachments are unavailable")
+        fields: dict[str, Any] = {"message": message}
+        if normalized_images:
+            fields["images"] = normalized_images
+        return self._request("followUp" if streaming_behavior == "followUp" else "sendMessage", **fields)
 
     def interrupt(self) -> Any:
         return self._request("interrupt")
@@ -267,7 +287,13 @@ class ExtensionAdapter:
             self._pending[request_id] = pending
         frame = {"protocol": PROTOCOL, "type": "request", "id": request_id, "action": action, **fields}
         try:
-            self._send(frame)
+            encoded = self._encoded_frame(frame)
+        except Exception:
+            with self._state_lock:
+                self._pending.pop(request_id, None)
+            raise
+        try:
+            self._send_encoded(encoded)
         except Exception:
             with self._state_lock:
                 self._pending.pop(request_id, None)
@@ -285,15 +311,21 @@ class ExtensionAdapter:
             raise ExtensionAdapterError("extension rejected request")
         return response.get("result")
 
-    def _send(self, frame: Mapping[str, Any]) -> None:
+    def _encoded_frame(self, frame: Mapping[str, Any]) -> bytes:
         encoded = json.dumps(frame, separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\n"
         if len(encoded) > self._frame_limit:
             raise ValueError("request frame exceeds limit")
+        return encoded
+
+    def _send_encoded(self, encoded: bytes) -> None:
         with self._send_lock:
             sock = self._sock
             if sock is None:
                 raise OSError("closed")
             sock.sendall(encoded)
+
+    def _send(self, frame: Mapping[str, Any]) -> None:
+        self._send_encoded(self._encoded_frame(frame))
 
     def _read_frame(self) -> dict[str, Any]:
         while True:
@@ -407,24 +439,8 @@ class ExtensionAdapter:
             self._disconnect(reason)
 
     def _handle_response(self, frame: dict[str, Any]) -> None:
-        _exact_keys(frame, {"protocol", "type", "id", "ok"}, {"result", "error"}, "response")
-        request_id = frame["id"]
-        if (
-            frame["protocol"] != PROTOCOL
-            or frame["type"] != "response"
-            or not isinstance(request_id, str)
-            or not request_id
-            or type(frame["ok"]) is not bool
-        ):
-            raise ExtensionProtocolError("invalid response envelope")
-        if (
-            frame["ok"]
-            and "error" in frame
-            or not frame["ok"]
-            and ("result" in frame or not isinstance(frame.get("error"), str))
-        ):
-            raise ExtensionProtocolError("invalid response")
-        response = MappingProxyType({key: _immutable(value) for key, value in frame.items()})
+        response = parse_response(frame, PROTOCOL)
+        request_id = response["id"]
         with self._state_lock:
             pending = self._pending.pop(request_id, None)
             if pending is None:  # timeout, duplicate, or unsolicited response

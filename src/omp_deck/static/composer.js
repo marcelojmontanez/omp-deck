@@ -362,9 +362,8 @@ function createComposer({
       }
       return;
     }
-    const typedMessage = commandDraft.trim();
-    const message = typedMessage || (outgoingAttachments.length ? 'Files attached.' : '');
-    if (!message) return;
+    const message = commandDraft.trim();
+    if (!message && !outgoingAttachments.length) return;
     elements.message.focus({preventScroll: true});
     const retry = retryBatches.get(id);
     const retryAttachments = retry

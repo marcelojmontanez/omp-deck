@@ -151,6 +151,7 @@ class FakeExtensionAdapter:
         "interrupt": True,
         "shutdown": True,
         "todos": True,
+        "attachments": True,
         "subagents": True,
         "answerUiRequest": False,
         "setThinking": True,
@@ -207,8 +208,11 @@ class FakeExtensionAdapter:
         if type(self).fail_sync:
             raise RuntimeError("sync failed")
 
-    def send_message(self, message, behavior=None):
-        self.calls.append(("send_message", message, behavior))
+    def send_message(self, message, behavior=None, *, images=None):
+        if images is None:
+            self.calls.append(("send_message", message, behavior))
+        else:
+            self.calls.append(("send_message", message, behavior, images))
 
     def interrupt(self):
         self.calls.append(("interrupt",))
@@ -981,11 +985,12 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.assertNotIn(secret, repr(self.model.snapshot()))
         self.assertNotIn(secret, repr(manager.registry.load()))
 
-        manager.command(session_id, "m", "sendMessage", {"message": "hello", "images": [{"data": "AA"}]})
+        image = {"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"}
+        manager.command(session_id, "m", "sendMessage", {"message": "hello", "images": [image]})
         manager.command(session_id, "i", "interrupt", {})
         manager.command(session_id, "u", "respondToUi", {"requestId": "7", "value": {"ok": True}})
         manager.command(session_id, "c", "cancelUi", {"requestId": 8})
-        self.assertIn(("send_message", "hello", [{"data": "AA"}]), adapter.calls)
+        self.assertIn(("send_message", "hello", [image]), adapter.calls)
         self.assertIn(("interrupt",), adapter.calls)
         self.assertIn(("respond_ui", 7, '{"ok":true}'), adapter.calls)
         self.assertIn(("respond_ui", 8, None), adapter.calls)
@@ -1157,8 +1162,27 @@ class TerminalSessionManagerTests(unittest.TestCase):
         session_id, _, adapter = self.connect_extension(manager)
         manager.command(session_id, "send", "sendMessage", {"message": "now"})
         manager.command(session_id, "follow", "followUp", {"message": "later"})
+        manager.command(
+            session_id,
+            "send-as-follow",
+            "sendMessage",
+            {"message": "queued", "streamingBehavior": "followUp"},
+        )
         manager.command(session_id, "interrupt", "interrupt", {})
         manager.command(session_id, "shutdown", "shutdown", {})
+        image = {"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"}
+        manager.command(
+            session_id,
+            "image-only",
+            "sendMessage",
+            {"message": "", "images": [image]},
+        )
+        manager.command(
+            session_id,
+            "follow-image",
+            "followUp",
+            {"message": "inspect", "images": [image]},
+        )
         first_thinking = manager.command(session_id, "thinking", "setThinking", {"level": "low"})
         self.assertEqual(
             manager.command(session_id, "thinking", "setThinking", {"level": "low"}),
@@ -1168,13 +1192,42 @@ class TerminalSessionManagerTests(unittest.TestCase):
             manager.command(session_id, "thinking", "setThinking", {"level": "high"})
         self.assertIn(("send_message", "now", None), adapter.calls)
         self.assertIn(("send_message", "later", "followUp"), adapter.calls)
+        self.assertIn(("send_message", "queued", "followUp"), adapter.calls)
+        self.assertIn(("send_message", "", None, [image]), adapter.calls)
+        self.assertIn(("send_message", "inspect", "followUp", [image]), adapter.calls)
         self.assertIn(("interrupt",), adapter.calls)
         self.assertIn(("shutdown_session",), adapter.calls)
+        adapter.callback(
+            {
+                "sequence": 2,
+                "kind": "tool",
+                "data": {
+                    "phase": "start",
+                    "toolCallId": "ask-1",
+                    "toolName": "Ask",
+                },
+            }
+        )
+        ask_state = self.model.get(session_id)
+        self.assertTrue(ask_state["capabilities"]["attachments"])
+        self.assertFalse(ask_state["capabilities"]["answerUiRequest"])
+        self.assertEqual(ask_state["pendingUiRequest"]["kind"], "terminal_only")
+        adapter.callback(
+            {
+                "sequence": 3,
+                "kind": "tool",
+                "data": {
+                    "phase": "end",
+                    "toolCallId": "ask-1",
+                    "toolName": "Ask",
+                },
+            }
+        )
         self.assertEqual(adapter.calls.count(("set_thinking", "low")), 1)
         self.assertEqual(self.model.get(session_id)["thinking"], "low")
         adapter.callback(
             {
-                "sequence": 2,
+                "sequence": 4,
                 "kind": "heartbeat",
                 "data": {
                     "time": 1,
@@ -1195,12 +1248,13 @@ class TerminalSessionManagerTests(unittest.TestCase):
             "connection-1",
             MappingProxyType({"sendMessage": False, "followUp": False, "interrupt": False, "shutdown": False}),
         )
-        adapter._snapshot = ExtensionSnapshot(True, False, None, (), 2, "connected", None)
+        adapter._snapshot = ExtensionSnapshot(True, False, None, (), 4, "connected", None)
         manager.refresh_connected()
         legacy = self.model.get(session_id)
         self.assertIsNone(legacy["thinking"])
         self.assertEqual(legacy["thinkingLevels"], [])
         self.assertFalse(legacy["capabilities"]["setThinking"])
+        self.assertFalse(legacy["capabilities"]["attachments"])
         for index, action in enumerate(("sendMessage", "followUp", "interrupt", "shutdown", "setThinking")):
             payload = (
                 {"message": "x"}

@@ -8,6 +8,7 @@ import { authenticateNamedPipe } from "./named-pipe-auth.ts";
 import { BoundedSocketWriter } from "./bounded-writer.ts";
 import { BoundedEventQueue } from "./bounded-event-queue.ts";
 import { captureHistory, projectMessage, streamHistory } from "./history-sync.ts";
+import { deliverUserMessage } from "./image-content.ts";
 import { degradedSnapshot, readThinkingState, setThinking } from "./thinking-state.ts";
 const PROTOCOL = "omp-deck-fallback-v1";
 const MAX_LINE_BYTES = 1024 * 1024;
@@ -81,6 +82,7 @@ export default function ompDeck(pi: ExtensionAPI) {
         shutdown: true,
         todos: true,
         subagents: true,
+        attachments: true,
         setThinking: true,
         answerUiRequest: false,
         answer_ui_request: false,
@@ -213,11 +215,9 @@ export default function ompDeck(pi: ExtensionAPI) {
       switch (request.action) {
         case "sendMessage":
         case "followUp": {
-          if (typeof request.message !== "string" || request.message.length === 0 || Buffer.byteLength(request.message) > MAX_LINE_BYTES / 2) {
-            throw new Error("invalid message");
-          }
-          await pi.sendUserMessage(request.message, request.action === "followUp" ? { deliverAs: "followUp" } : undefined);
-          break;
+          const result = deliverUserMessage(pi, active, request);
+          await send(peer, { protocol: PROTOCOL, type: "response", id, ok: true, result });
+          return;
         }
         case "interrupt":
           active.abort();

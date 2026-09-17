@@ -20,6 +20,7 @@
   "files": [
     "omp-deck.ts",
     "named-pipe-auth.ts",
+    "image-content.ts",
     "bounded-writer.ts",
     "bounded-event-queue.ts",
     "history-sync.ts",

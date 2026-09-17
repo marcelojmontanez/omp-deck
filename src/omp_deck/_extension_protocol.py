@@ -105,6 +105,27 @@ def parse_thinking_state(data: Mapping[str, Any]) -> tuple[str | None, tuple[str
     return thinking, levels
 
 
+def parse_response(frame: dict[str, Any], protocol: str) -> Mapping[str, Any]:
+    _exact_keys(frame, {"protocol", "type", "id", "ok"}, {"result", "error"}, "response")
+    request_id = frame["id"]
+    if (
+        frame["protocol"] != protocol
+        or frame["type"] != "response"
+        or not isinstance(request_id, str)
+        or not request_id
+        or type(frame["ok"]) is not bool
+    ):
+        raise ExtensionProtocolError("invalid response envelope")
+    if (
+        frame["ok"]
+        and "error" in frame
+        or not frame["ok"]
+        and ("result" in frame or not isinstance(frame.get("error"), str))
+    ):
+        raise ExtensionProtocolError("invalid response")
+    return MappingProxyType({key: _immutable(value) for key, value in frame.items()})
+
+
 def parse_registration(frame: dict[str, Any], socket_path: str, protocol: str) -> ExtensionRegistration:
     required = {
         "protocol",
@@ -153,7 +174,7 @@ def parse_registration(frame: dict[str, Any], socket_path: str, protocol: str) -
         "answerUiRequest",
         "answer_ui_request",
     }
-    _exact_keys(caps, expected_caps, {"setThinking"}, "capabilities")
+    _exact_keys(caps, expected_caps, {"attachments", "setThinking"}, "capabilities")
     if any(type(value) is not bool for value in caps.values()):
         raise ExtensionProtocolError("invalid capabilities")
     try:

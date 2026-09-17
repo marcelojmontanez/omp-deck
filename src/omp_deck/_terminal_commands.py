@@ -78,6 +78,18 @@ class TerminalCommandCoordinator:
             }.get(action)
             if capability is None or not self.model.supports(session_id, capability):
                 raise ValueError("action is unavailable for this terminal transport")
+            if (
+                action == "sendMessage"
+                and payload.get("streamingBehavior") == "followUp"
+                and not self.model.supports(session_id, "followUp")
+            ):
+                raise ValueError("follow-up delivery is unavailable for this terminal transport")
+            if (
+                action in {"sendMessage", "followUp"}
+                and payload.get("images")
+                and not self.model.supports(session_id, "attachments")
+            ):
+                raise ValueError("image attachments are unavailable for this terminal transport")
             if action == "setThinking" and not self.model.supports_thinking_level(session_id, payload.get("level")):
                 raise ValueError("unsupported thinking level")
             active = runtime(session_id)
@@ -141,12 +153,16 @@ class TerminalCommandCoordinator:
     def _execute(self, active, request_id, action, payload, prepared):
         adapter = active.adapter
         if action == "sendMessage":
-            if active.kind == "collab":
-                adapter.send_message(payload["message"], images=payload.get("images"))
+            if active.kind == "extension":
+                adapter.send_message(
+                    payload["message"],
+                    payload.get("streamingBehavior"),
+                    images=payload.get("images"),
+                )
             else:
-                adapter.send_message(payload["message"])
+                adapter.send_message(payload["message"], images=payload.get("images"))
         elif action == "followUp":
-            adapter.send_message(payload["message"], "followUp")
+            adapter.send_message(payload["message"], "followUp", images=payload.get("images"))
         elif action == "interrupt":
             adapter.interrupt()
         elif action == "shutdown":

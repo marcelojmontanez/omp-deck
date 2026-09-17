@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -59,6 +60,12 @@ def thinking_registration(levels=("off", "low", "medium", "high", "xhigh")):
     value = registration()
     value["capabilities"]["setThinking"] = True
     value["thinkingLevels"] = list(levels)
+    return value
+
+
+def image_registration():
+    value = registration()
+    value["capabilities"]["attachments"] = True
     return value
 
 
@@ -155,6 +162,7 @@ class ExtensionAdapterTests(unittest.TestCase):
             self.assertIsNone(snapshot.thinking)
             self.assertEqual(snapshot.thinking_levels, ())
             self.assertNotIn("setThinking", got.capabilities)
+            self.assertNotIn("attachments", got.capabilities)
         finally:
             adapter.close()
             peer.close()
@@ -247,6 +255,72 @@ class ExtensionAdapterTests(unittest.TestCase):
         self.assertEqual(adapter.snapshot().thinking, "high")
         with self.assertRaisesRegex(ValueError, "unsupported"):
             adapter.set_thinking("max")
+
+    def test_image_messages_preserve_content_order_and_delivery_mode(self):
+        peer = self.make_peer((image_registration(), event()))
+        adapter = self.make_adapter(peer)
+        adapter.start()
+        png = {"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"}
+        results = []
+        threads = [
+            threading.Thread(target=lambda: results.append(adapter.send_message("", images=[png]))),
+            threading.Thread(target=lambda: results.append(adapter.send_message("inspect", "followUp", images=[png]))),
+        ]
+        for thread in threads:
+            thread.start()
+            self.addCleanup(self.stop_and_join, adapter, thread)
+        requests = [peer.read() for _ in threads]
+        by_action = {request["action"]: request for request in requests}
+        self.assertEqual(by_action["sendMessage"]["message"], "")
+        self.assertEqual(by_action["sendMessage"]["images"], [png])
+        self.assertEqual(by_action["followUp"]["message"], "inspect")
+        self.assertEqual(by_action["followUp"]["images"], [png])
+        for request in requests:
+            peer.send(response(request, result={"acceptance": "accepted"}))
+        for thread in threads:
+            thread.join(1)
+        self.assertEqual(results, [{"acceptance": "accepted"}, {"acceptance": "accepted"}])
+
+    def test_image_boundary_rejects_legacy_malformed_oversized_and_over_frame_content(self):
+        peer = self.make_peer((image_registration(), event()))
+        adapter = self.make_adapter(peer)
+        adapter.start()
+        png = {"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"}
+        legacy_peer = self.make_peer()
+        legacy = self.make_adapter(legacy_peer)
+        legacy.start()
+        with self.assertRaisesRegex(ExtensionAdapterError, "unavailable"):
+            legacy.send_message("", images=[png])
+        with self.assertRaisesRegex(ValueError, "invalid image"):
+            adapter.send_message(
+                "",
+                images=[{"type": "image", "data": "%%%", "mimeType": "image/png"}],
+            )
+        oversized = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * (700 * 1024)).decode()
+        with self.assertRaisesRegex(ValueError, "image"):
+            adapter.send_message(
+                "",
+                images=[{"type": "image", "data": oversized, "mimeType": "image/png"}],
+            )
+
+        constrained_peer = self.make_peer((image_registration(), event()))
+        constrained = self.make_adapter(constrained_peer, frame_limit=2048)
+        constrained.start()
+        near_frame = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * 800).decode()
+        with self.assertRaisesRegex(ValueError, "frame exceeds"):
+            constrained.send_message(
+                "x" * 900,
+                images=[{"type": "image", "data": near_frame, "mimeType": "image/png"}],
+            )
+        result = []
+        thread = threading.Thread(target=lambda: result.append(constrained.interrupt()))
+        thread.start()
+        self.addCleanup(self.stop_and_join, constrained, thread)
+        request = constrained_peer.read()
+        self.assertEqual(request["action"], "interrupt")
+        constrained_peer.send(response(request, result="still connected"))
+        thread.join(1)
+        self.assertEqual(result, ["still connected"])
 
     def test_set_thinking_does_not_overwrite_a_newer_event_with_a_stale_response(self):
         peer = self.make_peer((thinking_registration(), thinking_snapshot()))

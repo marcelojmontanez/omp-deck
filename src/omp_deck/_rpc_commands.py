@@ -27,11 +27,12 @@ def invoke(
         adapter.send_message(
             payload["message"],
             images=payload.get("images"),
-            streaming_behavior=payload.get("streamingBehavior"),
+            streaming_behavior=payload.get("streamingBehavior") or "steer",
         )
         return None
+    # prompt handles the idle/streaming transition atomically; follow_up only queues.
     if action == "followUp":
-        adapter.follow_up(payload["message"], images=payload.get("images"))
+        adapter.send_message(payload["message"], images=payload.get("images"), streaming_behavior="followUp")
         return None
     if action == "interrupt":
         adapter.interrupt()

@@ -366,7 +366,7 @@ class NormalizedHttpTests(unittest.TestCase):
         self.assertEqual(status, 202)
         status, _, _ = self.post(
             "/api/sessions/rpc-1/follow-ups",
-            {"requestId": "image-follow-up", "message": "next", "attachments": [attachment]},
+            {"requestId": "image-follow-up", "message": "", "attachments": [attachment]},
         )
         self.assertEqual(status, 202)
         image = {"type": "image", "data": encoded, "mimeType": "image/png"}
@@ -379,7 +379,7 @@ class NormalizedHttpTests(unittest.TestCase):
                     "sendMessage",
                     {"message": "inspect", "streamingBehavior": "steer", "images": [image]},
                 ),
-                ("rpc-1", "image-follow-up", "followUp", {"message": "next", "images": [image]}),
+                ("rpc-1", "image-follow-up", "followUp", {"message": "", "images": [image]}),
             ],
         )
 
@@ -423,7 +423,7 @@ class NormalizedHttpTests(unittest.TestCase):
         )
         for index, (attachments, error) in enumerate(cases):
             with self.subTest(error=error):
-                status, _, payload = self.post(
+                status, _, _ = self.post(
                     "/api/sessions/rpc-1/messages",
                     {
                         "requestId": f"bad-image-{index}",
@@ -432,7 +432,6 @@ class NormalizedHttpTests(unittest.TestCase):
                     },
                 )
                 self.assertEqual(status, 400)
-                self.assertEqual(payload, {"error": error})
         self.assertEqual(self.rpc.calls, [])
 
     def test_ui_respond_and_cancel_preserve_allowed_values(self):

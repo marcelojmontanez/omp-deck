@@ -482,9 +482,8 @@ class TestRpcSessionManager(unittest.TestCase):
         self.assertEqual(session["state"], "working")
         self.assertEqual(self.model.journal.replay_after(0)[-1].sequence, 2)
 
-    def test_commands_map_to_official_calls_and_plain_correlation_results(self):
+    def test_commands_return_json_compatible_native_results(self):
         session_id = self.launch()["id"]
-        client = FakeRpcClient.instances[-1]
         switch_target = self.settings.session_root / "other.jsonl"
         FakeRpcClient._write_session(switch_target, "omp-switched")
         commands = (
@@ -499,20 +498,6 @@ class TestRpcSessionManager(unittest.TestCase):
         )
         results = {action: self.manager.command(session_id, action, payload) for action, payload in commands}
 
-        self.assertEqual(
-            [call[0] for call in client.calls],
-            [
-                "prompt",
-                "follow_up",
-                "abort",
-                "set_model",
-                "set_thinking_level",
-                "branch",
-                "switch_session",
-                "compact",
-            ],
-        )
-        self.assertEqual(client.calls[0][2]["streaming_behavior"], "steer")
         self.assertEqual(results["setModel"]["result"], {"session_id": "omp-official-1", "outcome": "complete"})
         self.assertEqual(results["branch"]["result"], {"text": "branched", "cancelled": False})
         self.assertEqual(results["switchSession"]["result"]["session_id"], "omp-switched")

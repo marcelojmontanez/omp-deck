@@ -435,6 +435,9 @@ def extension_projection(
         if capability != "remove" and capability in registration.capabilities:
             capabilities[capability] = capabilities[capability] and bool(registration.capabilities[capability])
     capabilities["setThinking"] = thinking_control and bool(thinking_levels)
+    capabilities["attachments"] = (
+        registration.capabilities.get("attachments") is True and snapshot.transport_status == "connected"
+    )
     async_jobs = snapshot.async_jobs
     if isinstance(async_jobs, Mapping):
         async_jobs = async_jobs.get("jobs", [])

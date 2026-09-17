@@ -31,11 +31,13 @@ test('plugin events preserve sequence and synchronize active history', async () 
   const intervalCallbacks = [];
   const warnings = [];
   let thinking = 'high';
+  const sentUserMessages = [];
+  let idle = true;
   const pi = {
     pi: {VERSION: 'test'},
     logger: {warn(message, detail) { warnings.push([message, detail]); }},
     on(name, handler) { handlers.set(name, handler); },
-    async sendUserMessage() {},
+    sendUserMessage(content, options) { sentUserMessages.push({content, options}); },
     getThinkingLevel() { return thinking; },
     setThinkingLevel(level) { thinking = level; },
   };
@@ -60,7 +62,7 @@ test('plugin events preserve sequence and synchronize active history', async () 
         message,
       })),
     },
-    isIdle: () => true,
+    isIdle: () => idle,
     hasPendingMessages: () => false,
     getAsyncJobSnapshot: () => [],
     setTimeout(callback, delay) {
@@ -136,6 +138,64 @@ test('plugin events preserve sequence and synchronize active history', async () 
     assert.deepEqual(registration.thinkingLevels, ['off', 'low', 'medium', 'high', 'xhigh']);
     assert.equal(snapshot.data.thinking, 'high');
     assert.deepEqual(snapshot.data.thinkingLevels, registration.thinkingLevels);
+
+    assert.equal(registration.capabilities.attachments, true);
+    const png = {type: 'image', data: 'iVBORw0KGgo=', mimeType: 'image/png'};
+    socket.write(`${JSON.stringify({
+      protocol: 'omp-deck-fallback-v1',
+      type: 'request',
+      id: 'image-only',
+      action: 'sendMessage',
+      message: '',
+      images: [png],
+    })}\n`);
+    assert.deepEqual(JSON.parse((await frames.next()).value), {
+      protocol: 'omp-deck-fallback-v1',
+      type: 'response',
+      id: 'image-only',
+      ok: true,
+      result: {acceptance: 'accepted'},
+    });
+    assert.deepEqual(sentUserMessages.shift(), {content: [png], options: undefined});
+
+    socket.write(`${JSON.stringify({
+      protocol: 'omp-deck-fallback-v1',
+      type: 'request',
+      id: 'idle-follow-up',
+      action: 'followUp',
+      message: 'inspect',
+      images: [png],
+    })}\n`);
+    assert.equal(JSON.parse((await frames.next()).value).ok, true);
+    assert.deepEqual(sentUserMessages.shift(), {
+      content: [{type: 'text', text: 'inspect'}, png],
+      options: undefined,
+    });
+
+    idle = false;
+    socket.write(`${JSON.stringify({
+      protocol: 'omp-deck-fallback-v1',
+      type: 'request',
+      id: 'active-follow-up',
+      action: 'followUp',
+      message: 'later',
+    })}\n`);
+    assert.equal(JSON.parse((await frames.next()).value).ok, true);
+    assert.deepEqual(sentUserMessages.shift(), {
+      content: 'later',
+      options: {deliverAs: 'followUp'},
+    });
+
+    socket.write(`${JSON.stringify({
+      protocol: 'omp-deck-fallback-v1',
+      type: 'request',
+      id: 'invalid-image',
+      action: 'sendMessage',
+      message: '',
+      images: [{type: 'image', data: '%%%', mimeType: 'image/png'}],
+    })}\n`);
+    assert.equal(JSON.parse((await frames.next()).value).ok, false);
+    assert.equal(sentUserMessages.length, 0);
 
     socket.write(`${JSON.stringify({
       protocol: 'omp-deck-fallback-v1',

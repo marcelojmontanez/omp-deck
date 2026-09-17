@@ -1,9 +1,13 @@
+import base64
+import binascii
 import hashlib
 import os
 import re
 import stat
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 BLOB_ROOT = None
 _DIGEST = re.compile(r"[a-f0-9]{64}")
@@ -181,3 +185,43 @@ def detect_image_mime(data):
     if len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
         return "image/webp"
     return None
+
+
+_MAX_IMAGES = 4
+_MAX_IMAGE_BYTES = 700 * 1024
+_MAX_ENCODED_IMAGE_CHARS = ((_MAX_IMAGE_BYTES + 2) // 3) * 4
+
+
+def validated_image_content(images: Any) -> list[dict[str, str]]:
+    if images is None:
+        return []
+    if not isinstance(images, (list, tuple)) or len(images) > _MAX_IMAGES:
+        raise ValueError("invalid images")
+    normalized = []
+    decoded_bytes = 0
+    for value in images:
+        if not isinstance(value, Mapping) or set(value) != {"type", "data", "mimeType"}:
+            raise ValueError("invalid image")
+        data = value.get("data")
+        mime_type = value.get("mimeType")
+        if (
+            value.get("type") != "image"
+            or not isinstance(data, str)
+            or not data
+            or len(data) > _MAX_ENCODED_IMAGE_CHARS
+            or not isinstance(mime_type, str)
+            or len(mime_type) > 70
+            or not mime_type.startswith("image/")
+        ):
+            raise ValueError("invalid image")
+        try:
+            raw = base64.b64decode(data, validate=True)
+        except (ValueError, binascii.Error):
+            raise ValueError("invalid image") from None
+        decoded_bytes += len(raw)
+        if decoded_bytes > _MAX_IMAGE_BYTES:
+            raise ValueError("images exceed 700 KiB")
+        if detect_image_mime(raw) != mime_type:
+            raise ValueError("invalid image")
+        normalized.append({"type": "image", "data": data, "mimeType": mime_type})
+    return normalized

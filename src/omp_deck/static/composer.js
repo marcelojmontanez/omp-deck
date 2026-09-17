@@ -318,7 +318,6 @@ function createComposer({
     if (sessionId === id) {
       elements.message.value = loadDraft(id);
       renderAttachments();
-      elements.message.focus();
     }
     renderDetail();
   }
@@ -369,6 +368,7 @@ function createComposer({
     const typedMessage = commandDraft.trim();
     const message = typedMessage || (outgoingAttachments.length ? 'Files attached.' : '');
     if (!message) return;
+    elements.message.focus({preventScroll: true});
     const retry = retryBatches.get(id);
     const retryAttachments = retry
       ? mergeAttachments(...retry.jobs.map(job => job.outgoingAttachments))

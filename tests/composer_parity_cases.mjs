@@ -115,6 +115,32 @@ export async function verifyComposerParity(page) {
     assert.equal(explicitSend.path, `/api/sessions/${FIXTURE_ID}/messages`);
     assert.equal(explicitSend.body.message, 'Mobile draft');
 
+    await page.keyboard.type('Continue writing after Send');
+    assert.equal(await page.$eval('#message', input => input.value), 'Continue writing after Send',
+      'Sending must keep the composer ready for the next keystroke');
+    await page.evaluate(() => {
+      window.__composerFocusFailure = {request: ompDeckApi.request};
+      ompDeckApi.request = () => new Promise((_, reject) => {
+        window.__composerFocusFailure.reject = reject;
+      });
+    });
+    try {
+      await page.click('#send');
+      await page.waitForFunction(() => Boolean(window.__composerFocusFailure.reject));
+      await page.focus('#attach');
+      await page.evaluate(() => window.__composerFocusFailure.reject(new TypeError('Connection lost')));
+      await page.waitForFunction(() => document.getElementById('message').value === 'Continue writing after Send');
+      assert.equal(await page.evaluate(() => document.activeElement.id), 'attach',
+        'A delayed send failure must not steal focus from the gallery control');
+    } finally {
+      await page.evaluate(() => {
+        ompDeckApi.request = window.__composerFocusFailure.request;
+        delete window.__composerFocusFailure;
+        el.message.value = '';
+        el.message.dispatchEvent(new Event('input', {bubbles: true}));
+      });
+    }
+
     await page.click('#overflow-button');
     await page.keyboard.press('ArrowDown');
     await page.keyboard.press('Enter');

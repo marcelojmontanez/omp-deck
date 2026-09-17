@@ -120,7 +120,7 @@ The session light is green for connected managed RPC, amber for connected termin
 
 Drafts and selected images stay with their session when you switch conversations. Drafts and images remain memory-only: reloading, logging out, or clearing local data discards them.
 
-Use the image button to attach images and tap a thumbnail to preview it. The composer stays below the conversation; its text field grows to at most 130px. Enter inserts a newline on phones; desktop Enter sends, and Shift+Enter inserts a newline. History has a read-only notice instead of disabled composer controls.
+Use the image button to attach images and tap a thumbnail to preview it. Image uploads require an attachment-capable session: managed RPC or writable Collab. The terminal extension does not currently accept image uploads, so its image button remains disabled even when connected. The composer stays below the conversation; its text field grows to at most 130px. Enter inserts a newline on phones; desktop Enter sends, and Shift+Enter inserts a newline. Sending a message keeps the text field focused; a delayed delivery failure restores the draft without pulling focus away from another control. History has a read-only notice instead of disabled composer controls.
 
 Image downloads have an eight-second deadline, including the response body. A failed thumbnail offers **Retry**; returning to the browser or reconnecting also retries unavailable images. Downloaded images remain previewable in the selected conversation during a temporary outage. The local photo picker and supported draft attachments remain available offline, while sending waits for reconnection.
 

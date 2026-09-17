@@ -14,6 +14,7 @@
 - Enable capability-advertised terminal image uploads, including image-only messages, through the documented OMP extension API. Extension 1.3.3 requires an idle restart and resume of already-running terminal sessions.
 - Retain private, bounded message recovery receipts on the owning node for seven days, with explicit restore and dismissal after a browser reload or lost response. Older fingerprint-only records cannot recover message content.
 - Add explicit per-session Steer and Queue choices on capable working sessions, preserving the selected intent through delivery races and uncertain retries.
+- Show installed Deck build identities for the dashboard and enrolled machines in Deck settings, with an on-demand refresh.
 
 ### Changed
 
@@ -24,6 +25,7 @@
 - Identify a directly connected machine by its Deck address instead of `This machine`; preserve enrolled machine names.
 - Qualify stock OMP 18.2.1 on macOS, including managed restart/recovery and native shutdown. Report installed-version qualification separately from plugin presence; 18.2.0 remains unqualified.
 - Explain that Target machine controls new-session launches, terminal connections, and usage, while the session list remains fleet-wide.
+- Derive each Deck package version automatically from its committed source revision. Reject dirty or ambiguous builds, and preserve verified source identity through source-distribution rebuilds.
 
 ### Fixed
 

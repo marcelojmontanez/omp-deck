@@ -1,0 +1,3 @@
+include _build_backend.py
+include src/omp_deck/_build_identity.py
+include _source_manifest.json

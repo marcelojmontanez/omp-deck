@@ -11,7 +11,7 @@
 .launcher label { color: var(--muted); font-size: 12px; font-weight: 700; white-space: nowrap; }
 .launcher-fields { display: grid; gap: 6px; min-width: 0; }
 .launcher-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
-.launcher select, .launcher input, .launcher button, .collab-connect input, .collab-connect button {
+.launcher select, .launcher input, .launcher button, .collab-connect input, .settings-disclosure button {
   min-height: 44px;
   border: 1px solid var(--line-bright);
   border-radius: 10px;
@@ -20,13 +20,13 @@
   font: inherit;
 }
 .launcher select, .launcher input, .collab-connect input { min-width: 0; padding: 0 10px; }
-.launcher button, .collab-connect button { padding: 0 15px; color: var(--cyan); cursor: pointer; font-weight: 800; }
+.launcher button, .settings-disclosure button { padding: 0 15px; color: var(--cyan); cursor: pointer; font-weight: 800; }
 .launcher button:disabled { color: var(--muted); cursor: default; opacity: .6; }
 #launch-state { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
 #launch-state:empty, #collab-state:empty { display: none; }
-.collab-connect { min-width: 0; margin-bottom: 12px; }
-.collab-connect summary { min-height: 44px; padding: 12px 0; color: var(--cyan); cursor: pointer; font-size: 13px; font-weight: 700; }
-.collab-connect[open] { display: grid; gap: 8px; }
+.settings-disclosure { min-width: 0; margin-bottom: 12px; }
+.settings-disclosure summary { min-height: 44px; padding: 12px 0; color: var(--cyan); cursor: pointer; font-size: 13px; font-weight: 700; }
+.settings-disclosure[open] { display: grid; gap: 8px; }
 .collab-connect label { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .collab-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 #collab-state { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }

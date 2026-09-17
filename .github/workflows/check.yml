@@ -19,21 +19,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
       - uses: actions/setup-node@v4
         with:
           node-version: "22.14.0"
-      - name: Export tracked checkout
-        run: |
-          mkdir "$RUNNER_TEMP/omp-deck"
-          git archive HEAD | tar -x -C "$RUNNER_TEMP/omp-deck"
       - name: Install runtime dependencies
-        working-directory: ${{ runner.temp }}/omp-deck
         run: python3 -m pip install '.[dev]'
       - name: Run repository check
-        working-directory: ${{ runner.temp }}/omp-deck
         run: python3 tools/check.py
 
   windows-native:
@@ -44,6 +39,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -91,6 +87,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -119,16 +116,28 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python3 -m pip install build
+      - run: python3 -m pip install build 'packaging>=24' 'setuptools>=77.0.3'
       - name: Seed excluded plugin dependencies
         run: mkdir -p src/omp_deck/plugin/node_modules/injected && printf 'SHOULD_NOT_SHIP = True\n' > src/omp_deck/plugin/node_modules/injected/sentinel.py
       - run: python3 -m build
+      - name: Exercise immutable package identity
+        env:
+          OMP_DECK_PACKAGING_TESTS: "1"
+        run: python3 -m unittest tests.test_packaging_identity
       - name: Verify wheel contents
         run: python3 -c "import glob, zipfile; names = zipfile.ZipFile(glob.glob('dist/*.whl')[0]).namelist(); assert not [name for name in names if '/node_modules/' in name], names"
       - run: python3 -m pip install dist/*.whl
+      - name: Verify installed artifact identity
+        run: >-
+          python3 -c "import subprocess; import omp_deck;
+          revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip();
+          identity = omp_deck.build_identity();
+          assert identity == {'version': omp_deck.__version__, 'revision': revision}, identity;
+          assert omp_deck.__version__.endswith('+g' + revision), omp_deck.__version__"
       - run: omp-deck --help
       - name: Reinstall and uninstall wheel
         run: |
@@ -144,6 +153,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: "22.14.0"
@@ -162,6 +172,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: "22.14.0"

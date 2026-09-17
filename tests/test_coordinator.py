@@ -12,6 +12,7 @@ from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
+from omp_deck import build_identity
 from omp_deck.auth import AuthenticationFailed
 from omp_deck.coordinator_cli import run as run_coordinator
 from omp_deck.coordinator_server import CoordinatorContext, CoordinatorHandler, CoordinatorHTTPServer
@@ -247,7 +248,7 @@ class CoordinatorHTTPTests(unittest.TestCase):
                 response = connection.getresponse()
                 self.assertEqual(
                     (response.status, json.loads(response.read())),
-                    (200, {"mode": "coordinator", "authMode": "pairing"}),
+                    (200, {"mode": "coordinator", "authMode": "pairing", "build": build_identity()}),
                 )
             finally:
                 connection.close()
@@ -283,7 +284,9 @@ class CoordinatorHTTPTests(unittest.TestCase):
 
     def test_public_surface_discloses_neither_roster_nor_machine_csp(self):
         status, headers, payload = self.request("GET", "/api/client-config")
-        self.assertEqual((status, payload), (200, {"mode": "coordinator", "authMode": "pairing"}))
+        self.assertEqual(
+            (status, payload), (200, {"mode": "coordinator", "authMode": "pairing", "build": build_identity()})
+        )
         self.assertNotIn("workstation.example", headers["Content-Security-Policy"])
 
         status, headers, _ = self.request("GET", "/", parse_json=False)

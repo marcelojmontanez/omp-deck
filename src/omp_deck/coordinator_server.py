@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+from . import build_identity
 from ._http_common import DeckHttpHandler, ThreadingHTTPServer
 from .auth import AuthenticationFailed, AuthError, AuthManager, validate_auth_state
 from .auth_policy import AuthPolicy
@@ -90,7 +91,14 @@ class CoordinatorHandler(DeckHttpHandler):
             self._health()
             return
         if path == "/api/client-config":
-            self.reply(200, {"mode": "coordinator", "authMode": self.context.policy.mode})
+            self.reply(
+                200,
+                {
+                    "mode": "coordinator",
+                    "authMode": self.context.policy.mode,
+                    "build": build_identity(),
+                },
+            )
             return
         if self.handle_auth_get(path):
             return

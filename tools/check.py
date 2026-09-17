@@ -68,7 +68,7 @@ def check_text_files():
     return failures
 
 
-def run(command):
+def run(command, *, release=False):
     python_path = str(ROOT / "src")
     if os.environ.get("PYTHONPATH"):
         python_path += os.pathsep + os.environ["PYTHONPATH"]
@@ -76,6 +76,7 @@ def run(command):
         **os.environ,
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONPATH": python_path,
+        **({"OMP_DECK_PACKAGING_TESTS": "1"} if release else {}),
     }
     return subprocess.run(command, cwd=ROOT, env=environment).returncode
 
@@ -89,7 +90,9 @@ def check_javascript():
 
 def main():
     parser = argparse.ArgumentParser(description="Check repository contracts and optional release behavior")
-    parser.add_argument("--release", action="store_true", help="also require real-browser and OMP plugin checks")
+    parser.add_argument(
+        "--release", action="store_true", help="also require artifact, real-browser, and OMP plugin checks"
+    )
     arguments = parser.parse_args()
     failures = check_text_files()
     if failures:
@@ -97,14 +100,14 @@ def main():
         return 1
     python_sources = [path for path in MAINTAINED_SOURCES if Path(path).suffix == ".py"]
     checks = [
-        [sys.executable, "-m", "ruff", "check", "src", "tests", "tools"],
-        [sys.executable, "-m", "ruff", "format", "--check", "src", "tests", "tools"],
+        [sys.executable, "-m", "ruff", "check", "_build_backend.py", "src", "tests", "tools"],
+        [sys.executable, "-m", "ruff", "format", "--check", "_build_backend.py", "src", "tests", "tools"],
         [sys.executable, "-m", "py_compile", *python_sources],
         [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", "."],
         [sys.executable, "tools/metrics.py"],
     ]
     for command in checks:
-        if run(command):
+        if run(command, release=arguments.release):
             return 1
     status = check_javascript()
     if status or not arguments.release:

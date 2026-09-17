@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import build_identity
 from ._omp_version import installed_omp_version, omp_version_qualification
 from ._terminal_discovery import discover_extension_candidates
 from .auth import AuthManager, validate_auth_state
@@ -376,6 +377,8 @@ def main(argv=None):
     from . import coordinator_cli, fleet_cli
 
     parser = argparse.ArgumentParser(prog="omp-deck")
+    build = build_identity()
+    parser.add_argument("--version", action="version", version=f"OMP Deck {build['version']} ({build['revision']})")
     commands = parser.add_subparsers(dest="command", required=True)
     coordinator_cli.add_parser(commands)
     fleet_cli.add_parser(commands)

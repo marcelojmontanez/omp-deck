@@ -5,6 +5,7 @@ import threading
 import unittest
 from pathlib import Path
 
+from omp_deck import build_identity
 from omp_deck.coordinator_server import CoordinatorContext, CoordinatorHTTPServer
 from omp_deck.coordinator_settings import CoordinatorSettings
 from omp_deck.fleet_protocol import verify_ticket
@@ -51,7 +52,9 @@ class CoordinatorTailscaleHTTPTests(unittest.TestCase):
         browser = {**identity, "Origin": self.origin, "Sec-Fetch-Site": "same-origin"}
 
         status, _, config = self.request("GET", "/api/client-config")
-        self.assertEqual((status, config), (200, {"mode": "coordinator", "authMode": "tailscale"}))
+        self.assertEqual(
+            (status, config), (200, {"mode": "coordinator", "authMode": "tailscale", "build": build_identity()})
+        )
         self.assertNotIn("owner@example.com", json.dumps(config))
         status, headers, login = self.request("POST", "/api/auth/tailscale", {}, browser)
         self.assertEqual(status, 200)

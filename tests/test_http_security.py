@@ -400,15 +400,19 @@ class HttpSecurityTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertIsNone(headers.get("Set-Cookie"))
 
-    def test_client_config_publishes_auth_mode_without_owner_identity(self):
+    def test_client_config_publishes_build_without_owner_identity(self):
         status, _, payload = self.request("GET", "/api/client-config")
-        self.assertEqual((status, payload), (200, {"mode": "local", "authMode": "pairing"}))
+        self.assertEqual(
+            (status, payload), (200, {"mode": "local", "authMode": "pairing", "build": server.build_identity()})
+        )
 
         self.settings.auth_mode = "tailscale"
         self.settings.tailscale_user = "private-owner@example.com"
         status, _, payload = self.request("GET", "/api/client-config")
 
-        self.assertEqual((status, payload), (200, {"mode": "local", "authMode": "tailscale"}))
+        self.assertEqual(
+            (status, payload), (200, {"mode": "local", "authMode": "tailscale", "build": server.build_identity()})
+        )
         self.assertNotIn("private-owner@example.com", json.dumps(payload))
 
     def test_invalid_host_is_rejected_before_static_or_api_access(self):

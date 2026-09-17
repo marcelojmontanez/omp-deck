@@ -1,10 +1,11 @@
 [build-system]
-requires = ["setuptools>=77.0.3"]
-build-backend = "setuptools.build_meta"
+requires = ["packaging>=24", "setuptools>=77.0.3"]
+build-backend = "_build_backend"
+backend-path = ["."]
 
 [project]
 name = "omp-deck"
-version = "1.4.0"
+dynamic = ["version"]
 description = "Local-first mobile control plane for OMP sessions"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -30,7 +31,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-dev = ["ruff>=0.13"]
+dev = ["build>=1.2,<2", "packaging>=24", "ruff>=0.13", "setuptools>=77.0.3"]
 
 [project.urls]
 Homepage = "https://github.com/marcelojmontanez/omp-deck"
@@ -50,6 +51,9 @@ exclude = ["omp_deck.plugin.node_modules*"]
 
 [tool.setuptools.package-data]
 omp_deck = ["static/*", "plugin/*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "omp_deck._build_identity.VERSION" }
 
 [tool.ruff]
 line-length = 120

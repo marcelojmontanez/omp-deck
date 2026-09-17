@@ -172,7 +172,7 @@
   </dialog>
   <dialog class="deck-dialog" id="deck-settings" aria-labelledby="deck-settings-title">
     <header><h2 id="deck-settings-title">Deck settings</h2><button type="button" data-close-dialog aria-label="Close Deck settings">×</button></header>
-      <details class="collab-connect">
+      <details class="collab-connect settings-disclosure">
         <summary>Connect a terminal</summary>
         <label id="collab-label" for="collab-link">Writable Collab link</label>
         <div class="collab-controls">
@@ -181,6 +181,12 @@
         </div>
         <span id="collab-state" role="status" aria-live="polite"></span>
       </details>
+    <details class="settings-disclosure" id="deck-builds">
+      <summary>Installed Deck versions</summary>
+      <dl id="deck-build-list"></dl>
+      <p id="deck-build-status" role="status" aria-live="polite"></p>
+      <button id="deck-build-refresh" type="button">Refresh versions</button>
+    </details>
     <div class="settings-actions">
       <button type="button" data-clear-local-data>Clear local drafts</button>
       <button type="button" data-session-action="logout">Log out this device</button>
@@ -196,6 +202,7 @@
   <script src="/browser-network.js"></script>
   <script src="/session-routing.js"></script>
   <script src="/fleet-access.js"></script>
+  <script src="/client-config.js"></script>
   <script src="/api.js"></script>
   <script src="/image-loader.js"></script>
   <script src="/markdown.js"></script>
@@ -217,5 +224,6 @@
   <script src="/session-controls.js"></script>
   <script src="/launcher.js"></script>
   <script src="/image-viewer.js"></script>
+  <script src="/build-info.js"></script>
 </body>
 </html>

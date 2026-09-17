@@ -10,6 +10,7 @@
   let authGeneration = 0, sessionGeneration = 0;
   let mode = null;
   let authMode = null;
+  let build = null;
   let modeRequest = null;
   let renewalPromise = null, renewalController = null;
   let renewalTimer = null, expiryTimer = null;
@@ -84,6 +85,8 @@
     });
   }
 
+  const {parseBuild} = ompDeckClientConfig;
+
   async function ensureMode(options = {}) {
     if (mode) return mode;
     if (!modeRequest || modeRequest.signal?.aborted) {
@@ -99,15 +102,10 @@
         if (request.signal?.aborted || modeRequest !== request) {
           throw new DOMException('Client configuration request is stale', 'AbortError');
         }
-        const configuredAuthMode = payload?.authMode === undefined ? 'pairing' : payload.authMode;
-        if (
-          !payload || !['local', 'coordinator'].includes(payload.mode)
-          || !['pairing', 'tailscale'].includes(configuredAuthMode)
-        ) {
-          throw new Error('Invalid client configuration');
-        }
-        mode = payload.mode;
-        authMode = configuredAuthMode;
+        const configured = ompDeckClientConfig.parse(payload);
+        mode = configured.mode;
+        authMode = configured.authMode;
+        build = configured.build;
         if (mode === 'local') {
           initializeLocalMachine();
           notifyMachines();
@@ -472,6 +470,8 @@
     ensureMode,
     mode: () => mode,
     authMode: () => authMode,
+    build: () => build,
+    parseBuild,
     initializeFleet,
     authenticated: () => authenticated,
     renewAccess,

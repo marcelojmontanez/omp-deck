@@ -4,6 +4,7 @@ import re
 import threading
 from urllib.parse import urlparse, urlsplit
 
+from . import build_identity
 from ._fleet_trust import FleetTrustStore
 from ._http_common import DeckHttpHandler
 from ._http_common import ThreadingHTTPServer as ThreadingHTTPServer
@@ -343,7 +344,14 @@ class Handler(DeckHttpHandler):
             )
             return
         if request_path == "/api/client-config":
-            self.reply(200, {"mode": "local", "authMode": SETTINGS.auth_mode})
+            self.reply(
+                200,
+                {
+                    "mode": "local",
+                    "authMode": SETTINGS.auth_mode,
+                    "build": build_identity(),
+                },
+            )
             return
         if request_path.startswith("/api/auth/") and self.headers.get_all("Authorization", []):
             self.reply(403, {"error": "fleet authorization is not allowed for local authentication"})

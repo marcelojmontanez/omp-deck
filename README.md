@@ -447,6 +447,14 @@ uv tool uninstall omp-deck
 # or: pipx uninstall omp-deck
 ```
 
+### Automatic build identities
+
+There is no manual version bump for each update. Committed sources produce `1.5.N+gREVISION`, where `N` is the number of commits since the recorded release baseline and `REVISION` is the full Git commit ID. New commits on main increase the version; rebuilding the same sources keeps the same identity. Tags do not control it. `omp-deck --version` reports the installed identity, and **Deck settings → Installed Deck versions** checks the dashboard and enrolled machines on demand, showing differing builds without assuming they are incompatible.
+
+The package build backend enforces this for ordinary pip, uv, wheel, and source-distribution builds—not only CI. It refuses incomplete Git history, dirty source (including edits hidden by Git index flags), untracked or ignored package inputs, symlinked source, and identity overrides. Builds use a fresh staging directory, verify its bytes against the committed source, and reject prepared metadata from another revision. A source distribution carries a content manifest; changed source or injected package files are rejected when building its wheel. This detects accidental source/identity mismatches, not a malicious publisher who rewrites the build system and manifest.
+
+Build from a clean full checkout with `python3 -m build`, or from an unchanged source distribution. Editable installations are rejected; use `PYTHONPATH=src` to run changing source directly. An unbuilt checkout identifies itself as `0+unbuilt` with its revision unavailable, never as a previously installed release. Install development dependencies from a clean checkout before editing. Keep the exact previous wheel for rollback; older installations that report only `1.4.0` cannot be distinguished by that old version label alone.
+
 ## Regression verification
 
 In a development virtual environment, install the prerequisites and run the complete release gate:
@@ -459,7 +467,7 @@ npm --prefix src/omp_deck/plugin ci
 python3 tools/check.py --release
 ```
 
-`--release` requires the repository checks, actual Chromium scenarios, and extension checks to pass. Missing browser or plugin prerequisites fail the command; they are not silently skipped. `python3 tools/check.py` alone remains the repository-only gate. CI uses the complete release command.
+`--release` requires the repository checks, isolated package-identity regression builds, actual Chromium scenarios, and extension checks to pass. Missing prerequisites fail the command; they are not silently skipped. `python3 tools/check.py` alone remains the repository-only gate. CI uses the complete release command.
 
 Browser regressions exercise persistent-cookie expiry and process restart, failed and superseded startup reads, resume-time stream replacement, stale responses, forbidden mutations without logout or resend, per-machine outage isolation, fragmented events, newest-first messages, mobile Enter as newline, quoted Markdown attribute safety, and keyboard focus during live session updates. These contracts protect the tested behaviors; they do not certify every Android/Brave eviction policy or every historical UX request.
 

@@ -897,9 +897,10 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     selectAgent(active.id, {pushHistory: false});
     const originalRequest = ompDeckApi.request;
     let composerPath = null;
-    ompDeckApi.request = async path => {
+    ompDeckApi.request = async (path, options) => {
+      if (path.endsWith('/deliveries')) return {ok: true, json: async () => ({version: 1, deliveries: []})};
       composerPath = path;
-      return {ok: true, status: 202, json: async () => ({})};
+      return {ok: true, status: 202, json: async () => ({requestId: JSON.parse(options.body).requestId, status: 'accepted', acceptance: 'accepted'})};
     };
     el.message.value = 'Control channel still works';
     el.composer.requestSubmit();
@@ -991,14 +992,14 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       executionState: 'idle',
       inboxState: 'read',
       bridgeConnected: true,
-      capabilities: {sendMessage: true, followUp: true},
+      capabilities: {sendMessage: true, followUp: true, attachments: true},
       transport: {kind: 'rpc', status: 'connected', label: 'RPC'},
       subagents: [],
       session: {activity: [], todo: '', updatedMs: Date.now()},
     };
     state.agents = [agent];
     selectAgent(agent.id, {pushHistory: false});
-    const response = {ok: true, status: 202, json: async () => ({})};
+    const response = options => ({ok: true, status: 202, json: async () => ({requestId: JSON.parse(options.body).requestId, status: 'accepted', acceptance: 'accepted'})});
     const submit = message => {
       document.getElementById('message').value = message;
       document.getElementById('composer').requestSubmit();
@@ -1022,14 +1023,15 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     try {
       const routes = [];
       let releaseFirst;
-      ompDeckApi.request = path => {
+      ompDeckApi.request = (path, options) => {
+        if (path.endsWith('/deliveries')) return Promise.resolve({ok: true, json: async () => ({version: 1, deliveries: []})});
         routes.push(path);
         if (routes.length === 1) {
           return new Promise(resolve => {
-            releaseFirst = () => resolve(response);
+            releaseFirst = () => resolve(response(options));
           });
         }
-        return Promise.resolve(response);
+        return Promise.resolve(response(options));
       };
       submit('first');
       await waitUntil(() => Boolean(releaseFirst), 'first request');
@@ -1044,6 +1046,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       const failedRequests = [];
       let rejectFirst;
       ompDeckApi.request = (path, options) => {
+        if (path.endsWith('/deliveries')) return Promise.resolve({ok: true, json: async () => ({version: 1, deliveries: []})});
         failedRequests.push({path, body: JSON.parse(options.body)});
         return new Promise((resolve, reject) => {
           rejectFirst = reject;
@@ -1060,8 +1063,9 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       const restoredDraft = document.getElementById('message').value;
       const retryRequests = [];
       ompDeckApi.request = (path, options) => {
+        if (path.endsWith('/deliveries')) return Promise.resolve({ok: true, json: async () => ({version: 1, deliveries: []})});
         retryRequests.push({path, body: JSON.parse(options.body)});
-        return Promise.resolve(response);
+        return Promise.resolve(response(options));
       };
       submit(restoredDraft);
       await waitUntil(() => retryRequests.length === 2, 'safe request retry');
@@ -1078,7 +1082,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   });
   assert.deepEqual(queueBehavior.routes, [
     '/api/sessions/queue-session/messages',
-    '/api/sessions/queue-session/follow-ups',
+    '/api/sessions/queue-session/messages',
   ]);
   assert.deepEqual(
     queueBehavior.failedRequests.map(request => request.path),
@@ -1121,9 +1125,9 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       el.composer.requestSubmit();
     };
     try {
-      ompDeckApi.request = async () => (
-        {ok: true, status: 202, json: async () => ({})}
-      );
+      ompDeckApi.request = async (path, options) => path.endsWith('/deliveries')
+        ? {ok: true, json: async () => ({version: 1, deliveries: []})}
+        : {ok: true, status: 202, json: async () => ({requestId: JSON.parse(options.body).requestId, status: 'accepted', acceptance: 'accepted'})};
       submit('duplicate');
       submit('duplicate');
       await new Promise(resolve => setTimeout(resolve, 0));
@@ -1179,11 +1183,11 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   });
   assert.deepEqual(echoReconciliation, {
     afterOld: 2,
-    afterOne: 1,
-    afterRepeatedSnapshot: 1,
-    afterTwo: 0,
-    afterTruncationWithoutEcho: 1,
-    afterDeliveredEcho: 0,
+    afterOne: 2,
+    afterRepeatedSnapshot: 2,
+    afterTwo: 2,
+    afterTruncationWithoutEcho: 3,
+    afterDeliveredEcho: 3,
   });
 
   const clearedQueue = await page.evaluate(async () => {
@@ -1196,7 +1200,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     composer.select(agent.id);
     const routes = [];
     let releaseFirst;
-    const response = {ok: true, status: 202, json: async () => ({})};
+    const response = options => ({ok: true, status: 202, json: async () => ({requestId: JSON.parse(options.body).requestId, status: 'accepted', acceptance: 'accepted'})});
     const waitUntil = async predicate => {
       const deadline = Date.now() + 1000;
       while (!predicate()) {
@@ -1205,14 +1209,15 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       }
     };
     try {
-      ompDeckApi.request = path => {
+      ompDeckApi.request = (path, options) => {
+        if (path.endsWith('/deliveries')) return Promise.resolve({ok: true, json: async () => ({version: 1, deliveries: []})});
         routes.push(path);
         if (routes.length === 1) {
           return new Promise(resolve => {
-            releaseFirst = () => resolve(response);
+            releaseFirst = () => resolve(response(options));
           });
         }
-        return Promise.resolve(response);
+        return Promise.resolve(response(options));
       };
       document.getElementById('message').value = 'in flight';
       document.getElementById('composer').requestSubmit();
@@ -1287,6 +1292,11 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   assert.equal(clearedAttachmentRead.rendered, 0);
 
   const concurrentAttachments = await page.evaluate(async () => {
+    const originalAgents = state.agents;
+    const originalSelection = state.selectedId;
+    state.agents = [...originalAgents, ...['attachment-limit-session', 'other-attachment-session'].map(id => ({
+      id, lifecycle: 'ongoing', capabilities: {attachments: true},
+    }))];
     const OriginalFileReader = globalThis.FileReader;
     const originalCreateObjectURL = URL.createObjectURL;
     const readers = [];
@@ -1356,6 +1366,8 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       };
     } finally {
       composer.clearLocalData();
+      state.agents = originalAgents;
+      composer.select(originalSelection);
       globalThis.FileReader = OriginalFileReader;
       URL.createObjectURL = originalCreateObjectURL;
     }

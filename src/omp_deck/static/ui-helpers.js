@@ -7,10 +7,6 @@ function thinkingLevel(agent) {
 function thinkingChoices(agent) {
   return Array.isArray(agent?.session?.thinkingLevels) ? agent.session.thinkingLevels : [];
 }
-function composerDeliveryRoute(agent) {
-  const status = agent?.executionState || agent?.status || 'idle';
-  return status === 'working' && agent.capabilities?.followUp ? 'follow-ups' : 'messages';
-}
 
 
 async function drainComposerQueue(queue, deliver, restore) {
@@ -72,6 +68,25 @@ function eventAttachments(event) {
     return `<div class="attachment-count">▧ ${event.attachments} file${event.attachments === 1 ? '' : 's'}</div>`;
   }
   return '';
+}
+
+function deliveryEvent(item) {
+  const labels = {
+    submitting: 'Submitting', uncertain: 'Delivery uncertain',
+    accepted: 'Accepted · receipt', failed: 'Not sent',
+    cancelled: 'Cancelled', stale: 'Stale',
+  };
+  return {
+    kind: 'user pending', title: `You · ${labels[item.state] || 'Delivery uncertain'}`,
+    detail: item.text, time: new Date(item.createdAt).toISOString(),
+    attachments: item.attachments, deliveryId: item.id, deliveryState: item.state,
+  };
+}
+
+function deliveryControls(event) {
+  if (!event.deliveryId || event.deliveryState === 'submitting') return '';
+  const id = escapeHtml(event.deliveryId);
+  return `<div class="delivery-controls"><span>Receipt only; check the conversation before sending again.</span><button type="button" data-delivery-action="restore" data-delivery-id="${id}">Restore draft</button><button type="button" data-delivery-action="dismiss" data-delivery-id="${id}">Dismiss receipt</button></div>`;
 }
 
 function syncVisualViewport() {

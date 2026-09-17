@@ -20,7 +20,6 @@ function createComposer({
   const retryBatches = new Map();
   const revokedAttachmentUrls = new Set();
   const queueTokens = new Map();
-  const reconciledMessageIds = new Map();
   const attachmentReaders = new Set();
   const attachmentReservations = new Map();
   let sessionId = null;
@@ -36,27 +35,38 @@ function createComposer({
     showToast,
     hasAttachments: () => attachmentsFor(sessionId).length > 0,
   });
-
-  function queueToken(id) {
-    if (!queueTokens.has(id)) queueTokens.set(id, {});
-    return queueTokens.get(id);
-  }
-
-  function reconciledIdsFor(id) {
-    if (!reconciledMessageIds.has(id)) reconciledMessageIds.set(id, new Set());
-    return reconciledMessageIds.get(id);
-  }
-
+  const queueToken = id => queueTokens.get(id) || queueTokens.set(id, {}).get(id);
+  const recovery = createComposerRecovery({
+    elements,
+    selectedAgent,
+    pendingFor,
+    loadDraft,
+    saveDraft,
+    attachmentsFor,
+    setAttachments: (id, items) => attachments.set(id, items),
+    mergeAttachments: mergeComposerAttachments,
+    revokeAttachment,
+    deliveryState: setComposerDeliveryState,
+    renderAttachments,
+    touchRender,
+    renderDetail,
+    dismissRetryBatch: (id, requestId) => retryBatches.get(id)?.jobs.some(job => job.pending?.id === requestId) && retryBatches.delete(id),
+    queueToken,
+    setRetryBatch: (id, value) => {
+      if (value) retryBatches.set(id, {...value, revision: commands.revision({id})});
+      else retryBatches.delete(id);
+    },
+    dataGeneration: () => dataGeneration,
+    selectedSessionId: () => sessionId,
+  });
   function saveDraft(id, value) {
     if (!id) return;
     if (value) drafts.set(id, value);
     else drafts.delete(id);
   }
-
   function loadDraft(id) {
     return id ? drafts.get(id) || '' : '';
   }
-
   function clearLocalData() {
     dataGeneration += 1;
     for (const reader of attachmentReaders) reader.abort();
@@ -73,34 +83,21 @@ function createComposer({
     pendingMessages.clear();
     outboundQueues.clear();
     retryBatches.clear();
-    queueTokens.clear();
-    reconciledMessageIds.clear();
+    recovery.clear();
     elements['send-state'].textContent = '';
     renderAttachments();
     commands.clear();
     touchRender();
   }
-
   function attachmentsFor(id) {
     if (!id) return [];
     if (!attachments.has(id)) attachments.set(id, []);
     return attachments.get(id);
   }
-
   function pendingFor(id) {
     if (!pendingMessages.has(id)) pendingMessages.set(id, []);
     return pendingMessages.get(id);
   }
-
-  function mergeAttachments(...groups) {
-    const seen = new Set();
-    return groups.flatMap(group => Array.isArray(group) ? group : []).filter(attachment => {
-      if (!attachment?.url || seen.has(attachment.url)) return false;
-      seen.add(attachment.url);
-      return true;
-    });
-  }
-
   function revokeAttachment(attachment) {
     if (!attachment?.url || revokedAttachmentUrls.has(attachment.url)) return;
     const viewerImage = document.getElementById('image-viewer-image');
@@ -158,6 +155,11 @@ function createComposer({
   async function addAttachments(files) {
     const generation = dataGeneration;
     const targetSessionId = sessionId;
+    const target = state.agents.find(agent => agent.id === targetSessionId);
+    if (!target?.capabilities?.attachments || target.lifecycle !== 'ongoing') {
+      showToast('Image attachments are unavailable for this session.', 'error');
+      return;
+    }
     const current = attachmentsFor(sessionId);
     const incoming = [...files];
     if (incoming.some(file => !file.type.startsWith('image/'))) {
@@ -203,44 +205,6 @@ function createComposer({
     current.push(...loaded);
     if (sessionId === targetSessionId) renderAttachments();
   }
-
-  function reconcile(agent) {
-    const pending = pendingMessages.get(agent.id);
-    if (!pending?.length) return;
-    const users = (agent.session?.activity || []).filter(event => event.kind === 'user');
-    const reconciledIds = reconciledIdsFor(agent.id);
-    const delivered = [];
-    const remaining = [];
-    for (let pendingIndex = 0; pendingIndex < pending.length; pendingIndex += 1) {
-      const item = pending[pendingIndex];
-      const baselineIndex = item.baselineMessageId
-        ? users.findIndex(event => event.id === item.baselineMessageId)
-        : -1;
-      const available = item.baselineMessageId && baselineIndex >= 0
-        ? users.slice(baselineIndex + 1)
-        : users;
-      const echo = available.find(event =>
-        !item.knownMessageIds.has(event.id)
-        && !reconciledIds.has(event.id)
-        && event.detail === item.text
-      );
-      if (!echo) {
-        remaining.push(...pending.slice(pendingIndex));
-        break;
-      }
-      reconciledIds.add(echo.id);
-      if (reconciledIds.size > 1000) {
-        reconciledIds.delete(reconciledIds.values().next().value);
-      }
-      delivered.push(item);
-    }
-    if (delivered.length) {
-      delivered.flatMap(item => item.attachments).forEach(revokeAttachment);
-      pendingMessages.set(agent.id, remaining);
-      touchRender();
-    }
-  }
-
   async function deliver(job) {
     const {
       id, message, outgoingAttachments, pending, generation, token,
@@ -252,65 +216,86 @@ function createComposer({
       error.reuseRequestId = false;
       throw error;
     }
-    const route = composerDeliveryRoute(agent);
-    const response = await ompDeckApi.request(`/api/sessions/${encodeURIComponent(id)}/${route}`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        requestId: pending?.id || requestId(),
-        message,
-        attachments: outgoingAttachments.map(({name, type, data}) => ({name, type, data})),
-      }),
-    });
+    job.attempted = true;
+    const suffix = job.action === 'followUp' ? 'follow-ups' : 'messages';
+    const {response, payload: body} = await ompDeckNetwork.fetchJsonBounded(
+      `/api/sessions/${encodeURIComponent(id)}/${suffix}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          requestId: pending?.id || requestId(),
+          message,
+          attachments: outgoingAttachments.map(({name, type, data}) => ({name, type, data})),
+        }),
+      }, 15_000, ompDeckApi.request,
+    );
     if (generation !== dataGeneration || queueTokens.get(id) !== token) return;
+    const payload = body || {};
     if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      const error = new Error(payload.error || `Send failed (${response.status})`);
+      const error = new Error(payload.error || (
+        payload.status === 'uncertain'
+          ? 'Delivery outcome is uncertain'
+          : `Send failed (${response.status})`
+      ));
       error.reuseRequestId = ompDeckApi.shouldReuseRequestId(response, payload);
       throw error;
     }
-    if (pending) {
-      pending.accepted = true;
-      touchRender();
-      renderDetail();
+    if (
+      payload.requestId !== pending?.id
+      || payload.status !== 'accepted'
+      || payload.acceptance !== 'accepted'
+    ) {
+      const error = new Error('Server did not confirm message acceptance');
+      error.reuseRequestId = true;
+      throw error;
     }
+    setComposerDeliveryState(pending, payload.acceptance);
+    if (sessionId === id) elements['send-state'].textContent = 'Accepted';
+    touchRender();
+    if (sessionId === id) elements['send-state'].className = 'send-state ok';
+    renderDetail();
   }
 
   function restoreUndelivered(jobs, error) {
     const active = jobs.filter(job =>
       job.generation === dataGeneration
       && queueTokens.get(job.id) === job.token
+      && job.pending?.state !== 'accepted'
     );
     if (!active.length) return;
     const id = active[0].id;
+    const uncertain = error.reuseRequestId !== false && active.some(job => job.attempted);
     const pendingIds = new Set(active.map(job => job.pending?.id).filter(Boolean));
-    pendingMessages.set(
-      id,
-      pendingFor(id).filter(item => !pendingIds.has(item.id)),
-    );
+    if (uncertain) {
+      for (const job of active) setComposerDeliveryState(job.pending, job.attempted ? 'uncertain' : 'failed');
+    } else {
+      pendingMessages.set(
+        id,
+        pendingFor(id).filter(item => !pendingIds.has(item.id)),
+      );
+    }
     const currentDraft = loadDraft(id);
     const currentAttachments = attachmentsFor(id);
-    const restoredDraft = [
-      ...active.map(job => job.message),
-      currentDraft,
-    ].filter(Boolean).join('\n');
+    const messages = active.map(job => job.message);
+    const restoredDraft = [...messages, currentDraft].filter(Boolean).join('\n');
     saveDraft(id, restoredDraft);
-    const restoredAttachments = mergeAttachments(
+    const restoredAttachments = mergeComposerAttachments(
       ...active.map(job => job.outgoingAttachments),
       currentAttachments,
     );
     attachments.set(id, restoredAttachments);
-    if (
-      error.reuseRequestId !== false
-      && !currentDraft
-      && currentAttachments.length === 0
-    ) {
-      retryBatches.set(id, {draft: restoredDraft, jobs: active});
+    if (uncertain && !currentDraft) {
+      retryBatches.set(id, {jobs: active, revision: commands.revision({id})});
     } else {
       retryBatches.delete(id);
     }
-    elements['send-state'].textContent = '';
-    showToast(`Message not sent: ${error.message}`, 'error');
+    elements['send-state'].textContent = uncertain ? 'Delivery uncertain' : 'Not sent';
+    showToast(
+      uncertain
+        ? `Delivery outcome is uncertain: ${error.message}. Retry only after checking its status.`
+        : `Message not sent: ${error.message}`,
+      'error',
+    );
     touchRender();
     if (sessionId === id) {
       elements.message.value = loadDraft(id);
@@ -329,6 +314,7 @@ function createComposer({
       sending.delete(id);
       if (!outboundQueues.get(id)?.length) outboundQueues.delete(id);
       else void drain(id);
+      void recovery.recover(state.agents.find(agent => agent.id === id));
     }
   }
 
@@ -367,25 +353,34 @@ function createComposer({
     elements.message.focus({preventScroll: true});
     const retry = retryBatches.get(id);
     const retryAttachments = retry
-      ? mergeAttachments(...retry.jobs.map(job => job.outgoingAttachments))
+      ? mergeComposerAttachments(...retry.jobs.map(job => job.outgoingAttachments))
       : [];
     const matchesRetry = retry
-      && retry.draft === message
+      && retry.revision === commandRevision
       && retryAttachments.length === outgoingAttachments.length
       && retryAttachments.every(
         (attachment, index) => attachment.url === outgoingAttachments[index]?.url
       );
+    const receiptBytes = items => items.reduce((size, item) => size + item.text.length
+      + item.attachments.reduce((sum, attachment) => sum + attachment.data.length, 0), 0);
+    if ((outboundQueues.get(id)?.length || 0) + (matchesRetry ? retry.jobs.length : 1) > 32
+        || (!matchesRetry && (pendingFor(id).length >= 1000
+          || receiptBytes(pendingFor(id)) + receiptBytes([{text: message, attachments: outgoingAttachments}])
+            > 24 * 1024 * 1024))) {
+      showToast('Send queue is full. Wait for pending sends or dismiss old receipts.', 'error');
+      return;
+    }
     retryBatches.delete(id);
+    saveDraft(id, '');
+    attachments.set(id, []);
+    elements.message.value = '';
+    renderAttachments();
     if (matchesRetry) {
-      saveDraft(id, '');
-      attachments.set(id, []);
-      elements.message.value = '';
-      renderAttachments();
       for (const job of retry.jobs) {
         job.generation = dataGeneration;
         job.token = queueToken(id);
-        job.pending.accepted = false;
-        pendingFor(id).push(job.pending);
+        setComposerDeliveryState(job.pending, 'submitting');
+        if (!pendingFor(id).includes(job.pending)) pendingFor(id).push(job.pending);
       }
       if (!outboundQueues.has(id)) outboundQueues.set(id, []);
       outboundQueues.get(id).push(...retry.jobs);
@@ -400,22 +395,13 @@ function createComposer({
       attachments: outgoingAttachments,
       createdAt: Date.now(),
       accepted: false,
-      knownMessageIds: new Set(
-        (agent.session?.activity || []).filter(event => event.kind === 'user').map(event => event.id)
-      ),
-      baselineMessageId: [...(agent.session?.activity || [])]
-        .reverse()
-        .find(event => event.kind === 'user')?.id || null,
+      state: 'submitting',
     };
     pendingFor(id).push(pending);
-    saveDraft(id, '');
-    attachments.set(id, []);
-    elements.message.value = '';
-    renderAttachments();
-    elements['send-state'].textContent = '';
+    elements['send-state'].textContent = 'Submitting';
+    elements['send-state'].className = 'send-state';
     touchRender();
     renderDetail();
-
     if (!outboundQueues.has(id)) outboundQueues.set(id, []);
     outboundQueues.get(id).push({
       id,
@@ -442,12 +428,17 @@ function createComposer({
     if (!button) return;
     const current = attachmentsFor(sessionId);
     const index = Number(button.dataset.removeAttachment);
-    revokeAttachment(current[index]);
+    const removed = current[index];
     current.splice(index, 1);
+    const retained = pendingFor(sessionId).some(item => item.attachments.includes(removed))
+      || (outboundQueues.get(sessionId) || []).some(job => job.outgoingAttachments.includes(removed));
+    if (!retained) revokeAttachment(removed);
     renderAttachments();
   });
   elements.message.addEventListener('paste', async event => {
-    const images = [...event.clipboardData.items]
+    const clipboard = event.clipboardData;
+    const files = [...(clipboard?.files || [])].filter(file => file.type.startsWith('image/'));
+    const images = files.length ? files : [...(clipboard?.items || [])]
       .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
       .map(item => item.getAsFile())
       .filter(Boolean);
@@ -463,33 +454,34 @@ function createComposer({
       elements.composer.requestSubmit();
     }
   });
+
   elements.composer.addEventListener('submit', submit);
 
+  function remove(id) {
+    recovery.remove(id);
+    (attachments.get(id) || []).forEach(revokeAttachment);
+    (pendingMessages.get(id) || []).flatMap(item => item.attachments || []).forEach(revokeAttachment);
+    (outboundQueues.get(id) || []).flatMap(job => job.outgoingAttachments || []).forEach(revokeAttachment);
+    drafts.delete(id);
+    attachments.delete(id);
+    pendingMessages.delete(id);
+    outboundQueues.delete(id);
+    queueTokens.delete(id);
+    retryBatches.delete(id);
+  }
+
   function prune(validIds) {
-    const valid = new Set(validIds);
     commands.prune(validIds);
-    for (const id of new Set([
-      ...drafts.keys(), ...attachments.keys(), ...pendingMessages.keys(), ...outboundQueues.keys(),
-      ...reconciledMessageIds.keys(),
-    ])) {
-      if (valid.has(id)) continue;
-      queueTokens.delete(id);
-      reconciledMessageIds.delete(id);
-      (attachments.get(id) || []).forEach(revokeAttachment);
-      (pendingMessages.get(id) || []).flatMap(item => item.attachments || []).forEach(revokeAttachment);
-      (outboundQueues.get(id) || []).flatMap(job => job.outgoingAttachments || []).forEach(revokeAttachment);
-      drafts.delete(id);
-      attachments.delete(id);
-      pendingMessages.delete(id);
-      outboundQueues.delete(id);
-      retryBatches.delete(id);
-    }
   }
 
   return {
     pendingFor,
     clearLocalData,
-    reconcile,
+    reconcile: recovery.reconcile,
+    recover: recovery.recover,
+    restoreDelivery: recovery.restoreDelivery,
+    dismissDelivery: recovery.dismissDelivery,
+    remove,
     prune,
     select,
   };

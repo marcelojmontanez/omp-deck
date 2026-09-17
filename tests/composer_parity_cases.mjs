@@ -90,8 +90,10 @@ export async function verifyComposerParity(page) {
     await page.evaluate(() => {
       globalThis.__composerParityRequests = [];
       ompDeckApi.request = async (path, options) => {
-        globalThis.__composerParityRequests.push({path, body: JSON.parse(options.body)});
-        return {ok: true, status: 202, json: async () => ({})};
+        if (path.endsWith('/deliveries')) return {ok: true, json: async () => ({version: 1, deliveries: []})};
+        const body = JSON.parse(options.body);
+        globalThis.__composerParityRequests.push({path, body});
+        return {ok: true, status: 202, json: async () => ({requestId: body.requestId, status: 'accepted', acceptance: 'accepted'})};
       };
       const message = document.getElementById('message');
       message.value = 'Mobile draft';

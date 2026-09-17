@@ -31,11 +31,15 @@ function loadUiHelpers() {
     document: {},
     thinkingOverrides: new Map(),
     displayStatus: agent => agent.executionState,
+    escapeHtml: value => String(value)
+      .replaceAll('&', '&amp;').replaceAll('"', '&quot;')
+      .replaceAll('<', '&lt;').replaceAll('>', '&gt;'),
   });
   vm.runInContext(helperSource, context, {filename: 'ui-helpers.js'});
   return {
-    composerDeliveryRoute: vm.runInContext('composerDeliveryRoute', context),
     drainComposerQueue: vm.runInContext('drainComposerQueue', context),
+    deliveryEvent: vm.runInContext('deliveryEvent', context),
+    deliveryControls: vm.runInContext('deliveryControls', context),
   };
 }
 function loadTodoUi() {
@@ -244,17 +248,8 @@ test('uses parsed update timestamps and a deterministic clock fallback', () => {
   assert.equal(projectSession(session({ updatedAt: 'not-a-date' })).session.updatedMs, 1_700_000_000_123);
   assert.equal(projectSession(session({ updatedAt: null })).session.updatedMs, 1_700_000_000_123);
 });
-test('composer resolves delivery route from current state and stops a failed queue', async () => {
-  const {composerDeliveryRoute, drainComposerQueue} = loadUiHelpers();
-  assert.equal(
-    composerDeliveryRoute({executionState: 'working', capabilities: {followUp: true}}),
-    'follow-ups',
-  );
-  assert.equal(
-    composerDeliveryRoute({executionState: 'idle', capabilities: {followUp: true}}),
-    'messages',
-  );
-
+test('composer queue stops after a failed delivery and preserves later jobs', async () => {
+  const {drainComposerQueue} = loadUiHelpers();
   const queue = [{id: 1}, {id: 2}];
   const attempted = [];
   let restored = [];

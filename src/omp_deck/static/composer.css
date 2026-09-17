@@ -85,6 +85,18 @@
 .attach:has(input:disabled) { background: transparent; color: var(--muted); }
 .attach input:disabled { cursor: not-allowed; }
 .attachment-status { margin: 6px 7px 0; color: var(--muted); font-size: 11px; }
+.delivery-controls { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.delivery-controls span { flex-basis: 100%; color: var(--muted); font-size: 11px; }
+.delivery-controls button {
+  min-height: 44px;
+  padding: 7px 10px;
+  border: 1px solid var(--line-bright);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
 .attach svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.6; vertical-align: middle; }
 textarea {
   width: 100%;

@@ -237,6 +237,7 @@ async function recoverLiveConnections() {
   void refresh(null, {replace: true});
   if (state.selectedMachineId) recoverLaunchableProjects();
   ompDeckImages.recover();
+  void composer.recover(selectedAgent());
 }
 
 document.addEventListener('visibilitychange', () => {
@@ -339,6 +340,13 @@ async function setThinkingLevel(next, agent) {
   }
 }
 el.activity.addEventListener('click', event => {
+  const receipt = event.target.closest('[data-delivery-action]');
+  if (receipt) {
+    const id = receipt.dataset.deliveryId;
+    if (receipt.dataset.deliveryAction === 'restore') composer.restoreDelivery(id);
+    else void composer.dismissDelivery(id).catch(() => showToast('Could not dismiss receipt. Try again.', 'error'));
+    return;
+  }
   const button = event.target.closest('[data-toggle-archive]');
   if (!button) return;
   state.showArchive = !state.showArchive;

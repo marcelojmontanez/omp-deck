@@ -294,17 +294,11 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
       ? `<div class="archive-separator"><button type="button" data-toggle-archive aria-expanded="${state.showArchive}">${state.showArchive ? 'Hide earlier history' : 'Show earlier history'}</button></div>${state.showArchive ? archivedEvents.reverse().map(event => `<article class="event archived ${escapeHtml(event.kind)}"><div class="event-head"><span class="event-title">${escapeHtml(event.title)}</span><time class="event-time">${escapeHtml(clockTime(event.time))}</time></div>${eventAttachments(event)}${renderEventDetail(event)}</article>`).join('') : ''}`
       : '';
     const pending = isLiveSession && agent
-      ? [...getComposer().pendingFor(agent.id)].reverse().map(item => ({
-        kind: 'user pending',
-        title: item.accepted ? 'You · Delivered live' : 'You · Delivering',
-        detail: item.text,
-        time: new Date(item.createdAt).toISOString(),
-        attachments: item.attachments,
-      }))
+      ? [...getComposer().pendingFor(agent.id)].reverse().map(deliveryEvent)
       : [];
     events.unshift(...pending);
-    if (isLiveSession && (executionState === 'working' || pending.length)) {
-      const workingOn = pending.length ? 'Preparing a response' : (agent?.activitySummary || session.workingOn || 'Preparing a response');
+    if (isLiveSession && executionState === 'working') {
+      const workingOn = agent?.activitySummary || session.workingOn || 'Preparing a response';
       events.unshift({kind: 'thinking', title: `OMP · ${workingOn}`, time: null});
     } else if (isLiveSession && executionState === 'needs-input') {
       events.unshift({kind: 'notice', title: 'OMP needs your input', detail: agent.activitySummary || 'Reply to continue.', time: null});
@@ -318,7 +312,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
       </div>
       ${event.kind === 'thinking'
         ? '<div class="typing-dots" aria-label="OMP is working"><i></i><i></i><i></i></div>'
-        : `${eventAttachments(event)}${renderEventDetail(event)}`}
+        : `${eventAttachments(event)}${renderEventDetail(event)}${deliveryControls(event)}`}
     </article>`).join('') : `<p class="activity-empty">${agentLifecycle === 'history' ? 'No conversation content retained for this session.' : 'No conversation available yet.'}</p>`;
     el.activity.innerHTML = todoPanel + conversation + archive;
     if (agent) ompDeckImages.hydrate(el.activity, agent.id);
@@ -326,6 +320,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
 
     if (selectionChanged) {
       getComposer().select(agent?.id);
+      if (agent) void getComposer().recover(agent);
       requestAnimationFrame(() => { el.activity.scrollTop = 0; });
     }
     const canCompose = Boolean(isLiveSession && capabilities.sendMessage);
@@ -469,6 +464,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     if (!Number.isSafeInteger(snapshotGeneration)) nodeState(machineId).presentationRevision += 1;
     const id = ompDeckApi.sessionKey(machineId, sessionId);
     ompDeckImages.releaseOwner(id);
+    getComposer().remove(id);
     state.agents = state.agents.filter(agent => agent.id !== id);
     if (state.selectedId === id) {
       state.selectedId = null;

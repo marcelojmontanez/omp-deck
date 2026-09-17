@@ -10,6 +10,7 @@ import {once} from 'node:events';
 import test from 'node:test';
 import puppeteer from 'puppeteer';
 import {verifyConnectionRecovery} from './connection_recovery_cases.mjs';
+import {verifyDeliveryRecovery} from './delivery_recovery_cases.mjs';
 import {verifyMobileImages} from './image_recovery_cases.mjs';
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
@@ -217,6 +218,7 @@ test('independent viewers route duplicate session IDs directly and survive one m
     ]);
   }
   const desktopId = await selectMachineSession(phone, 'Desktop');
+  await verifyDeliveryRecovery(phone, desktopId);
   await verifyConnectionRecovery(phone);
   await verifyMobileImages(phone, root);
   await phone.click('#overflow-button');

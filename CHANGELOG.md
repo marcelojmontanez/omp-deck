@@ -24,6 +24,7 @@
 
 - Keep writable-session drafts and supported image attachments editable while disconnected, preserve composer focus and text selection across reconnects, and never send automatically on reconnect.
 - Keep the composer focused after sending a message, and stop delayed send failures from stealing focus from another control.
+- Activate the mobile photo picker directly from its native control and visibly explain when a session cannot accept image uploads.
 - Recover stalled image downloads on return or reconnection, offer tap-to-retry on failed thumbnails, and preserve downloaded previews during temporary outages.
 - Bound stalled connection checks, session/project reads, and event-stream handshakes so the dashboard does not remain stuck connecting indefinitely; returning to the browser retries failed project loading.
 - Serve the dashboard while managed and imported terminal sessions recover in the background, isolate slow connections, and cancel pending Collab startup when stopped or removed.

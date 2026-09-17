@@ -436,10 +436,10 @@ function createComposer({
     saveDraft(sessionId, elements.message.value);
     commands.inputChanged();
   });
-  elements.attach.addEventListener('click', () => elements['attachment-input'].click());
-  elements['attachment-input'].addEventListener('change', async event => {
-    await addAttachments(event.target.files);
+  elements.attach.addEventListener('change', async event => {
+    const pending = addAttachments(event.target.files);
     event.target.value = '';
+    await pending;
   });
   elements.attachments.addEventListener('click', event => {
     const button = event.target.closest('[data-remove-attachment]');

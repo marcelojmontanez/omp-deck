@@ -1244,7 +1244,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
         this.onabort?.();
       }
     }
-    const input = document.getElementById('attachment-input');
+    const input = document.getElementById('attach');
     const choose = file => {
       Object.defineProperty(input, 'files', {
         configurable: true,
@@ -1299,7 +1299,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
         this.onabort?.();
       }
     }
-    const input = document.getElementById('attachment-input');
+    const input = document.getElementById('attach');
     const choose = files => {
       Object.defineProperty(input, 'files', {
         configurable: true,

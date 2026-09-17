@@ -140,6 +140,17 @@ export async function verifyComposerParity(page) {
         el.message.dispatchEvent(new Event('input', {bubbles: true}));
       });
     }
+    for (const supported of [false, true]) {
+      const gallery = await page.evaluate(supported => {
+        selectedAgent().capabilities.attachments = supported;
+        touchRender();
+        renderDetail();
+        const reason = document.getElementById('attachment-status');
+        return {disabled: el.attach.disabled, reasonVisible: Boolean(reason?.checkVisibility())};
+      }, supported);
+      assert.deepEqual(gallery, {disabled: !supported, reasonVisible: !supported},
+        'Unavailable image uploads must have a visible explanation, not a silent active-looking control');
+    }
 
     await page.click('#overflow-button');
     await page.keyboard.press('ArrowDown');

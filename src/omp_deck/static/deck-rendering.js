@@ -344,6 +344,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     el.message.disabled = !canCompose;
     el.attach.disabled = !canAttach;
     el.attach.title = canAttach ? '' : 'Attachments are unavailable for this session';
+    el['attachment-status'].hidden = !canCompose || canAttach;
     el.send.disabled = !canMessage;
   }
 

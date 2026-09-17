@@ -26,7 +26,7 @@ const el = Object.fromEntries([
   'idle-count', 'agent-list', 'history-toggle', 'history-count', 'session-scope-title',
   'app', 'workspace', 'detail', 'detail-chips', 'task-control', 'transport-status',
   'pending-request', 'activity', 'scroll-newest', 'composer', 'attachments', 'attach',
-  'attachment-input', 'command-menu', 'command-mode', 'message', 'send', 'send-state',
+  'attachment-status', 'command-menu', 'command-mode', 'message', 'send', 'send-state',
   'toast', 'overflow-button', 'session-menu', 'machine-panel', 'machine-select',
   'session-info', 'session-metadata', 'session-name-dialog', 'session-name-form',
   'session-name-input', 'session-name-status', 'deck-settings', 'settings-status',

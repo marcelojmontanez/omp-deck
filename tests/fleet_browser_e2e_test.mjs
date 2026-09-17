@@ -266,7 +266,7 @@ test('independent viewers route duplicate session IDs directly and survive one m
     urlSelection: 'cold-machine:session-before-snapshot',
   });
   await phone.type('#message', 'Keep this desktop draft');
-  const attachment = await phone.$('#attachment-input');
+  const attachment = await phone.$('#attach');
   const image = path.join(root, 'draft.png');
   await writeFile(image, Buffer.from(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aM1sAAAAASUVORK5CYII=', 'base64'));

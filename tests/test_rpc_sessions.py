@@ -515,6 +515,106 @@ class TestRpcSessionManager(unittest.TestCase):
         self.assertEqual(self.model.get(session_id)["transport"]["status"], "disconnected")
         self.assertEqual(self.model.get(session_id)["transport"]["reason"], "shut down")
 
+    def test_shutdown_stops_a_blocked_rpc_command_without_waiting_for_its_operation_lock(self):
+        session_id = self.launch()["id"]
+        client = FakeRpcClient.instances[-1]
+        prompt_entered = Event()
+        prompt_release = Event()
+        FakeRpcClient.prompt_entered["blocked"] = prompt_entered
+        FakeRpcClient.prompt_release["blocked"] = prompt_release
+        command_results = []
+        shutdown_results = []
+        errors = []
+
+        def dispatch_command():
+            try:
+                command_results.append(
+                    self.manager.dispatch(session_id, "blocked-command", "sendMessage", {"message": "blocked"})
+                )
+            except Exception as error:
+                errors.append(error)
+
+        def dispatch_shutdown():
+            try:
+                shutdown_results.append(self.manager.dispatch(session_id, "quit-now", "shutdown", {}))
+            except Exception as error:
+                errors.append(error)
+
+        original_stop = client.stop
+
+        def releasing_stop():
+            prompt_release.set()
+            original_stop()
+
+        command = Thread(target=dispatch_command)
+        shutdown = Thread(target=dispatch_shutdown)
+        with patch.object(client, "stop", side_effect=releasing_stop):
+            command.start()
+            self.assertTrue(prompt_entered.wait(timeout=1))
+            shutdown.start()
+            shutdown.join(timeout=0.5)
+            command.join(timeout=1)
+        prompt_release.set()
+        shutdown.join(timeout=1)
+        command.join(timeout=1)
+
+        self.assertFalse(shutdown.is_alive())
+        self.assertFalse(command.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            shutdown_results,
+            [{"requestId": "quit-now", "status": "accepted", "result": None}],
+        )
+        self.assertEqual(command_results[0]["status"], "accepted")
+        self.assertTrue(client.stopped)
+        self.assertEqual(self.model.get(session_id)["lifecycle"], "history")
+
+    def test_shutdown_preserves_a_completed_identity_change_without_reclaiming_live_ownership(self):
+        session_id = self.launch()["id"]
+        runtime = self.manager._runtime(session_id)
+        adapter = runtime.adapter
+        snapshot_captured = Event()
+        release_snapshot = Event()
+        original_snapshot = adapter.snapshot
+        branch_results = []
+        errors = []
+
+        def delayed_snapshot():
+            snapshot = original_snapshot()
+            snapshot_captured.set()
+            release_snapshot.wait(2)
+            return snapshot
+
+        def dispatch_branch():
+            try:
+                branch_results.append(
+                    self.manager.dispatch(session_id, "branch-before-quit", "branch", {"entryId": "entry-7"})
+                )
+            except Exception as error:
+                errors.append(error)
+
+        branch = Thread(target=dispatch_branch)
+        with patch.object(adapter, "snapshot", side_effect=delayed_snapshot):
+            branch.start()
+            try:
+                self.assertTrue(snapshot_captured.wait(1))
+                shutdown = self.manager.dispatch(session_id, "quit-after-branch", "shutdown", {})
+            finally:
+                release_snapshot.set()
+                branch.join(1)
+
+        record = self.registry.load()[0]
+        self.assertFalse(branch.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(shutdown["status"], "accepted")
+        self.assertEqual(branch_results[0]["status"], "accepted")
+        self.assertEqual(record["ompSessionId"], "omp-branched")
+        self.assertFalse(record["desiredRpcRunning"])
+        session = self.model.get(session_id)
+        self.assertEqual(session["ompSessionId"], "omp-branched")
+        self.assertEqual(session["lifecycle"], "history")
+        self.assertEqual(session["transport"]["reason"], "shut down")
+
     def test_disconnected_failed_recovery_can_be_shut_down_durably(self):
         session_id = self.launch()["id"]
         self.manager.close()

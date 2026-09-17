@@ -15,6 +15,15 @@ class SessionCommandConflictError(ValueError):
     pass
 
 
+def _refresh_if_desired(manager: Any, session_id: str) -> None:
+    try:
+        desired = manager._record(session_id)["desiredRpcRunning"]
+    except KeyError:
+        return
+    if desired:
+        manager._refreshes.request((session_id,))
+
+
 def dispatch(
     manager: Any,
     session_id: str,
@@ -24,6 +33,19 @@ def dispatch(
     conflict_error: type[ValueError],
     disconnected_error: type[LookupError],
 ) -> dict[str, Any]:
+    if action == "shutdown":
+        try:
+            return manager._requests.dispatch(
+                session_id,
+                request_id,
+                action,
+                payload,
+                prepare=lambda: manager._prepare_command(session_id, action, payload),
+                execute=lambda runtime, command, body: execute(manager, runtime, command, body, disconnected_error),
+                shutdown=True,
+            )
+        except RequestConflictError:
+            raise conflict_error("requestId was already used for another command") from None
     priority = action in {"respondToUi", "cancelUi"}
     operation = manager._operation_lock(session_id)
     if priority:
@@ -85,20 +107,27 @@ def execute(
         raise disconnected_error(session_id)
     result = _rpc_commands.invoke(adapter, action, payload)
     if action in {"respondToUi", "cancelUi"}:
-        manager._refreshes.request((session_id,))
+        _refresh_if_desired(manager, session_id)
         return {"accepted": True, "result": _rpc_commands.plain(result)}
     try:
         snapshot = adapter.snapshot()
-        if action in {"branch", "switchSession"}:
-            final = manager._persist_rpc_identity(manager._record(session_id), snapshot)
-            runtime.generation = final["generation"]
-            manager.model.load_record(final)
-        manager.model.apply_rpc_snapshot(
-            session_id,
-            instance_id=runtime.instance_id,
-            generation=runtime.generation,
-            snapshot=snapshot,
-        )
+        with manager._lock:
+            shutting_down = runtime.session_id in manager._shutdown_requested
+            current = manager._runtimes.get(session_id) is runtime
+            if not current and not shutting_down:
+                return {"accepted": True, "result": _rpc_commands.plain(result)}
+            if action in {"branch", "switchSession"}:
+                final = manager._persist_rpc_identity(manager._record(session_id), snapshot)
+                runtime.generation = final["generation"]
+                manager.model.load_record(final)
+            if shutting_down:
+                return {"accepted": True, "result": _rpc_commands.plain(result)}
+            manager.model.apply_rpc_snapshot(
+                session_id,
+                instance_id=runtime.instance_id,
+                generation=runtime.generation,
+                snapshot=snapshot,
+            )
     except Exception:
-        manager._refreshes.request((session_id,))
+        _refresh_if_desired(manager, session_id)
     return {"accepted": True, "result": _rpc_commands.plain(result)}

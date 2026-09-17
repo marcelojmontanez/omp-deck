@@ -55,6 +55,8 @@ class RpcSessionManager:
         self._lock = threading.RLock()
         self._runtimes: dict[str, _Runtime] = {}
         self._operation_locks: dict[str, threading.RLock] = {}
+        self._shutdown_locks: dict[str, threading.RLock] = {}
+        self._shutdown_requested: set[str] = set()
         self._closed = False
         self._refreshes = RpcRefreshScheduler(
             self._refresh_or_reconnect,
@@ -73,7 +75,6 @@ class RpcSessionManager:
             title=title or project_name,
             desired_rpc_running=False,
         )
-        # Publish the running intent only after startup owns the session operation lock.
         with self._operation_lock(record["id"]):
             self.model.load_record(record)
             try:
@@ -156,7 +157,6 @@ class RpcSessionManager:
         runtime = self._runtime_or_none(session_id)
         if runtime is not None and runtime.initialized:
             return self.refresh(session_id)
-        # Startup owns this lock until the child and its durable identity are ready.
         with self._operation_lock(session_id):
             record = self._record(session_id)
             if record["adapterKind"] != "rpc" or not record["desiredRpcRunning"]:
@@ -203,31 +203,43 @@ class RpcSessionManager:
         return _rpc_dispatch.command(self, session_id, action, payload, _rpc_dispatch.SessionNotConnectedError)
 
     def shutdown(self, session_id: str) -> None:
-        with self._operation_lock(session_id):
-            runtime = self._runtime_or_none(session_id)
-            record = self.registry.update(session_id, desired_rpc_running=False)
-            if runtime is not None:
-                runtime.generation = record["generation"]
+        with self._shutdown_lock(session_id):
+            with self._lock:
+                self._shutdown_requested.add(session_id)
+                runtime = self._runtimes.get(session_id)
+                try:
+                    record = self.registry.update(session_id, desired_rpc_running=False)
+                except Exception:
+                    self._shutdown_requested.discard(session_id)
+                    raise
+                if runtime is not None:
+                    runtime.generation = record["generation"]
             self.model.load_record(record)
             try:
                 if runtime is not None and runtime.adapter is not None:
                     runtime.adapter.shutdown()
             except Exception:
+                with self._lock:
+                    generation = self._record(session_id)["generation"]
+                    runtime.generation = generation
                 self.model.set_transport(
                     session_id,
                     instance_id=runtime.instance_id,
-                    generation=record["generation"],
+                    generation=generation,
                     status="disconnected",
                     reason="shutdown failed",
                 )
                 raise
             with self._lock:
+                generation = self._record(session_id)["generation"]
+                if runtime is not None:
+                    runtime.generation = generation
                 if runtime is not None and self._runtimes.get(session_id) is runtime:
                     self._runtimes.pop(session_id)
             self.model.set_transport(
                 session_id,
                 instance_id=None,
-                generation=record["generation"],
+                generation=generation,
                 status="disconnected",
                 reason="shut down",
             )
@@ -251,7 +263,7 @@ class RpcSessionManager:
             generation=record["generation"],
         )
         with self._lock:
-            if self._closed:
+            if self._closed or runtime.session_id in self._shutdown_requested:
                 raise RuntimeError("RPC session manager is closed")
             if runtime.session_id in self._runtimes:
                 raise RuntimeError(f"session {runtime.session_id} is already connected")
@@ -260,8 +272,11 @@ class RpcSessionManager:
         try:
             project_path = self._validated_project(record)
             resume_file = recovery_session_file(self.settings.session_root, record)
-            updated = self.registry.update(record["id"], desired_rpc_running=True)
-            runtime.generation = updated["generation"]
+            with self._lock:
+                if runtime.session_id in self._shutdown_requested:
+                    raise _rpc_dispatch.SessionNotConnectedError(runtime.session_id)
+                updated = self.registry.update(record["id"], desired_rpc_running=True)
+                runtime.generation = updated["generation"]
             self.model.set_transport(
                 runtime.session_id,
                 instance_id=runtime.instance_id,
@@ -300,14 +315,16 @@ class RpcSessionManager:
             )
             runtime.adapter = adapter
             adapter.start()
-            # OMP exposes an ID/path before its lazy fresh transcript exists.
-            # Rotate before launch is published: new_session durably writes the empty header.
             if resume_file is None:
                 materialized = adapter.new_session()
                 if getattr(materialized, "cancelled", False):
                     raise RuntimeError("OMP cancelled fresh RPC session materialization")
             with self._lock:
-                if self._closed or self._runtimes.get(runtime.session_id) is not runtime:
+                if (
+                    self._closed
+                    or runtime.session_id in self._shutdown_requested
+                    or self._runtimes.get(runtime.session_id) is not runtime
+                ):
                     raise RuntimeError("RPC session manager is closed")
             snapshot = adapter.snapshot()
             if resume_file is not None:
@@ -445,6 +462,10 @@ class RpcSessionManager:
         with self._lock:
             return self._operation_locks.setdefault(session_id, threading.RLock())
 
+    def _shutdown_lock(self, session_id: str) -> threading.RLock:
+        with self._lock:
+            return self._shutdown_locks.setdefault(session_id, threading.RLock())
+
     def _prepare_command(
         self,
         session_id: str,
@@ -469,8 +490,7 @@ class RpcSessionManager:
         return runtime
 
     def _runtime(self, session_id: str) -> _Runtime:
-        runtime = self._runtime_or_none(session_id)
-        if runtime is None:
+        if (runtime := self._runtime_or_none(session_id)) is None:
             raise _rpc_dispatch.SessionNotConnectedError(session_id)
         return runtime
 

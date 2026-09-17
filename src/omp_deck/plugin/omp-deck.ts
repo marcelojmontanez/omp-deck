@@ -223,8 +223,8 @@ export default function ompDeck(pi: ExtensionAPI) {
           active.abort();
           break;
         case "shutdown":
-          active.shutdown();
-          break;
+          if (await send(peer, { protocol: PROTOCOL, type: "response", id, ok: true })) active.shutdown();
+          return;
         case "setThinking": {
           const thinking = setThinking(pi, active, request.level);
           emit("thinking", thinking);

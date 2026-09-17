@@ -30,15 +30,21 @@ class TerminalCommandCoordinator:
     def __init__(self, model, requests: RequestLedger, *, result_limit=1_000):
         self.model = model
         self.requests = requests
-        self._locks = tuple(threading.RLock() for _ in range(256))
         self._lock = threading.RLock()
+        self._locks: dict[str, threading.RLock] = {}
+        self._priority_locks: dict[tuple[str, str], threading.RLock] = {}
         self._results: OrderedDict[tuple[str, str], tuple[str, dict[str, Any]]] = OrderedDict()
         self._result_limit = result_limit
 
     def lock(self, session_id: str) -> threading.RLock:
-        digest = hashlib.sha256(session_id.encode("utf-8")).digest()
-        index = int.from_bytes(digest[:2], "big") % len(self._locks)
-        return self._locks[index]
+        with self._lock:
+            return self._locks.setdefault(session_id, threading.RLock())
+
+    def _command_lock(self, session_id: str, action: str) -> threading.RLock:
+        if action not in {"interrupt", "shutdown"}:
+            return self.lock(session_id)
+        with self._lock:
+            return self._priority_locks.setdefault((session_id, action), threading.RLock())
 
     def forget(self, session_id: str) -> None:
         with self._lock:
@@ -57,7 +63,7 @@ class TerminalCommandCoordinator:
         request_fingerprint = fingerprint({"action": action, "payload": payload})
         key = (session_id, request_id)
         scope = f"terminal-command:{session_id}"
-        with self.lock(session_id):
+        with self._command_lock(session_id, action):
             previous = self._cached_result(key, request_fingerprint)
             if previous is not None:
                 return previous

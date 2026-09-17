@@ -33,6 +33,8 @@ test('plugin events preserve sequence and synchronize active history', async () 
   let thinking = 'high';
   const sentUserMessages = [];
   let idle = true;
+  let shutdownCalls = 0;
+  let shutdownPromise;
   const pi = {
     pi: {VERSION: 'test'},
     logger: {warn(message, detail) { warnings.push([message, detail]); }},
@@ -82,7 +84,10 @@ test('plugin events preserve sequence and synchronize active history', async () 
       timers.delete(timer);
     },
     abort() {},
-    shutdown() {},
+    shutdown() {
+      shutdownCalls++;
+      shutdownPromise = handlers.get('session_shutdown')();
+    },
   };
   let socket;
   try {
@@ -273,6 +278,21 @@ test('plugin events preserve sequence and synchronize active history', async () 
       'selected branch question',
       'selected branch answer',
     ]);
+    socket.write(`${JSON.stringify({
+      protocol: 'omp-deck-fallback-v1',
+      type: 'request',
+      id: 'shutdown-1',
+      action: 'shutdown',
+    })}\n`);
+    const shutdownResponse = JSON.parse((await frames.next()).value);
+    assert.deepEqual(shutdownResponse, {
+      protocol: 'omp-deck-fallback-v1',
+      type: 'response',
+      id: 'shutdown-1',
+      ok: true,
+    });
+    assert.equal(shutdownCalls, 1);
+    await shutdownPromise;
     lines.close();
   } finally {
     socket?.destroy();

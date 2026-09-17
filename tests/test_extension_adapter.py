@@ -469,7 +469,14 @@ class ExtensionAdapterTests(unittest.TestCase):
 
     def test_timeout_disconnect_and_stale_duplicate_response(self):
         peer = self.make_peer()
-        adapter = self.make_adapter(peer, registration_timeout=0.03)
+        disconnected = []
+        disconnect_ready = threading.Event()
+
+        def on_disconnect(reason):
+            disconnected.append(reason)
+            disconnect_ready.set()
+
+        adapter = self.make_adapter(peer, registration_timeout=0.03, on_disconnect=on_disconnect)
         adapter.start()
         with self.assertRaises(ExtensionRequestTimeout):
             adapter.interrupt()
@@ -495,6 +502,8 @@ class ExtensionAdapterTests(unittest.TestCase):
         peer.close()
         thread.join(1)
         self.assertIsInstance(errors[0], ExtensionDisconnected)
+        self.assertTrue(disconnect_ready.wait(1))
+        self.assertEqual(disconnected, ["extension disconnected"])
         adapter.close()
 
     def test_failed_response_does_not_expose_remote_error(self):

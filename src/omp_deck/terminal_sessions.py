@@ -23,6 +23,7 @@ from ._terminal_runtime import (
     _Runtime,
     _RuntimeStore,
     _upsert_extension_record,
+    retire_extension,
 )
 from .collab_adapter import CollabAdapter
 from .collab_store import CollabStore
@@ -409,10 +410,16 @@ class TerminalSessionManager:
 
         def new_adapter() -> tuple[ExtensionEventActivation, ExtensionAdapter]:
             candidate_activation = ExtensionEventActivation(apply_event)
-            options = {"on_event": candidate_activation.publish}
+            owned: ExtensionAdapter | None = None
+
+            def disconnected(reason: str) -> None:
+                retire_extension(self._runtimes, self._commands.lock, self.model, session_id, owned, reason)
+
+            options: dict[str, Any] = {"on_event": candidate_activation.publish, "on_disconnect": disconnected}
             if os.name == "nt":
                 options["connection_token"] = metadata.get("authToken")
-            return candidate_activation, ExtensionAdapter(str(socket_path), **options)
+            owned = ExtensionAdapter(str(socket_path), **options)
+            return candidate_activation, owned
 
         activation, adapter, registration, snapshot, history_error = _open_extension(new_adapter)
         try:

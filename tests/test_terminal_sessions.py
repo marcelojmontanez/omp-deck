@@ -157,8 +157,9 @@ class FakeExtensionAdapter:
         "setThinking": True,
     }
 
-    def __init__(self, socket_path, on_event=None):
+    def __init__(self, socket_path, on_event=None, on_disconnect=None, **_options):
         self.socket_path = socket_path
+        self.disconnect_callback = on_disconnect
         self.callback = on_event
         self.calls = []
         self.closed = False
@@ -231,7 +232,18 @@ class FakeExtensionAdapter:
         self.calls.append(("close",))
         if type(self).fail_close:
             raise RuntimeError("close failed")
+        if self.closed:
+            return
         self.closed = True
+        if self.disconnect_callback is not None:
+            self.disconnect_callback("closed")
+
+    def disconnect(self, reason):
+        if self.closed:
+            return
+        self.closed = True
+        if self.disconnect_callback is not None:
+            self.disconnect_callback(reason)
 
 
 class TerminalSessionManagerTests(unittest.TestCase):
@@ -895,6 +907,19 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.assertTrue(current.closed)
         self.assertEqual(self.model.get(session_id)["id"], session_id)
 
+    def test_extension_disconnect_immediately_retires_live_runtime_as_retained_history(self):
+        manager = self.manager()
+        session_id, _, adapter = self.connect_extension(manager)
+
+        adapter.disconnect("extension disconnected")
+
+        session = self.model.get(session_id)
+        self.assertIsNone(manager._runtimes.get(session_id))
+        self.assertEqual(session["lifecycle"], "history")
+        self.assertEqual(session["state"], "disconnected")
+        self.assertEqual(session["transport"]["reason"], "extension disconnected")
+        self.assertEqual(manager.registry.load()[0]["id"], session_id)
+
     def test_removed_extension_stays_hidden_across_manager_restart(self):
         manager = self.manager()
         path, _, metadata = self.unix_registration(connection="failed")
@@ -1109,6 +1134,53 @@ class TerminalSessionManagerTests(unittest.TestCase):
         for frame in sock.sent:
             _, sealed = unpack_envelope(frame)
             self.assertNotIn(collab_link(False), repr(open_frame(KEY, sealed, direction="guest")))
+
+    def test_shutdown_bypasses_a_blocked_terminal_command(self):
+        manager = self.manager()
+        session_id, _, adapter = self.connect_extension(manager)
+        message_entered = threading.Event()
+        message_release = threading.Event()
+        shutdown_entered = threading.Event()
+        results = []
+        errors = []
+
+        def blocked_send(_message, _behavior=None, *, images=None):
+            message_entered.set()
+            message_release.wait(2)
+
+        def shutdown_session():
+            shutdown_entered.set()
+
+        adapter.send_message = blocked_send
+        adapter.shutdown_session = shutdown_session
+
+        def command(request_id, action, payload):
+            try:
+                results.append(manager.command(session_id, request_id, action, payload))
+            except Exception as error:
+                errors.append(error)
+
+        message = threading.Thread(
+            target=command,
+            args=("blocked-message", "sendMessage", {"message": "blocked"}),
+        )
+        shutdown = threading.Thread(target=command, args=("priority-shutdown", "shutdown", {}))
+        message.start()
+        try:
+            self.assertTrue(message_entered.wait(1))
+            shutdown.start()
+            self.assertTrue(shutdown_entered.wait(0.2))
+            shutdown.join(1)
+        finally:
+            message_release.set()
+            message.join(1)
+            if shutdown.ident is not None:
+                shutdown.join(1)
+
+        self.assertFalse(message.is_alive())
+        self.assertFalse(shutdown.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual({result["requestId"] for result in results}, {"blocked-message", "priority-shutdown"})
 
     def test_request_id_deduplicates_and_conflicting_reuse_is_rejected(self):
         manager = self.manager()

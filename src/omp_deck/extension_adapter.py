@@ -55,6 +55,7 @@ class ExtensionAdapter:
         self,
         socket_path: str,
         on_event: Callable[[Mapping[str, Any]], None] | None = None,
+        on_disconnect: Callable[[str], None] | None = None,
         *,
         connector: Callable[[str], Any] = _default_connector,
         clock: Callable[[], float] = time.monotonic,
@@ -67,8 +68,8 @@ class ExtensionAdapter:
     ) -> None:
         if not isinstance(socket_path, str) or not socket_path or "\x00" in socket_path:
             raise ValueError("socket_path must be a non-empty extension endpoint")
-        if on_event is not None and not callable(on_event):
-            raise TypeError("on_event must be callable")
+        if any(callback is not None and not callable(callback) for callback in (on_event, on_disconnect)):
+            raise TypeError("callbacks must be callable")
         if not callable(connector) or not callable(clock):
             raise TypeError("connector and clock must be callable")
         for name, value in (
@@ -87,6 +88,7 @@ class ExtensionAdapter:
             raise ValueError("connection_token must be a 256-bit lowercase hexadecimal token")
         self.socket_path = socket_path
         self._on_event = on_event
+        self._on_disconnect = on_disconnect
         self._connector = connector
         self._connection_token = connection_token
         self._clock = clock
@@ -493,3 +495,5 @@ class ExtensionAdapter:
                 pass
         if already_closed:
             return
+        if self._on_disconnect is not None:
+            self._on_disconnect(reason)

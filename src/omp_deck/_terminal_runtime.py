@@ -99,6 +99,31 @@ class _RuntimeStore:
             return True
 
 
+def retire_extension(
+    runtimes: _RuntimeStore,
+    lock_for: Callable[[str], threading.RLock],
+    model: Any,
+    session_id: str,
+    adapter: ExtensionAdapter | None,
+    reason: str,
+) -> None:
+    if reason == "closed":
+        return
+    current = runtimes.get(session_id)
+    if current is None or current.adapter is not adapter:
+        return
+    with lock_for(session_id):
+        if not runtimes.remove_if_current(current):
+            return
+        model.set_transport(
+            session_id,
+            instance_id=None,
+            generation=current.generation,
+            status="disconnected",
+            reason=reason,
+        )
+
+
 def _registry_record(registry: RegistryStore, session_id: str) -> dict[str, object]:
     for record in registry.load():
         if record["id"] == session_id:

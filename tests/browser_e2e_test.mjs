@@ -82,6 +82,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     socket_root: path.join(state, 'sockets'),
     state_root: state,
     omp_bin: process.execPath,
+    show_history: true,
   }), {mode: 0o600});
   const environment = {
     PATH: process.env.PATH,
@@ -187,6 +188,18 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       cookiesEnabled,
       machineName: ompDeckApi.machine('local')?.name,
       browserHost: location.host,
+      showHistory: ompDeckApi.showHistory(),
+      build: ompDeckApi.build(),
+      buildFrozen: Object.isFrozen(ompDeckApi.build()),
+      absentBuild: ompDeckApi.parseBuild(undefined),
+      invalidBuildRejected: (() => {
+        try {
+          ompDeckApi.parseBuild({version: '1.0.0'});
+          return false;
+        } catch {
+          return true;
+        }
+      })(),
     };
   });
   assert.equal(result.projectsStatus, 200);
@@ -200,6 +213,12 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   assert(result.overflow <= 0);
   assert.equal(result.cookiesEnabled, true);
   assert.equal(result.machineName, result.browserHost);
+  assert.equal(result.showHistory, true);
+  assert.equal(typeof result.build?.version, 'string');
+  assert.equal(typeof result.build?.revision, 'string');
+  assert.equal(result.buildFrozen, true);
+  assert.equal(result.absentBuild, null);
+  assert.equal(result.invalidBuildRejected, true);
 
   // Use the real creation route; this fixture deliberately cannot launch OMP.
   // Creation must survive that failure and remain selectable below discovery depth.
@@ -929,10 +948,66 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       warningPresent: Boolean(el.detail.querySelector('.history-warning')),
       sendDisabled: el.send.disabled,
     };
+    selectAgent(active.id, {pushHistory: false});
+    el.message.value = 'draft survives hidden history';
+    el.message.dispatchEvent(new Event('input', {bubbles: true}));
+    state.showArchive = true;
+    state.showHistory = false;
+    renderSummary();
+    renderList();
+    const rejectedHiddenSelection = selectAgent(saved.id, {pushHistory: false});
+    const hiddenPresentation = {
+      toggleHidden: el['history-toggle'].hidden,
+      savedListed: Boolean(el['agent-list'].querySelector('[data-id="saved"]')),
+      rejectedHiddenSelection,
+      selectedAfterRejection: state.selectedId,
+      archiveAfterRejection: state.showArchive,
+      draftAfterRejection: el.message.value,
+    };
+
+    let url = new URL(location.href);
+    url.searchParams.set('session', saved.id);
+    history.replaceState({view: 'chat', session: saved.id}, '', url);
+    state.pendingSelection = saved.id;
+    renderFleet();
+    const hiddenDeepLink = {
+      selected: state.selectedId,
+      pending: state.pendingSelection,
+      session: new URL(location.href).searchParams.get('session'),
+    };
+
+    selectAgent(active.id, {pushHistory: false});
+    url = new URL(location.href);
+    url.searchParams.set('session', saved.id);
+    history.replaceState({view: 'chat', session: saved.id}, '', url);
+    window.dispatchEvent(new PopStateEvent('popstate', {
+      state: {view: 'chat', session: saved.id},
+    }));
+    const hiddenPopstate = {
+      selected: state.selectedId,
+      session: new URL(location.href).searchParams.get('session'),
+    };
+
+    selectAgent(active.id, {pushHistory: false});
+    active.lifecycle = 'history';
+    touchRender();
+    renderFleet();
+    const hiddenTransitionSelection = state.selectedId;
+    active.lifecycle = 'ongoing';
+    touchRender();
+    renderFleet();
+    selectAgent(active.id, {pushHistory: false});
+    const hiddenTransitionDraft = el.message.value;
+
+    state.showHistory = true;
+    state.showArchive = false;
+    renderSummary();
+    renderList();
     state.sessionScope = 'history';
     renderSummary();
     renderList();
-    const history = [...el['agent-list'].querySelectorAll('.agent-card')].map(card => card.dataset.id);
+    const historySessions = [...el['agent-list'].querySelectorAll('.agent-card')]
+      .map(card => card.dataset.id);
     const ongoingReturnCount = el['history-count'].textContent;
     selectAgent(active.id, {pushHistory: false});
     el.message.value = 'draft survives history';
@@ -952,8 +1027,9 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     renderSummary();
     renderList();
     return {
-      ongoing, history, counts, ongoingReturnCount, historyFailure, authoritativeHistory,
-      historyDetail, restoredDraft, selectedAfterReturn: state.selectedId,
+      ongoing, history: historySessions, counts, ongoingReturnCount, historyFailure, authoritativeHistory,
+      hiddenPresentation, hiddenDeepLink, hiddenPopstate, hiddenTransitionSelection,
+      hiddenTransitionDraft, historyDetail, restoredDraft, selectedAfterReturn: state.selectedId,
     };
   });
   assert.deepEqual(lifecycleDashboard.ongoing.sort(), ['active', 'offline', 'recovering', 'unknown']);
@@ -975,6 +1051,25 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     warningPresent: false,
     sendDisabled: false,
   });
+  assert.deepEqual(lifecycleDashboard.hiddenPresentation, {
+    toggleHidden: true,
+    savedListed: false,
+    rejectedHiddenSelection: false,
+    selectedAfterRejection: 'active',
+    archiveAfterRejection: true,
+    draftAfterRejection: 'draft survives hidden history',
+  });
+  assert.deepEqual(lifecycleDashboard.hiddenDeepLink, {
+    selected: null,
+    pending: null,
+    session: null,
+  });
+  assert.deepEqual(lifecycleDashboard.hiddenPopstate, {
+    selected: null,
+    session: null,
+  });
+  assert.equal(lifecycleDashboard.hiddenTransitionSelection, null);
+  assert.equal(lifecycleDashboard.hiddenTransitionDraft, 'draft survives hidden history');
   assert.deepEqual(lifecycleDashboard.historyDetail, {
     sendDisabled: true,
     placeholder: 'History is read-only',

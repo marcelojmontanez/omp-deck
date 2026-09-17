@@ -12,6 +12,7 @@ const state = {
   pendingSelection: initialSession,
   filter: 'all',
   sessionScope: 'ongoing',
+  showHistory: false,
   showTodo: false,
   showArchive: false,
   renderRevision: 0,
@@ -202,6 +203,7 @@ el['fleet-reload-button'].addEventListener('click', () => location.reload());
 
 
 el['history-toggle'].addEventListener('click', () => {
+  if (!state.showHistory) return;
   state.sessionScope = state.sessionScope === 'history' ? 'ongoing' : 'history';
   state.filter = 'all';
   document.querySelectorAll('.filter').forEach(item =>
@@ -258,11 +260,11 @@ window.addEventListener('popstate', event => {
   const session = event.state?.view === 'chat'
     ? event.state.session
     : new URL(location.href).searchParams.get('session');
-  if (session && state.agents.some(agent => agent.id === session)) {
-    selectAgent(session, {pushHistory: false});
-  } else {
-    showMenu();
-  }
+  if (session && selectAgent(session, {pushHistory: false})) return;
+  const url = new URL(location.href);
+  url.searchParams.delete('session');
+  history.replaceState({view: 'menu'}, '', url);
+  showMenu();
 });
 
 composer = createComposer({
@@ -419,6 +421,9 @@ async function showApplication() {
   const opening = el.app.hidden;
   document.getElementById('auth-screen').hidden = true;
   el.app.hidden = false;
+  state.showHistory = ompDeckApi.showHistory();
+  if (!state.showHistory) state.sessionScope = 'ongoing';
+  renderSummary();
   if (opening) document.getElementById('dashboard-title').focus();
   const requestedSession = new URL(location.href).searchParams.get('session');
   state.pendingSelection = requestedSession;

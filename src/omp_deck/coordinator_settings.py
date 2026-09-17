@@ -20,6 +20,7 @@ _CONFIG_FIELDS = {
     "allowed_hosts",
     "auth_mode",
     "tailscale_user",
+    "show_history",
 }
 COORDINATOR_COOKIE_NAME = "omp_deck_coordinator_device"
 _HOSTNAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?\Z")
@@ -34,6 +35,7 @@ class CoordinatorSettings:
     allowed_hosts: tuple[str, ...]
     auth_mode: str = "pairing"
     tailscale_user: str | None = None
+    show_history: bool = False
 
 
 def _configured_root(value, path: Path) -> Path:
@@ -100,6 +102,9 @@ def load_coordinator_settings(path) -> CoordinatorSettings:
     if not loopback and "allowed_hosts" not in values:
         raise RuntimeError("non-loopback host requires explicit allowed_hosts trusted exposure configuration")
     auth_mode, tailscale_user = auth_configuration(values, host)
+    show_history = values.get("show_history", False)
+    if type(show_history) is not bool:
+        raise RuntimeError("show_history must be a boolean")
     return CoordinatorSettings(
         host=host,
         port=port,
@@ -108,4 +113,5 @@ def load_coordinator_settings(path) -> CoordinatorSettings:
         allowed_hosts=_validate_allowed_hosts(values, host, origin),
         auth_mode=auth_mode,
         tailscale_user=tailscale_user,
+        show_history=show_history,
     )

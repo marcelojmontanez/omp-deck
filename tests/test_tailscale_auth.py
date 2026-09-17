@@ -53,7 +53,16 @@ class CoordinatorTailscaleHTTPTests(unittest.TestCase):
 
         status, _, config = self.request("GET", "/api/client-config")
         self.assertEqual(
-            (status, config), (200, {"mode": "coordinator", "authMode": "tailscale", "build": build_identity()})
+            (status, config),
+            (
+                200,
+                {
+                    "mode": "coordinator",
+                    "authMode": "tailscale",
+                    "showHistory": False,
+                    "build": build_identity(),
+                },
+            ),
         )
         self.assertNotIn("owner@example.com", json.dumps(config))
         status, headers, login = self.request("POST", "/api/auth/tailscale", {}, browser)

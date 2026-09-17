@@ -349,6 +349,7 @@ class Handler(DeckHttpHandler):
                 {
                     "mode": "local",
                     "authMode": SETTINGS.auth_mode,
+                    "showHistory": SETTINGS.show_history,
                     "build": build_identity(),
                 },
             )

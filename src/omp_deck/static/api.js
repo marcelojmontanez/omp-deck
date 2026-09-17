@@ -10,6 +10,7 @@
   let authGeneration = 0, sessionGeneration = 0;
   let mode = null;
   let authMode = null;
+  let showHistory = false;
   let build = null;
   let modeRequest = null;
   let renewalPromise = null, renewalController = null;
@@ -105,6 +106,7 @@
         const configured = ompDeckClientConfig.parse(payload);
         mode = configured.mode;
         authMode = configured.authMode;
+        showHistory = configured.showHistory;
         build = configured.build;
         if (mode === 'local') {
           initializeLocalMachine();
@@ -470,6 +472,7 @@
     ensureMode,
     mode: () => mode,
     authMode: () => authMode,
+    showHistory: () => showHistory,
     build: () => build,
     parseBuild,
     initializeFleet,

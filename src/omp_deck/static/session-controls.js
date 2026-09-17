@@ -278,16 +278,6 @@ function showDeckSettings(trigger) {
   openDialog(el['deck-settings'], dialogReturnTarget(trigger));
 }
 
-function returnToSessions() {
-  const previousId = state.selectedId;
-  closeSessionMenu();
-  const url = new URL(location.href);
-  url.searchParams.delete('session');
-  history.replaceState({view: 'menu'}, '', url);
-  showMenu();
-  const card = el['agent-list'].querySelector(`[data-id="${CSS.escape(previousId || '')}"]`);
-  (card || el['history-toggle']).focus();
-}
 
 function setSettingsBusy(busy) {
   settingsBusy = busy;

@@ -1,6 +1,6 @@
 # OMP Deck
 
-OMP Deck is a local-first mobile control surface for one developer's [Oh My Pi](https://github.com/can1357/oh-my-pi) sessions. It focuses on ongoing work: live conversation state, unread responses, todos, subagents, usage limits, and pending input requests. Retained sessions without a live attachment are available separately in History. From the browser you can launch managed sessions, continue conversations, attach images, interrupt work, and use capabilities advertised by each session.
+OMP Deck is a local-first mobile control surface for one developer's [Oh My Pi](https://github.com/can1357/oh-my-pi) sessions. It focuses on ongoing work: live conversation state, unread responses, todos, subagents, usage limits, and pending input requests. History is hidden by default and can be enabled in configuration without deleting or migrating saved conversations. From the browser you can launch managed sessions, continue conversations, attach images, interrupt work, and use capabilities advertised by each session.
 
 Deck is not a Collab replacement. It does not expose rooms, invite links, participant identities, public sharing, or multi-user arbitration. A writable Collab link may be imported as a private server-side transport credential for one terminal-owned session.
 
@@ -112,13 +112,13 @@ omp-deck serve
 
 **Ongoing** is the default view. It includes sessions with a current transport owner and managed sessions whose recovery is still requested. **Needs attention** includes pending input, failures, unavailable machines, connection recovery, and incomplete history. Summary counts and filters apply to ongoing sessions, not old records.
 
-**History** is a secondary view of retained session records without a current attachment or managed recovery intent. Conversations are read-only; their Deck names and pins remain editable. Moving a record there does not delete it, prove that its terminal process ended, or promise a complete archived transcript. A restored live attachment returns it to Ongoing. Machine outages preserve the browser's last-known session grouping rather than reclassifying every session as history.
+**History** is hidden by default. Set `"show_history": true` in the configuration of the service whose dashboard you open to restore it. History contains retained records without a current attachment or managed recovery intent. Conversations are read-only; their Deck names and pins remain editable. Hiding History only changes presentation: records and transcripts remain available to the authenticated API, so this is not an access-control or deletion setting. A restored live attachment returns a record to Ongoing. Machine outages preserve the browser's last-known grouping rather than reclassifying every session as history.
 
 Unread sessions appear first unless pinned sessions are present; pinned sessions stay ahead within the current Ongoing/History view and active filter, while the existing unread, attention, status, and name ordering remains unchanged within each group. Only meaningful assistant content creates unread state. Tool-only, thinking-only, and whitespace-only records do not create empty conversation bubbles. Image-only replies and explicit errors remain visible. Running subagents appear beneath their parent session, and supported todo lists retain their phase grouping. Completed runs that report an error remain marked as failed.
 
 Session tiles show the effective session display name and explicitly label its project and machine. Sessions with otherwise identical machine, project, and name labels receive a deterministic ordinal that stays stable when pinning, activity, or filters change. A custom Deck name does not rename the OMP conversation; resetting it reveals OMP’s current native/default title. Custom names and pins are stored in the owning node’s server registry, survive browser and service restarts, and reconcile through normal session state updates without browser storage.
 
-The conversation toolbar stays compact: provider-qualified model, effective thinking level, tasks, connection light, and session menu. Use browser Back or **All sessions** in that menu to return to the list. **Session details** shows the effective name, native/default name when customized, project directory, machine, and availability details. Existing session links still open retained history. A direct connection identifies the machine by its Deck address; the multi-machine coordinator uses enrolled machine names.
+The conversation toolbar stays compact: provider-qualified model, effective thinking level, tasks, connection light, and session menu. Use browser Back or **All sessions** in that menu to return to the list. **Session details** shows the effective name, native/default name when customized, project directory, machine, and availability details. Links to saved conversations open only when History is enabled; otherwise the browser stays with ongoing sessions. A direct connection identifies the machine by its Deck address; the multi-machine coordinator uses enrolled machine names.
 
 The session light is green for connected managed RPC, amber for connected terminal transports, red for an unavailable ongoing connection, and neutral for history. Its accessible label and **Session details** identify the connection without relying on color. Actual machine, transport, and history failures remain visible. **Deck settings**, available from the dashboard or session menu, holds terminal connection setup, local-draft clearing, logout, and device revocation.
 
@@ -278,6 +278,7 @@ Optional configuration lives at `~/.config/omp-deck/config.json` on Linux/macOS 
   "port": 8787,
   "project_root": "~/dev",
   "project_discovery_depth": 2,
+  "show_history": false,
   "session_root": "~/.omp/agent/sessions",
   "socket_root": "~/.local/state/omp-deck/sockets",
   "state_root": "~/.local/state/omp-deck",
@@ -285,6 +286,8 @@ Optional configuration lives at `~/.config/omp-deck/config.json` on Linux/macOS 
   "allowed_hosts": []
 }
 ```
+
+`show_history` accepts only JSON `true` or `false`; omitting it means `false`. For the shared dashboard, set it in the coordinator's configuration, not the individual machines' files. Restart the service whose configuration changed, then refresh its dashboard. Save unsent drafts before refreshing. No OMP restart is needed for this presentation setting.
 
 Project names are resolved beneath `project_root`; traversal, symlink escapes, broken links, and non-directories are rejected. `project_discovery_depth` limits filesystem traversal to 1–8 directory levels and defaults to `2`: direct children and grandchildren are listed, while configured depths beyond two discover only directories containing `.git`, `AGENTS.md`, `Cargo.toml`, `go.mod`, `package.json`, or `pyproject.toml`. Keep `project_root` near the common parent of your projects and increase the depth only when nested repositories must appear.
 Use real directories for the project root and its user-controlled ancestors, not symlink aliases. Empty XDG directory variables use the normal home-directory defaults rather than the current working directory.

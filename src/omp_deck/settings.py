@@ -28,6 +28,7 @@ class Settings:
     allowed_hosts: tuple[str, ...]
     auth_mode: str = "pairing"
     tailscale_user: str | None = None
+    show_history: bool = False
 
     @property
     def cursor_path(self):
@@ -118,6 +119,9 @@ def load_settings(path=None):
         raise RuntimeError("project_discovery_depth must be an integer between 1 and 8")
     host = str(values.get("host", "127.0.0.1"))
     auth_mode, tailscale_user = auth_configuration(values, host)
+    show_history = values.get("show_history", False)
+    if type(show_history) is not bool:
+        raise RuntimeError("show_history must be a boolean")
     return Settings(
         host=host,
         port=port,
@@ -130,4 +134,5 @@ def load_settings(path=None):
         allowed_hosts=allowed_hosts(values, host),
         auth_mode=auth_mode,
         tailscale_user=tailscale_user,
+        show_history=show_history,
     )

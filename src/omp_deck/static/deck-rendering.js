@@ -30,6 +30,9 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
   function lifecycle(agent) {
     return ['ongoing', 'history'].includes(agent?.lifecycle) ? agent.lifecycle : 'unknown';
   }
+  function canOpen(agent) {
+    return Boolean(agent && (state.showHistory || lifecycle(agent) !== 'history'));
+  }
   function needsAttention(agent) {
     if (lifecycle(agent) === 'history') return false;
     return lifecycle(agent) === 'unknown'
@@ -39,22 +42,9 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
       || ['needs-input', 'failed', 'degraded', 'recovering', 'disconnected', 'unknown']
         .includes(displayStatus(agent));
   }
-  function relativeTime(value) {
-    if (!value) return 'now';
-    const seconds = Math.max(0, Math.round((Date.now() - value) / 1000));
-    if (seconds < 8) return 'now';
-    if (seconds < 60) return `${seconds}s`;
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return `${minutes}m`;
-    return `${Math.floor(minutes / 60)}h`;
-  }
-  function clockTime(value) {
-    if (!value) return '';
-    const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
-  }
   function selectedAgent() {
-    return state.agents.find(agent => agent.id === state.selectedId) || null;
+    const agent = state.agents.find(candidate => candidate.id === state.selectedId) || null;
+    return canOpen(agent) ? agent : null;
   }
 
   function touchRender() {
@@ -70,8 +60,10 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
   }
   function matchesFilter(agent) {
     const agentLifecycle = lifecycle(agent);
-    if (state.sessionScope === 'history') return agentLifecycle === 'history';
-    if (agentLifecycle === 'history') return false;
+    if (agentLifecycle === 'history') {
+      return state.showHistory && state.sessionScope === 'history';
+    }
+    if (state.sessionScope === 'history') return false;
     if (state.filter === 'all') return true;
     const status = displayStatus(agent);
     if (state.filter === 'attention') return needsAttention(agent);
@@ -100,6 +92,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     return label || String(left.id || '').localeCompare(String(right.id || ''));
   }
   function renderSummary() {
+    if (!state.showHistory && state.sessionScope === 'history') state.sessionScope = 'ongoing';
     const ongoing = state.agents.filter(agent => lifecycle(agent) !== 'history');
     const statuses = ongoing.map(displayStatus);
     el['working-count'].textContent = statuses.filter(status => status === 'working').length;
@@ -108,6 +101,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     el['idle-count'].textContent = statuses.filter(status => status === 'idle').length;
     el['history-count'].textContent = state.sessionScope === 'history'
       ? ongoing.length : state.agents.length - ongoing.length;
+    el['history-toggle'].hidden = !state.showHistory;
     el['history-toggle'].setAttribute('aria-pressed', String(state.sessionScope === 'history'));
     el['history-toggle'].lastChild.textContent = state.sessionScope === 'history' ? ' Ongoing' : ' History';
     el['session-scope-title'].textContent = state.sessionScope === 'history' ? 'History' : 'Ongoing';
@@ -346,6 +340,8 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
   }
 
   function selectAgent(id, {pushHistory = true} = {}) {
+    const agent = state.agents.find(candidate => candidate.id === id);
+    if (!canOpen(agent)) return false;
     state.showArchive = false;
     state.selectedId = id;
     state.pendingSelection = null;
@@ -358,7 +354,8 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
       history.pushState({view: 'chat', session: id}, '', url);
     }
     renderDetail({selectionChanged: true});
-    markRead(selectedAgent());
+    markRead(agent);
+    return true;
   }
 
   function showMenu() {
@@ -377,10 +374,11 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     renderPendingRequest(selectedAgent());
     if (state.pendingSelection) {
       const requested = state.agents.find(agent => agent.id === state.pendingSelection);
-      if (requested) {
+      if (canOpen(requested)) {
         selectAgent(requested.id, {pushHistory: false});
       } else if (
-        ompDeckApi.machines().every(machine =>
+        requested
+        || ompDeckApi.machines().every(machine =>
           ['offline', 'unavailable'].includes(machine.status)
           || nodeState(machine.id).hasSnapshot
         )
@@ -391,11 +389,14 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
         history.replaceState({view: 'menu'}, '', url);
         showMenu();
       }
-    } else if (state.selectedId && !state.agents.some(agent => agent.id === state.selectedId)) {
-      const url = new URL(location.href);
-      url.searchParams.delete('session');
-      history.replaceState({view: 'menu'}, '', url);
-      showMenu();
+    } else {
+      const selected = state.agents.find(agent => agent.id === state.selectedId);
+      if (state.selectedId && !canOpen(selected)) {
+        const url = new URL(location.href);
+        url.searchParams.delete('session');
+        history.replaceState({view: 'menu'}, '', url);
+        showMenu();
+      }
     }
     renderMachineControls();
     renderSummary();

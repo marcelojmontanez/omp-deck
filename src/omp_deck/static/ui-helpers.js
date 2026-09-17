@@ -1,3 +1,19 @@
+function relativeTime(value) {
+  if (!value) return 'now';
+  const seconds = Math.max(0, Math.round((Date.now() - value) / 1000));
+  if (seconds < 8) return 'now';
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h`;
+}
+
+function clockTime(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+}
+
 function thinkingLevel(agent) {
   const override = thinkingOverrides.get(agent.id);
   if (typeof override === 'string' && override) return override;
@@ -119,4 +135,17 @@ if (window.visualViewport) {
     if (document.visibilityState === 'visible') scheduleVisualViewportSync();
   });
   scheduleVisualViewportSync();
+}
+function returnToSessions() {
+  const previousId = state.selectedId;
+  closeSessionMenu();
+  const url = new URL(location.href);
+  url.searchParams.delete('session');
+  history.replaceState({view: 'menu'}, '', url);
+  showMenu();
+  const card = el['agent-list'].querySelector(`[data-id="${CSS.escape(previousId || '')}"]`);
+  const fallback = el['history-toggle'].hidden
+    ? el['agent-list'].querySelector('[data-id]') || document.getElementById('dashboard-title')
+    : el['history-toggle'];
+  (card || fallback).focus();
 }

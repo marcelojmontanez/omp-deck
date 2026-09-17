@@ -96,6 +96,7 @@ class CoordinatorHandler(DeckHttpHandler):
                 {
                     "mode": "coordinator",
                     "authMode": self.context.policy.mode,
+                    "showHistory": self.context.settings.show_history,
                     "build": build_identity(),
                 },
             )

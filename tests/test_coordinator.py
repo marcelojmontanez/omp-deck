@@ -96,6 +96,18 @@ class CoordinatorStoreTests(unittest.TestCase):
         settings = load_coordinator_settings(config)
 
         self.assertEqual((settings.host, settings.port), ("127.0.0.1", 8790))
+        self.assertFalse(settings.show_history)
+
+        config.write_text(json.dumps({"origin": self.origin, "state_root": str(state), "show_history": True}))
+        os.chmod(config, 0o600)
+        self.assertTrue(load_coordinator_settings(config).show_history)
+
+        for value in (0, 1, "true", None, []):
+            with self.subTest(show_history=value):
+                config.write_text(json.dumps({"origin": self.origin, "state_root": str(state), "show_history": value}))
+                os.chmod(config, 0o600)
+                with self.assertRaisesRegex(RuntimeError, "show_history"):
+                    load_coordinator_settings(config)
         config.write_text(json.dumps({"host": "0.0.0.0", "origin": self.origin, "state_root": str(state)}))
         os.chmod(config, 0o600)
         with self.assertRaisesRegex(RuntimeError, "explicit allowed_hosts"):
@@ -207,6 +219,7 @@ class CoordinatorHTTPTests(unittest.TestCase):
             origin="https://coordinator.example",
             state_root=Path(self.temp.name) / "state",
             allowed_hosts=("127.0.0.1", "coordinator.example"),
+            show_history=True,
         )
         self.context = CoordinatorContext.create(self.settings)
         self.enrollment = self.context.store.add_machine("Workstation", "https://workstation.example")
@@ -248,7 +261,15 @@ class CoordinatorHTTPTests(unittest.TestCase):
                 response = connection.getresponse()
                 self.assertEqual(
                     (response.status, json.loads(response.read())),
-                    (200, {"mode": "coordinator", "authMode": "pairing", "build": build_identity()}),
+                    (
+                        200,
+                        {
+                            "mode": "coordinator",
+                            "authMode": "pairing",
+                            "showHistory": False,
+                            "build": build_identity(),
+                        },
+                    ),
                 )
             finally:
                 connection.close()
@@ -285,7 +306,16 @@ class CoordinatorHTTPTests(unittest.TestCase):
     def test_public_surface_discloses_neither_roster_nor_machine_csp(self):
         status, headers, payload = self.request("GET", "/api/client-config")
         self.assertEqual(
-            (status, payload), (200, {"mode": "coordinator", "authMode": "pairing", "build": build_identity()})
+            (status, payload),
+            (
+                200,
+                {
+                    "mode": "coordinator",
+                    "authMode": "pairing",
+                    "showHistory": True,
+                    "build": build_identity(),
+                },
+            ),
         )
         self.assertNotIn("workstation.example", headers["Content-Security-Policy"])
 

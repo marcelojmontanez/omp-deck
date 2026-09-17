@@ -216,6 +216,16 @@ def normalize_todos(values: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]
     return normalized
 
 
+def todos_from_tool_result(tool_name: object, result: object) -> list[dict[str, Any]] | None:
+    if tool_name != "todo" or not isinstance(result, Mapping):
+        return None
+    details = result.get("details")
+    phases = details.get("phases") if isinstance(details, Mapping) else None
+    if not isinstance(phases, list) or any(not isinstance(phase, Mapping) for phase in phases):
+        return None
+    return normalize_todos(phases)
+
+
 def pending_ui_projection(
     value: PendingUiRequest | Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:

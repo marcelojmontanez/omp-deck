@@ -29,6 +29,14 @@ export function projectMessage(value: unknown): unknown {
   return result;
 }
 
+export function projectTodoResult(toolName: string, result: unknown): unknown[] | undefined {
+  if (toolName !== "todo" || !result || typeof result !== "object" || !("details" in result)) return;
+  const details = result.details;
+  if (!details || typeof details !== "object" || !("phases" in details)) return;
+  const phases = details.phases;
+  if (Array.isArray(phases) && phases.every(phase => phase && typeof phase === "object" && !Array.isArray(phase))) return phases;
+}
+
 export function captureHistory(context: ExtensionContext): readonly unknown[] {
   const branch = context.sessionManager.getBranch();
   const messages: unknown[] = [];

@@ -15,6 +15,7 @@ from ._fleet_projection import (
     plain_json,
     rpc_projection,
     strict_clone,
+    todos_from_tool_result,
 )
 from ._fleet_registry import registry_session
 from ._session_activity import clear_activity, completion_state, update_tool_activity
@@ -291,6 +292,10 @@ class FleetModel:
                     event.payload.get("tool_name"),
                     event.payload.get("intent"),
                 )
+                if phase == "end":
+                    todos = todos_from_tool_result(event.payload.get("tool_name"), event.payload.get("result"))
+                    if todos is not None:
+                        session["todos"] = todos
                 if phase != "end" and session.get("pendingUiRequest") is None:
                     session["state"] = "working"
             self._snapshot_generation += 1

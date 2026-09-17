@@ -7,7 +7,7 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { authenticateNamedPipe } from "./named-pipe-auth.ts";
 import { BoundedSocketWriter } from "./bounded-writer.ts";
 import { BoundedEventQueue } from "./bounded-event-queue.ts";
-import { captureHistory, projectMessage, streamHistory } from "./history-sync.ts";
+import { captureHistory, projectMessage, projectTodoResult, streamHistory } from "./history-sync.ts";
 import { deliverUserMessage } from "./image-content.ts";
 import { degradedSnapshot, readThinkingState, setThinking } from "./thinking-state.ts";
 const PROTOCOL = "omp-deck-fallback-v1";
@@ -452,10 +452,12 @@ export default function ompDeck(pi: ExtensionAPI) {
       }
     }, HEARTBEAT_MS);
   }
-  function toolEvent(phase: string, event: { toolCallId: string; toolName: string; intent?: string }): void {
+  function toolEvent(phase: string, event: { toolCallId: string; toolName: string; intent?: string; result?: unknown }): void {
     const terminalOnly = event.toolName.toLowerCase() === "ask";
     emit("tool", { phase, toolCallId: event.toolCallId, toolName: event.toolName, intent: event.intent,
       ...(terminalOnly ? { terminalOnly: true, instruction: "Answer this request in the terminal" } : {}) });
+    const todos = phase === "end" ? projectTodoResult(event.toolName, event.result) : undefined;
+    if (todos) emit("todo", { todos });
   }
   // Handlers are deliberately registered synchronously during factory load.
   pi.on("session_start", async (_event, context) => {
@@ -480,7 +482,6 @@ export default function ompDeck(pi: ExtensionAPI) {
   pi.on("tool_execution_update", (event) => toolEvent("update", event));
   pi.on("tool_execution_end", (event) => toolEvent("end", event));
   pi.on("todo_reminder", (event) => emit("todo", { todos: event.todos, attempt: event.attempt }));
-  pi.on("goal_updated", (event) => emit("todo", { goal: event.goal, state: event.state }));
   pi.on("turn_end", (_event, context) => emit("async", { snapshot: context.getAsyncJobSnapshot() }));
   pi.on("session_shutdown", async () => {
     stopping = true;

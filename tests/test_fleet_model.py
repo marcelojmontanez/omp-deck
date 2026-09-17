@@ -73,6 +73,32 @@ class FleetModelTests(unittest.TestCase):
         )
         return model
 
+    def test_rpc_todos_follow_structured_tool_results(self):
+        model = self.connected_model()
+        phases = [{"name": "Release", "tasks": [{"content": "ship", "status": "completed"}]}]
+
+        def update(sequence, phases, tool_name="todo"):
+            model.apply_adapter_event(
+                "deck-1",
+                instance_id="instance-a",
+                generation=3,
+                event=self.event(
+                    sequence,
+                    "tool_execution_end",
+                    {"tool_name": tool_name, "result": {"details": {"phases": phases, "storage": "session"}}},
+                ),
+            )
+
+        update(1, phases)
+        completed = [{"content": "ship", "status": "completed", "phase": "Release"}]
+        self.assertEqual(model.get("deck-1")["todos"], completed)
+        update(2, [], tool_name="read")
+        update(3, "malformed")
+        update(1, [])
+        self.assertEqual(model.get("deck-1")["todos"], completed)
+        update(4, [])
+        self.assertEqual(model.get("deck-1")["todos"], [])
+
     def test_rpc_snapshot_is_normalized_for_public_consumers(self):
         model = self.connected_model()
 

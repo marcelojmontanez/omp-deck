@@ -225,7 +225,7 @@ button.chip:active { background: #283247; }
 .deck-dialog::backdrop { background: #000a; }
 .deck-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .deck-dialog h2 { font-size: 17px; }
-.deck-dialog [data-close-dialog] { width: 44px; height: 44px; border: 0; border-radius: 9px; background: transparent; color: var(--text); font-size: 24px; cursor: pointer; }
+.deck-dialog header [data-close-dialog] { width: 44px; height: 44px; border: 0; border-radius: 9px; background: transparent; color: var(--text); font-size: 24px; cursor: pointer; }
 .deck-dialog dl { display: grid; grid-template-columns: minmax(4.5rem, 1fr) minmax(0, 3fr); gap: 12px; margin: 0; font-size: 13px; }
 .deck-dialog dt { color: var(--muted); overflow-wrap: anywhere; }
 .deck-dialog dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }

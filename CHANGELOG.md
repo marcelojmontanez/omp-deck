@@ -34,6 +34,8 @@
 
 - Keep portrait and landscape attachment previews inside their cards, display the whole image, and keep remove buttons visible and reachable on phones.
 - Refresh managed conversations when a native turn finishes, including when prompt acceptance precedes image processing. Display supported inline RPC images through the authenticated private blob viewer.
+- Preserve inline images in terminal conversation history and live messages instead of showing empty image placeholders. Existing terminal sessions need an idle restart and resume to load extension 1.3.5.
+- Let reads waiting on expired access follow a replacement foreground renewal instead of reporting a false expiry; cancelled reads remain cancelled.
 
 - Prevent stale access checks, superseded event streams, and incidental refresh failures from falsely marking a reachable machine unavailable or disrupting composer focus.
 - Recover on browser foreground and page resume without waiting for stuck network reads or stale access renewal. Preserve drafts and selection while reconnecting, including when a suspended request does not settle after cancellation.

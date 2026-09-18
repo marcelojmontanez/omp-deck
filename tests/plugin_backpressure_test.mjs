@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import {mkdtemp, readFile, readdir, rm} from 'node:fs/promises';
+import {createHash} from 'node:crypto';
+import {mkdir, mkdtemp, readFile, readdir, rm, writeFile} from 'node:fs/promises';
 import net from 'node:net';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
@@ -18,12 +19,26 @@ async function fixture(messages, options = {}) {
   const timers = new Set();
   const intervalCallbacks = [];
   let abortCalls = 0;
+  const blobRoot = path.join(root, 'blobs');
+  const warnings = [];
   const context = {
     mode: 'tui', cwd: '/work/backpressure', model: options.model ?? null,
     sessionManager: {
       getSessionId: () => 'backpressure-test', getSessionFile: () => null,
       getSessionName: () => 'Backpressure test',
       getBranch: () => messages.map((message, index) => ({type: 'message', id: String(index), message})),
+      async putBlob(data) {
+        const hash = createHash('sha256').update(data).digest('hex');
+        const blobPath = path.join(blobRoot, hash);
+        await mkdir(blobRoot, {recursive: true});
+        await writeFile(blobPath, data);
+        return {
+          hash,
+          path: blobPath,
+          displayPath: blobPath,
+          get ref() { return `blob:sha256:${hash}`; },
+        };
+      },
     },
     isIdle: () => true, hasPendingMessages: () => false,
     getAsyncJobSnapshot: () => options.asyncJobs ?? [],
@@ -33,7 +48,8 @@ async function fixture(messages, options = {}) {
     abort() { abortCalls++; }, shutdown() {},
   };
   const pi = {
-    pi: {VERSION: 'test'}, logger: {warn() {}}, on(name, handler) { handlers.set(name, handler); },
+    pi: {VERSION: 'test'}, logger: {warn(message, details) { warnings.push([message, details]); }},
+    on(name, handler) { handlers.set(name, handler); },
     async sendUserMessage() {},
     getThinkingLevel() { return options.thinking; },
     setThinkingLevel() {},
@@ -61,7 +77,10 @@ async function fixture(messages, options = {}) {
     if (previousStateHome === undefined) delete process.env[stateVariable]; else process.env[stateVariable] = previousStateHome;
     await rm(root, {recursive: true, force: true});
   }
-  return {connect, cleanup, context, handlers, timers, intervalCallbacks, get abortCalls() { return abortCalls; }};
+  return {
+    blobRoot, connect, cleanup, context, handlers, timers, warnings, intervalCallbacks,
+    get abortCalls() { return abortCalls; },
+  };
 }
 
 test('fragmented request input preserves extension framing', async () => {
@@ -180,6 +199,66 @@ test('disconnecting a history consumer does not stall plugin shutdown', async ()
   }
 });
 
+test('inline user images become bounded readable blob references for live events and history', async () => {
+  const imageBytes = Buffer.alloc(2 * 1024 * 1024);
+  Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl9ZAAAAABJRU5ErkJggg==',
+    'base64',
+  ).copy(imageBytes);
+  const inlineImage = {type: 'image', data: imageBytes.toString('base64'), mimeType: 'image/png'};
+  const message = {
+    role: 'user',
+    timestamp: 1,
+    content: [{type: 'text', text: 'inspect'}, inlineImage],
+  };
+  const app = await fixture([message]);
+  const digest = createHash('sha256').update(imageBytes).digest('hex');
+  const reference = `blob:sha256:${digest}`;
+  let socket;
+  try {
+    socket = await app.connect();
+    const lines = readline.createInterface({input: socket, crlfDelay: Infinity});
+    const frames = lines[Symbol.asyncIterator]();
+    await frames.next();
+    await frames.next();
+
+    await app.handlers.get('message_end')({message}, app.context);
+    const liveLine = (await frames.next()).value;
+    const live = JSON.parse(liveLine);
+    assert.equal(live.kind, 'message');
+    assert(Buffer.byteLength(liveLine) < 4096);
+    assert.deepEqual(live.data.message.content, [
+      {type: 'text', text: 'inspect'},
+      {type: 'image', data: reference},
+    ]);
+    assert.deepEqual(await readFile(path.join(app.blobRoot, digest)), imageBytes);
+
+    socket.write(`${JSON.stringify({
+      protocol: 'omp-deck-fallback-v1', type: 'request', id: 'image-history', action: 'syncHistory',
+    })}\n`);
+    const historyLine = (await frames.next()).value;
+    const history = JSON.parse(historyLine);
+    assert.equal(history.kind, 'history');
+    assert(Buffer.byteLength(historyLine) < 4096);
+    assert.deepEqual(history.data.messages[0].content, live.data.message.content);
+    assert.equal(JSON.parse((await frames.next()).value).ok, true);
+
+    app.context.sessionManager.putBlob = async () => { throw new Error('/private/sensitive-image-store unavailable'); };
+    await app.handlers.get('message_end')({message}, app.context);
+    const failed = JSON.parse((await frames.next()).value);
+    assert.deepEqual(failed.data.message.content, [
+      {type: 'text', text: 'inspect'},
+      {type: 'image'},
+    ]);
+    assert.equal(app.warnings.length, 1);
+    assert.doesNotMatch(JSON.stringify(app.warnings), /sensitive-image-store/);
+    lines.close();
+  } finally {
+    socket?.destroy();
+    await app.cleanup();
+  }
+});
+
 test('a synchronous event flood cannot create an unbounded outbound frame queue', async () => {
   const app = await fixture([]);
   let socket;
@@ -192,7 +271,7 @@ test('a synchronous event flood cannot create an unbounded outbound frame queue'
     const closed = new Promise(resolve => socket.once('close', resolve));
     socket.pause();
     for (let index = 0; index < 300; index++) {
-      app.handlers.get('message_end')({message: {role: 'assistant', content: String(index)}});
+      void app.handlers.get('message_end')({message: {role: 'assistant', content: String(index)}}, app.context);
     }
     // Drain already-written bytes so the peer's close is observable locally.
     socket.resume();
@@ -267,7 +346,7 @@ test('overlapping histories stay contiguous and live messages follow the replace
     void app.handlers.get('session_tree')({}, app.context);
     const live = {role: 'assistant', content: 'live after replacement'};
     messages.push(live);
-    app.handlers.get('message_end')({message: live});
+    void app.handlers.get('message_end')({message: live}, app.context);
 
     const syncBuffers = new Map([[first.data.syncId, [...first.data.messages]]]);
     const completedSyncs = [];
@@ -347,7 +426,7 @@ test('large tool payloads cannot replace conversation history or lifecycle with 
     app.handlers.get('tool_execution_update')(tool);
     app.handlers.get('tool_execution_end')(tool);
     app.handlers.get('message_update')({message: answer, assistantMessageEvent: {partial: large}});
-    app.handlers.get('message_end')({message: answer});
+    await app.handlers.get('message_end')({message: answer}, app.context);
     app.handlers.get('turn_end')({messages, toolResults: large}, app.context);
     app.handlers.get('agent_end')({messages}, app.context);
     const events = [];
@@ -419,7 +498,7 @@ test('live events queued behind history have an aggregate byte bound', async () 
     socket.pause();
     const content = 'x'.repeat(900 * 1024);
     for (let index = 0; index < 5; index++) {
-      app.handlers.get('message_end')({message: {role: 'assistant', content}});
+      await app.handlers.get('message_end')({message: {role: 'assistant', content}}, app.context);
     }
     socket.resume();
     await Promise.race([

@@ -330,6 +330,8 @@
         scheduleAccessTimers();
         return machineList();
       } catch (error) {
+        if (controller.signal.aborted && renewalController !== controller
+          && requestGeneration === authGeneration && authenticated && renewalPromise) return renewalPromise;
         if (controller.signal.aborted || requestGeneration !== authGeneration) throw error;
         scheduleAccessTimers();
         clearTimeout(renewalTimer);
@@ -372,9 +374,11 @@
     }
     if (!machine.accessToken || Date.now() >= machine.expiresAt * 1000) {
       if (allowRenew) {
-        try { await renewAccess(); } catch {}
+        await renewAccess();
         machine = machines.get(machineId);
       }
+      if (fetchOptions.signal?.aborted) throw fetchOptions.signal.reason;
+      if (requestGeneration !== authGeneration) throw new DOMException('Machine request is stale', 'AbortError');
       if (!machine?.accessToken || Date.now() >= machine.expiresAt * 1000) {
         if (machine) setMachineStatus(machine, 'unavailable', 'Access expired; reconnect to the coordinator');
         throw new Error(`Access to ${machine?.name || 'machine'} has expired`);
@@ -407,7 +411,8 @@
     if (response.status === 401 && allowRenew) {
       try {
         await renewAccess();
-      } catch {
+      } catch (error) {
+        if (fetchOptions.signal?.aborted || error?.name === 'AbortError') throw fetchOptions.signal?.reason || error;
         if (accessAuthority.isLatest(accessObservation)) {
           setMachineStatus(machines.get(machineId), 'unavailable', 'Machine access was rejected and could not be renewed');
         }

@@ -10,8 +10,9 @@ const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0
 type UserMessageContent = Parameters<ExtensionAPI["sendUserMessage"]>[0];
 type UserMessagePart = Exclude<UserMessageContent, string>[number];
 
-interface ValidatedImage {
+export interface NormalizedInlineImage {
   content: UserMessagePart;
+  data: Buffer;
   bytes: number;
 }
 
@@ -27,13 +28,9 @@ function detectedMimeType(data: Buffer): string | undefined {
   return undefined;
 }
 
-function imageContent(value: unknown): ValidatedImage {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid images");
+export function normalizeInlineImage(value: unknown): NormalizedInlineImage {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid image");
   const image = value as Record<string, unknown>;
-  const keys = Object.keys(image);
-  if (keys.length !== 3 || !keys.includes("type") || !keys.includes("data") || !keys.includes("mimeType")) {
-    throw new Error("invalid image");
-  }
   if (image.type !== "image" || typeof image.data !== "string" || typeof image.mimeType !== "string") {
     throw new Error("invalid image");
   }
@@ -49,8 +46,18 @@ function imageContent(value: unknown): ValidatedImage {
   if (detectedMimeType(decoded) !== image.mimeType) throw new Error("invalid image");
   return {
     content: { type: "image", data: image.data, mimeType: image.mimeType },
+    data: decoded,
     bytes: decoded.length,
   };
+}
+
+function imageContent(value: unknown): NormalizedInlineImage {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid images");
+  const keys = Object.keys(value);
+  if (keys.length !== 3 || !keys.includes("type") || !keys.includes("data") || !keys.includes("mimeType")) {
+    throw new Error("invalid image");
+  }
+  return normalizeInlineImage(value);
 }
 
 function userMessageContent(message: unknown, images: unknown): UserMessageContent {

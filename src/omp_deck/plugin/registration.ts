@@ -1,3 +1,4 @@
+import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { MAX_IMAGE_BYTES, MAX_IMAGES } from "./image-content.ts";
 
 export const REGISTRATION_ATTACHMENT_LIMITS = {
@@ -17,3 +18,9 @@ export const REGISTRATION_CAPABILITIES = {
   answerUiRequest: false,
   answer_ui_request: false,
 } as const;
+
+export const sessionIdentity = (context: ExtensionContext): { id: string; file: string | null; title: string | null } => ({
+  id: context.sessionManager.getSessionId(),
+  file: context.sessionManager.getSessionFile() || null,
+  title: context.sessionManager.getSessionName() || null,
+});

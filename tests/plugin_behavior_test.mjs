@@ -236,7 +236,10 @@ test('plugin events preserve sequence and synchronize active history', async () 
     assert.equal(heartbeat.data.thinking, 'low');
     assert.deepEqual(heartbeat.data.thinkingLevels, ['off', 'low', 'medium', 'high', 'xhigh']);
 
-    handlers.get('message_end')({message: {role: 'assistant', content: 'x'.repeat(1024 * 1024)}});
+    await handlers.get('message_end')(
+      {message: {role: 'assistant', content: 'x'.repeat(1024 * 1024)}},
+      context,
+    );
     const degraded = JSON.parse((await frames.next()).value);
     assert.equal(degraded.kind, 'degraded');
     assert.equal(degraded.data.droppedKind, 'message');

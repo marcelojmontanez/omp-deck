@@ -1,6 +1,6 @@
 {
   "name": "omp-deck",
-  "version": "1.3.4",
+  "version": "1.3.5",
   "description": "OMP Deck session bridge extension",
   "type": "module",
   "license": "MIT",

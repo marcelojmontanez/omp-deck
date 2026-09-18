@@ -9,9 +9,9 @@ import { BoundedSocketWriter } from "./bounded-writer.ts";
 import { BoundedEventQueue } from "./bounded-event-queue.ts";
 import { BoundedLineReader } from "./bounded-line-reader.ts";
 import { BoundedRequestDispatcher } from "./bounded-request-dispatcher.ts";
-import { captureHistory, projectMessage, projectTodoResult, streamHistory } from "./history-sync.ts";
+import { captureHistory, createProjectionQueue, projectMessage, projectTodoResult, streamHistory } from "./history-sync.ts";
 import { deliverUserMessage } from "./image-content.ts";
-import { REGISTRATION_ATTACHMENT_LIMITS, REGISTRATION_CAPABILITIES } from "./registration.ts";
+import { REGISTRATION_ATTACHMENT_LIMITS, REGISTRATION_CAPABILITIES, sessionIdentity } from "./registration.ts";
 import { degradedSnapshot, readThinkingState, setThinking } from "./thinking-state.ts";
 const PROTOCOL = "omp-deck-fallback-v1";
 const MAX_LINE_BYTES = 1024 * 1024;
@@ -60,11 +60,11 @@ export default function ompDeck(pi: ExtensionAPI) {
   let lifecycleGeneration = 0;
   let lifecycleTail = Promise.resolve();
   let historyGeneration = 0;
-  const sessionIdentity = (context: ExtensionContext): { id: string; file: string | null; title: string | null } => ({
-    id: context.sessionManager.getSessionId(),
-    file: context.sessionManager.getSessionFile() || null,
-    title: context.sessionManager.getSessionName() || null,
+  const serializeProjection = createProjectionQueue(() => lifecycleGeneration, () => {
+    pi.logger.warn("OMP Deck projection queue is full; reconnecting consumers");
+    for (const peer of peers) peer.socket.destroy();
   });
+  const projectionWarning = pi.logger.warn.bind(pi.logger);
   const registration = (context: ExtensionContext): JsonObject => {
     const session = sessionIdentity(context);
     return {
@@ -181,9 +181,13 @@ export default function ompDeck(pi: ExtensionAPI) {
       return completed;
     });
   }
-  function emitHistory(context: ExtensionContext): void {
-    const messages = captureHistory(context);
-    for (const peer of peers) void sendHistory(peer, messages);
+  function emitHistory(context: ExtensionContext): Promise<void> {
+    const branch = context.sessionManager.getBranch();
+    return serializeProjection(async current => {
+      const messages = await captureHistory(context, projectionWarning, branch);
+      if (!current()) return;
+      for (const peer of peers) void sendHistory(peer, messages);
+    });
   }
   function snapshots(context: ExtensionContext): JsonObject {
     return {
@@ -245,9 +249,14 @@ export default function ompDeck(pi: ExtensionAPI) {
           }
           return;
         }
-        case "syncHistory":
-          await sendHistory(peer, captureHistory(active));
+        case "syncHistory": {
+          const branch = active.sessionManager.getBranch();
+          const pending = await serializeProjection(async () => ({
+            completion: sendHistory(peer, await captureHistory(active, projectionWarning, branch)),
+          }));
+          await pending.completion;
           break;
+        }
         case "pong":
           peer.lastPong = Date.now();
           break;
@@ -457,14 +466,17 @@ export default function ompDeck(pi: ExtensionAPI) {
   });
   pi.on("session_switch", async (_event, context) => { ctx = context; emit("lifecycle", { state: "session_switch" }); await queueRestart(context); });
   pi.on("session_branch", async (_event, context) => { ctx = context; emit("lifecycle", { state: "session_branch" }); await queueRestart(context); });
-  pi.on("session_tree", (_event, context) => { ctx = context; emitHistory(context); });
-  pi.on("session_compact", (_event, context) => { ctx = context; emitHistory(context); });
+  pi.on("session_tree", (_event, context) => { ctx = context; return emitHistory(context); });
+  pi.on("session_compact", (_event, context) => { ctx = context; return emitHistory(context); });
   pi.on("agent_start", () => emit("lifecycle", { state: "agent_start" }));
   pi.on("turn_start", (_event, context) => emit("thinking", readThinkingState(pi, context)));
   pi.on("agent_end", (_event, context) => emit("lifecycle", { state: "agent_end", snapshot: snapshots(context) }));
   pi.on("message_start", () => emit("message", { phase: "start" }));
   pi.on("message_update", () => emit("message", { phase: "update" }));
-  pi.on("message_end", (event) => emit("message", { phase: "end", message: projectMessage(event.message) }));
+  pi.on("message_end", (event, context) => serializeProjection(async current => {
+    const message = await projectMessage(event.message, context, projectionWarning);
+    if (current()) emit("message", { phase: "end", message });
+  }));
   pi.on("tool_execution_start", (event) => toolEvent("start", event));
   pi.on("tool_execution_update", (event) => toolEvent("update", event));
   pi.on("tool_execution_end", (event) => toolEvent("end", event));

@@ -45,6 +45,61 @@ export async function verifyForegroundRecovery(page) {
     draft: 'Keep this draft across suspension',
   }, 'Foreground access must replace a renewal queued in the same turn, not join its stuck request');
 
+  for (const cancel of [false, true]) {
+    const waitingRead = await page.evaluate(async cancel => {
+      const originalFetch = window.fetch;
+      const originalNow = Date.now;
+      const controller = new AbortController();
+      let started, rejectHeld, held = false, dispatched = 0, expired = false;
+      const began = new Promise(resolve => { started = resolve; });
+      const statusChanged = () => {
+        expired ||= ompDeckApi.machines().some(machine => /expired/i.test(machine.error || ''));
+      };
+      window.addEventListener('omp-deck-node-status', statusChanged);
+      window.fetch = async (input, options = {}) => {
+        const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+        if (!held && url.pathname === '/api/fleet/access') {
+          held = true;
+          started();
+          return new Promise((_, reject) => { rejectHeld = reject; });
+        }
+        if (url.pathname === '/api/fleet/access') {
+          const response = await originalFetch(input, options);
+          const payload = await response.json();
+          // Advance fresh ticket metadata with the simulated clock; old access stays expired.
+          for (const machine of payload.machines) machine.expiresAt += 120;
+          return new Response(JSON.stringify(payload), {status: response.status, headers: response.headers});
+        }
+        if (options.signal === controller.signal) dispatched += 1;
+        return originalFetch(input, options);
+      };
+      let read;
+      try {
+        Date.now = () => originalNow() + 120_000;
+        read = ompDeckApi.request(
+          `/api/sessions/${encodeURIComponent(selectedAgent().id)}/deliveries`,
+          {signal: controller.signal},
+        ).then(response => ({status: response.status}), error => ({error: error.name}));
+        await began;
+        if (cancel) controller.abort();
+        await ompDeckApi.recoverAccess();
+        return {result: await read, dispatched, expired};
+      } finally {
+        Date.now = originalNow;
+        window.fetch = originalFetch;
+        window.removeEventListener('omp-deck-node-status', statusChanged);
+        rejectHeld?.(new TypeError('Superseded read released'));
+        if (read) await read;
+        await recoverLiveConnections();
+      }
+    }, cancel);
+    assert.deepEqual(waitingRead, {
+      result: cancel ? {error: 'AbortError'} : {status: 200},
+      dispatched: cancel ? 0 : 1,
+      expired: false,
+    }, 'A replaced access renewal must preserve waiting reads without reviving cancelled requests');
+  }
+
   for (const trigger of ['focus', 'visibilitychange']) {
     const resumed = await page.evaluate(async trigger => {
       const originalFetch = window.fetch;

@@ -24,7 +24,7 @@ from .installation_paths import (
     validate_ownership_claim,
 )
 
-PLUGIN_VERSION = "1.3.4"
+PLUGIN_VERSION = "1.3.5"
 PLUGIN_NAME = "omp-deck"
 PLUGIN_ROOT = Path(__file__).resolve().parent / "plugin"
 

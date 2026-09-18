@@ -115,7 +115,7 @@
         const {value, done} = await reader.read();
         if (done) break;
         size += value.byteLength;
-        if (size > 16 * 1024 * 1024) throw new Error('Image is too large to display');
+        if (size > 20 * 1024 * 1024) throw new Error('Image is too large to display');
         chunks.push(value);
       }
       return new Blob(chunks, {type});
@@ -132,7 +132,7 @@
       const blob = await ompDeckNetwork.runBounded(
         signal => fetchImage(record.machineId, record.path, signal),
         controller.signal,
-        ompDeckNetwork.STARTUP_TIMEOUT_MS,
+        120_000,
       );
       if (
         generation !== currentGeneration

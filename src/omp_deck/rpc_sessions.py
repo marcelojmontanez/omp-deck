@@ -38,8 +38,6 @@ class _Runtime:
 
 
 class RpcSessionManager:
-    """Owns Deck-launched RPC processes without making process state fleet state."""
-
     def __init__(
         self,
         settings: Settings,
@@ -451,12 +449,14 @@ class RpcSessionManager:
                 )
 
     def _on_event(self, runtime: _Runtime, event: AdapterEvent) -> None:
-        self.model.apply_adapter_event(
+        applied = self.model.apply_adapter_event(
             runtime.session_id,
             instance_id=runtime.instance_id,
             generation=runtime.generation,
             event=event,
         )
+        if applied and event.type == "agent_end" and event.payload.get("is_terminal") is not False:
+            self._refreshes.request((runtime.session_id,))
 
     def _operation_lock(self, session_id: str) -> threading.RLock:
         with self._lock:

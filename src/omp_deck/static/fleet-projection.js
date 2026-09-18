@@ -140,6 +140,7 @@ function projectSession(session, machine = null) {
     bridgeConnected: session.transport?.status === 'connected',
     activitySummary,
     capabilities: session.capabilities || {},
+    attachmentLimits: session.attachmentLimits || null,
     transport: session.transport || {kind: 'unknown', status: 'unknown', label: 'Transport unavailable', reason: null},
     transportReason: typeof session.transport?.reason === 'string' && session.transport.reason.trim()
       ? session.transport.reason

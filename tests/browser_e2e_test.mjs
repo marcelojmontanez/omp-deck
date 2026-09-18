@@ -881,6 +881,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       project: 'deck', label: `${id} conversation`, machineName: 'Workstation',
       machineId: 'local', nodeAvailable: true, bridgeConnected: true,
       inboxState: 'read', capabilities: {sendMessage: true, attachments: true},
+      attachmentLimits: {maxImages: 4, maxTotalBytes: 20 * 1024 * 1024},
       transport: {status: 'connected', label: 'Session connected'},
       subagents: [], pendingUiRequest: null,
       session: {activity: [], archiveActivity: [], updatedMs: Date.now()},
@@ -1091,6 +1092,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       inboxState: 'read',
       bridgeConnected: true,
       capabilities: {sendMessage: true, followUp: true, attachments: true},
+      attachmentLimits: {maxImages: 4, maxTotalBytes: 20 * 1024 * 1024},
       transport: {kind: 'rpc', status: 'connected', label: 'RPC'},
       subagents: [],
       session: {activity: [], todo: '', updatedMs: Date.now()},
@@ -1394,6 +1396,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     const originalSelection = state.selectedId;
     state.agents = [...originalAgents, ...['attachment-limit-session', 'other-attachment-session'].map(id => ({
       id, lifecycle: 'ongoing', capabilities: {attachments: true},
+      attachmentLimits: {maxImages: 4, maxTotalBytes: 20 * 1024 * 1024},
     }))];
     const OriginalFileReader = globalThis.FileReader;
     const originalCreateObjectURL = URL.createObjectURL;
@@ -1443,8 +1446,9 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
 
       composer.clearLocalData();
       readers.length = 0;
+      state.agents.find(agent => agent.id === 'attachment-limit-session').attachmentLimits.maxTotalBytes = 10 * 1024 * 1024;
       const largeBatch = prefix => [0, 1].map(index => new File(
-        [new Uint8Array(200 * 1024)],
+        [new Uint8Array(3 * 1024 * 1024)],
         `${prefix}-${index}.png`,
         {type: 'image/png'},
       ));

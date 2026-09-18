@@ -19,19 +19,43 @@
   cursor: pointer;
 }
 .delivery-mode button[aria-pressed="true"] { border-color: var(--cyan); font-weight: 850; }
-.attachments { display: flex; gap: 9px; padding: 7px 7px 11px; overflow-x: auto; }
+.attachments {
+  display: flex;
+  gap: 9px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 7px 7px 11px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+}
 .attachments:empty { display: none; }
 .attachment {
   display: grid;
   grid-template-columns: 60px 44px;
-  flex: 0 0 auto;
+  grid-template-rows: 60px;
+  flex: 0 0 104px;
   width: 104px;
   height: 60px;
+  overflow: hidden;
+  border-radius: 9px;
+}
+.attachment > button {
+  min-width: 0;
+  min-height: 0;
+  max-width: 100%;
+  max-height: 100%;
+}
+.attachment > button:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline-offset: -2px;
 }
 .attachment img {
+  display: block;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
   filter: brightness(.68);
   border-radius: 9px;
   border: 1px solid var(--line-bright);
@@ -39,14 +63,18 @@
 .attachment-preview {
   width: 100%;
   height: 100%;
+  min-width: 0;
+  min-height: 0;
   padding: 0;
+  overflow: hidden;
   border: 0;
-  background: transparent;
+  background: var(--panel-solid);
   cursor: zoom-in;
 }
 .attachment [data-remove-attachment] {
   width: 44px;
   min-height: 44px;
+  height: 60px;
   padding: 0;
   border: 0;
   border-radius: 0 9px 9px 0;

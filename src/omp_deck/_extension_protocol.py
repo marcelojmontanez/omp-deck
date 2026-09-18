@@ -1,9 +1,10 @@
-"""Validated wire types for the local OMP extension protocol."""
+"""Local extension connections and validated wire types."""
 
 from __future__ import annotations
 
 import hashlib
 import os
+import socket
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -12,6 +13,21 @@ from typing import Any
 
 from ._extension_endpoint import unix_endpoint_name
 from ._thinking import normalized_thinking, validated_thinking_levels
+from .attachments import LEGACY_EXTENSION_MAX_IMAGE_BYTES, MAX_IMAGE_BYTES, MAX_IMAGES
+
+
+def _default_connector(path: str):
+    if os.name == "nt":
+        from ._windows_pipe import connect_named_pipe
+
+        return connect_named_pipe(path)
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.connect(path)
+    except Exception:
+        sock.close()
+        raise
+    return sock
 
 
 class ExtensionAdapterError(RuntimeError):
@@ -40,6 +56,8 @@ class ExtensionRegistration:
     connection_id: str
     capabilities: Mapping[str, bool]
     thinking_levels: tuple[str, ...] = ()
+    attachment_limits: Mapping[str, int] | None = None
+    attachment_limits_advertised: bool = False
 
 
 @dataclass(frozen=True)
@@ -140,7 +158,7 @@ def parse_registration(frame: dict[str, Any], socket_path: str, protocol: str) -
         "project",
         "capabilities",
     }
-    _exact_keys(frame, required, {"thinkingLevels"}, "registration")
+    _exact_keys(frame, required, {"thinkingLevels", "attachmentLimits"}, "registration")
     if (
         frame["protocol"] != protocol
         or frame["version"] != 1
@@ -183,6 +201,28 @@ def parse_registration(frame: dict[str, Any], socket_path: str, protocol: str) -
         raise ExtensionProtocolError(str(error)) from None
     if caps.get("setThinking") is not True and thinking_levels:
         raise ExtensionProtocolError("thinking levels require advertised capability")
+    raw_attachment_limits = frame.get("attachmentLimits")
+    attachment_limits = None
+    if raw_attachment_limits is not None:
+        limits = _object(raw_attachment_limits, "attachment limits")
+        _exact_keys(limits, {"maxImages", "maxTotalBytes"}, set(), "attachment limits")
+        max_images = limits["maxImages"]
+        max_total_bytes = limits["maxTotalBytes"]
+        if (
+            caps.get("attachments") is not True
+            or isinstance(max_images, bool)
+            or not isinstance(max_images, int)
+            or not 1 <= max_images <= MAX_IMAGES
+            or isinstance(max_total_bytes, bool)
+            or not isinstance(max_total_bytes, int)
+            or not 1 <= max_total_bytes <= MAX_IMAGE_BYTES
+        ):
+            raise ExtensionProtocolError("invalid attachment limits")
+        attachment_limits = MappingProxyType({"maxImages": max_images, "maxTotalBytes": max_total_bytes})
+    elif caps.get("attachments") is True:
+        attachment_limits = MappingProxyType(
+            {"maxImages": MAX_IMAGES, "maxTotalBytes": LEGACY_EXTENSION_MAX_IMAGE_BYTES}
+        )
     basename = os.path.basename(socket_path)
     if os.name == "nt":
         socket_id = hashlib.sha256(frame["sessionId"].encode("utf-8")).hexdigest()[:24]
@@ -202,6 +242,8 @@ def parse_registration(frame: dict[str, Any], socket_path: str, protocol: str) -
         connection_id=frame["connectionId"],
         capabilities=MappingProxyType(dict(caps)),
         thinking_levels=thinking_levels,
+        attachment_limits=attachment_limits,
+        attachment_limits_advertised=raw_attachment_limits is not None,
     )
 
 

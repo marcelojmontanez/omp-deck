@@ -7,18 +7,18 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from ._thinking import REQUEST_THINKING_LEVELS
-from .attachments import validated_image_content
+from .attachments import MAX_ENCODED_IMAGE_CHARS, MAX_IMAGES, validated_image_content
 from .auth import COOKIE_NAME
 
 
-def read_json_request(handler, max_bytes=64 * 1024):
+def read_json_request(handler, max_bytes=64 * 1024, *, timeout=None):
     header = handler.headers.get("Content-Length")
     if header is None or not header.isascii() or not header.isdecimal():
         raise ValueError("invalid Content-Length")
     length = int(header)
     if length > max_bytes:
         raise ValueError(f"request exceeds the {max_bytes}-byte limit")
-    timeout = handler.server.body_timeout
+    timeout = handler.server.body_timeout if timeout is None else timeout
     previous_timeout = handler.connection.gettimeout()
     expired = threading.Event()
     deadline = threading.Timer(timeout, _expire_body, (handler.connection, expired))
@@ -99,7 +99,7 @@ def message_payload(data, *, streaming_behavior=None):
 
 
 def _image_payloads(attachments):
-    if not isinstance(attachments, list) or len(attachments) > 4:
+    if not isinstance(attachments, list) or len(attachments) > MAX_IMAGES:
         raise ValueError("invalid attachments")
     return validated_image_content([_decode_image(attachment) for attachment in attachments])
 
@@ -123,7 +123,7 @@ def _valid_encoded_image(mime_type, encoded):
         isinstance(mime_type, str)
         and re.fullmatch(r"image/[A-Za-z0-9.+-]{1,64}", mime_type) is not None
         and isinstance(encoded, str)
-        and len(encoded) <= 1024 * 1024
+        and len(encoded) <= MAX_ENCODED_IMAGE_CHARS + len("data:image/;base64,") + 64
     )
 
 

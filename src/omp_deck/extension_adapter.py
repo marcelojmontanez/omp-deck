@@ -20,6 +20,7 @@ from ._extension_protocol import (
     ExtensionRegistration,
     ExtensionRequestTimeout,
     ExtensionSnapshot,
+    _default_connector,
     _exact_keys,
     _immutable,
     _object,
@@ -29,25 +30,11 @@ from ._extension_protocol import (
     parse_thinking_state,
     snapshot_from_data,
 )
-from .attachments import validated_image_content
+from .attachments import MAX_IMAGE_BYTES, MAX_IMAGE_REQUEST_BYTES, MAX_IMAGES, validated_image_content
 
 PROTOCOL = "omp-deck-fallback-v1"
 _MISSING = object()
 _CONNECTION_TOKEN = re.compile(r"[0-9a-f]{64}")
-
-
-def _default_connector(path: str):
-    if os.name == "nt":
-        from ._windows_pipe import connect_named_pipe
-
-        return connect_named_pipe(path)
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        sock.connect(path)
-    except Exception:
-        sock.close()
-        raise
-    return sock
 
 
 class ExtensionAdapter:
@@ -60,6 +47,7 @@ class ExtensionAdapter:
         connector: Callable[[str], Any] = _default_connector,
         clock: Callable[[], float] = time.monotonic,
         frame_limit: int = 1024 * 1024,
+        request_frame_limit: int = MAX_IMAGE_REQUEST_BYTES,
         event_limit: int = 512,
         response_limit: int = 128,
         registration_timeout: float = 5,
@@ -74,6 +62,7 @@ class ExtensionAdapter:
             raise TypeError("connector and clock must be callable")
         for name, value in (
             ("frame_limit", frame_limit),
+            ("request_frame_limit", request_frame_limit),
             ("event_limit", event_limit),
             ("response_limit", response_limit),
         ):
@@ -93,7 +82,7 @@ class ExtensionAdapter:
         self._connection_token = connection_token
         self._clock = clock
         self._frame_limit = frame_limit
-        self._event_limit = event_limit
+        self._request_frame_limit = request_frame_limit
         self._response_limit = response_limit
         self._registration_timeout = float(registration_timeout)
         self._heartbeat_timeout = float(heartbeat_timeout)
@@ -191,7 +180,13 @@ class ExtensionAdapter:
         *,
         images: Any = None,
     ) -> Any:
-        normalized_images = validated_image_content(images)
+        registration = self.registration
+        limits = registration.attachment_limits if registration is not None else None
+        normalized_images = validated_image_content(
+            images,
+            max_images=limits["maxImages"] if limits is not None else MAX_IMAGES,
+            max_bytes=limits["maxTotalBytes"] if limits is not None else MAX_IMAGE_BYTES,
+        )
         if (
             not isinstance(message, str)
             or (not message and not normalized_images)
@@ -200,10 +195,8 @@ class ExtensionAdapter:
             raise ValueError("message content must be non-empty and bounded")
         if streaming_behavior not in (None, "steer", "followUp"):
             raise ValueError("streaming_behavior must be None, 'steer', or 'followUp'")
-        if normalized_images:
-            registration = self.registration
-            if registration is None or registration.capabilities.get("attachments") is not True:
-                raise ExtensionAdapterError("image attachments are unavailable")
+        if normalized_images and (registration is None or registration.capabilities.get("attachments") is not True):
+            raise ExtensionAdapterError("image attachments are unavailable")
         fields: dict[str, Any] = {"message": message}
         if normalized_images:
             fields["images"] = normalized_images
@@ -315,7 +308,7 @@ class ExtensionAdapter:
 
     def _encoded_frame(self, frame: Mapping[str, Any]) -> bytes:
         encoded = json.dumps(frame, separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\n"
-        if len(encoded) > self._frame_limit:
+        if len(encoded) > self._request_frame_limit:
             raise ValueError("request frame exceeds limit")
         return encoded
 

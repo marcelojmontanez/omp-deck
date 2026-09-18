@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -73,6 +75,28 @@ class FleetModelTests(unittest.TestCase):
         )
         return model
 
+    def test_inline_native_images_project_private_blob_links_without_base64(self):
+        encoded = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aM1sAAAAASUVORK5CYII="
+        digest = hashlib.sha256(base64.b64decode(encoded)).hexdigest()
+        model = self.connected_model()
+        snapshot = replace(
+            self.make_snapshot(sequence=1),
+            messages=(
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "data": encoded, "mimeType": "image/png"},
+                        {"type": "image", "data": encoded, "mimeType": "image/jpeg"},
+                    ],
+                },
+            ),
+        )
+        model.apply_rpc_snapshot("deck-1", instance_id="instance-a", generation=3, snapshot=snapshot)
+        self.assertEqual(
+            model.get("deck-1")["messages"][0]["content"],
+            [{"type": "image", "url": f"/api/blob/{digest}"}, {"type": "image"}],
+        )
+
     def test_rpc_todos_follow_structured_tool_results(self):
         model = self.connected_model()
         phases = [{"name": "Release", "tasks": [{"content": "ship", "status": "completed"}]}]
@@ -118,6 +142,7 @@ class FleetModelTests(unittest.TestCase):
                 "transport",
                 "historyError",
                 "capabilities",
+                "attachmentLimits",
                 "messages",
                 "todos",
                 "subagents",
@@ -145,6 +170,7 @@ class FleetModelTests(unittest.TestCase):
         self.assertEqual(session["ompSessionId"], "omp-live")
         self.assertEqual(session["state"], "working")
         self.assertTrue(session["capabilities"]["attachments"])
+        self.assertEqual(session["attachmentLimits"], {"maxImages": 4, "maxTotalBytes": 20 * 1024 * 1024})
         self.assertEqual(
             session["model"],
             {"provider": "openai", "id": "gpt-5", "name": "GPT 5", "api": "responses"},

@@ -35,6 +35,7 @@ _PUBLIC_KEYS = (
     "transport",
     "historyError",
     "capabilities",
+    "attachmentLimits",
     "messages",
     "todos",
     "subagents",

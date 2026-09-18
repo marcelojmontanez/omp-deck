@@ -63,9 +63,11 @@ def thinking_registration(levels=("off", "low", "medium", "high", "xhigh")):
     return value
 
 
-def image_registration():
+def image_registration(*, legacy=False):
     value = registration()
     value["capabilities"]["attachments"] = True
+    if not legacy:
+        value["attachmentLimits"] = {"maxImages": 4, "maxTotalBytes": 20 * 1024 * 1024}
     return value
 
 
@@ -286,25 +288,34 @@ class ExtensionAdapterTests(unittest.TestCase):
         adapter = self.make_adapter(peer)
         adapter.start()
         png = {"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"}
-        legacy_peer = self.make_peer()
-        legacy = self.make_adapter(legacy_peer)
-        legacy.start()
+        unsupported_peer = self.make_peer()
+        unsupported = self.make_adapter(unsupported_peer)
+        unsupported.start()
         with self.assertRaisesRegex(ExtensionAdapterError, "unavailable"):
-            legacy.send_message("", images=[png])
+            unsupported.send_message("", images=[png])
         with self.assertRaisesRegex(ValueError, "invalid image"):
             adapter.send_message(
                 "",
                 images=[{"type": "image", "data": "%%%", "mimeType": "image/png"}],
             )
-        oversized = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * (700 * 1024)).decode()
+        oversized = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * (20 * 1024 * 1024)).decode()
         with self.assertRaisesRegex(ValueError, "image"):
             adapter.send_message(
                 "",
                 images=[{"type": "image", "data": oversized, "mimeType": "image/png"}],
             )
+        legacy_peer = self.make_peer((image_registration(legacy=True), event()))
+        legacy = self.make_adapter(legacy_peer)
+        legacy.start()
+        legacy_oversized = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * (700 * 1024)).decode()
+        with self.assertRaisesRegex(ValueError, "image"):
+            legacy.send_message(
+                "",
+                images=[{"type": "image", "data": legacy_oversized, "mimeType": "image/png"}],
+            )
 
         constrained_peer = self.make_peer((image_registration(), event()))
-        constrained = self.make_adapter(constrained_peer, frame_limit=2048)
+        constrained = self.make_adapter(constrained_peer, request_frame_limit=2048)
         constrained.start()
         near_frame = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * 800).decode()
         with self.assertRaisesRegex(ValueError, "frame exceeds"):

@@ -4,7 +4,8 @@ import copy
 from collections.abc import Mapping
 from typing import Any
 
-from ._fleet_projection import platform_capabilities
+from ._attachment_limits import platform_attachment_limits
+from ._platform_capabilities import platform_capabilities
 
 
 def registry_session(record: Mapping[str, Any], existing: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -23,6 +24,7 @@ def registry_session(record: Mapping[str, Any], existing: Mapping[str, Any] | No
         "transport": _disconnected_transport(adapter_kind),
         "historyError": None,
         "capabilities": platform_capabilities(adapter_kind),
+        "attachmentLimits": platform_attachment_limits(adapter_kind),
         "messages": [],
         "todos": [],
         "subagents": [],
@@ -65,6 +67,7 @@ def _retained_session_state(existing: Mapping[str, Any]) -> dict[str, Any]:
         "state": existing.get("state", "disconnected"),
         "transport": copy.deepcopy(existing["transport"]),
         "messages": copy.deepcopy(existing.get("messages", [])),
+        "attachmentLimits": copy.deepcopy(existing.get("attachmentLimits")),
         "todos": copy.deepcopy(existing.get("todos", [])),
         "subagents": copy.deepcopy(existing.get("subagents", [])),
         "pendingUiRequest": copy.deepcopy(existing.get("pendingUiRequest")),

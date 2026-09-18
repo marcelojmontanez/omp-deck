@@ -112,9 +112,9 @@ function createComposer({
 
   function renderAttachments() {
     elements.attachments.innerHTML = attachmentsFor(sessionId).map((attachment, index) =>
-      `<span class="attachment">
-        <button class="attachment-preview" type="button" data-view-image="${attachment.url}" aria-label="Enlarge ${escapeHtml(attachment.name)}"><img src="${attachment.url}" alt="${escapeHtml(attachment.name)}"></button>
-        <button type="button" data-remove-attachment="${index}" aria-label="Remove attachment">×</button>
+      `<span class="attachment" role="group" aria-label="Attachment: ${escapeHtml(attachment.name)}">
+        <button class="attachment-preview" type="button" data-view-image="${attachment.url}" aria-label="Enlarge attachment: ${escapeHtml(attachment.name)}"><img src="${attachment.url}" alt="${escapeHtml(attachment.name)}"></button>
+        <button type="button" data-remove-attachment="${index}" aria-label="Remove attachment: ${escapeHtml(attachment.name)}">×</button>
       </span>`
     ).join('');
     commands.sync({showSuggestions: false});
@@ -159,7 +159,8 @@ function createComposer({
     const generation = dataGeneration;
     const targetSessionId = sessionId;
     const target = state.agents.find(agent => agent.id === targetSessionId);
-    if (!target?.capabilities?.attachments || target.lifecycle !== 'ongoing') {
+    const limits = target?.attachmentLimits;
+    if (!target?.capabilities?.attachments || !limits || target.lifecycle !== 'ongoing') {
       showToast('Image attachments are unavailable for this session.', 'error');
       return;
     }
@@ -170,14 +171,14 @@ function createComposer({
       return;
     }
     const reserved = attachmentReservations.get(targetSessionId) || {count: 0, bytes: 0};
-    if (current.length + reserved.count + incoming.length > 4) {
-      showToast('Attach at most 4 images.', 'error');
+    if (current.length + reserved.count + incoming.length > limits.maxImages) {
+      showToast(`Attach at most ${limits.maxImages} images.`, 'error');
       return;
     }
     const incomingBytes = incoming.reduce((bytes, item) => bytes + item.size, 0);
     const currentBytes = current.reduce((bytes, item) => bytes + item.size, 0);
-    if (currentBytes + reserved.bytes + incomingBytes > 700 * 1024) {
-      showToast('Images must total 700 KB or less.', 'error');
+    if (currentBytes + reserved.bytes + incomingBytes > limits.maxTotalBytes) {
+      showToast(`Images must total ${formatImageLimit(limits.maxTotalBytes)} or less.`, 'error');
       return;
     }
     if (!attachmentReservations.has(targetSessionId)) {
@@ -230,7 +231,7 @@ function createComposer({
           message,
           attachments: outgoingAttachments.map(({name, type, data}) => ({name, type, data})),
         }),
-      }, 15_000, ompDeckApi.request,
+      }, outgoingAttachments.length ? 135_000 : 15_000, ompDeckApi.request,
     );
     if (generation !== dataGeneration || queueTokens.get(id) !== token) return;
     const payload = body || {};

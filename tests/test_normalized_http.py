@@ -456,10 +456,10 @@ class NormalizedHttpTests(unittest.TestCase):
                         "name": "x",
                         "type": "image/png",
                         "data": "data:image/png;base64,"
-                        + base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * (700 * 1024)).decode("ascii"),
+                        + base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * (20 * 1024 * 1024)).decode("ascii"),
                     }
                 ],
-                "image attachments exceed 700 KiB",
+                "image attachments exceed 20 MiB",
             ),
         )
         for index, (attachments, error) in enumerate(cases):

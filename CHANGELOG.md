@@ -26,8 +26,12 @@
 - Allow newer OMP versions without a manually maintained version list. Doctor distinguishes installed and running versions; unknown version text is a warning, while actual protocol and capability failures remain explicit.
 - Explain that Target machine controls new-session launches, terminal connections, and usage, while the session list remains fleet-wide.
 - Derive each Deck package version automatically from its committed source revision. Reject dirty or ambiguous builds, and preserve verified source identity through source-distribution rebuilds.
+- Raise image attachments to four images totaling 20 MiB for managed RPC and extension 1.3.4, or 10 MiB for writable Collab. Already-running older extensions retain 700 KiB until an idle restart and resume. Allow more time for large image transfers and make full recovery-storage errors actionable.
 
 ### Fixed
+
+- Keep portrait and landscape attachment previews inside their cards, display the whole image, and keep remove buttons visible and reachable on phones.
+- Refresh managed conversations when a native turn finishes, including when prompt acceptance precedes image processing. Display supported inline RPC images through the authenticated private blob viewer.
 
 - Prevent stale access checks, superseded event streams, and incidental refresh failures from falsely marking a reachable machine unavailable or disrupting composer focus.
 - Reduce cold dashboard loading delays caused by simultaneous asset requests and remove a redundant initial session snapshot request.

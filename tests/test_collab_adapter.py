@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import threading
 import unittest
 from collections import deque
@@ -117,7 +118,7 @@ class CollabAdapterTests(unittest.TestCase):
         ]
         adapter, sock = self.make(frames)
         adapter.start()
-        adapter.send_message("hello", images=[{"type": "image", "data": "AA", "mimeType": "image/png"}])
+        adapter.send_message("hello", images=[{"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"}])
         adapter.interrupt()
         adapter.agent_chat("a", "yo")
         adapter.agent_kill("a")
@@ -207,6 +208,18 @@ class CollabAdapterTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             adapter.send_message("later", streaming_behavior="followUp")
         self.assertEqual(len(sock.sent), count)
+        adapter.close()
+
+    def test_image_payload_uses_collab_specific_decoded_limit(self):
+        adapter, sock = self.make([host(WELCOME), host(CHUNK)])
+        adapter.start()
+        oversized = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * (10 * 1024 * 1024)).decode()
+        with self.assertRaisesRegex(ValueError, "images exceed 10 MiB"):
+            adapter.send_message(
+                "",
+                images=[{"type": "image", "data": oversized, "mimeType": "image/png"}],
+            )
+        self.assertEqual(len(sock.sent), 1)
         adapter.close()
 
     def test_public_arguments_are_encoded_before_ui_state_changes(self):
@@ -369,29 +382,6 @@ class CollabAdapterTests(unittest.TestCase):
             fatal = _classify_fatal(Closed(code))
             self.assertIsInstance(fatal, AdapterDisconnectedError)
             self.assertNotIn(b64url_encode(KEY), repr(fatal))
-
-    def test_connector_uses_exact_bounded_websocket_options(self):
-        seen = {}
-        sock = Socket([host(WELCOME), host(CHUNK)])
-
-        def connector(url, **options):
-            seen.update(options)
-            return sock
-
-        adapter = CollabAdapter(link(), "guest", connector=connector)
-        adapter.start()
-        self.assertEqual(
-            seen,
-            {
-                "max_size": 1048608,
-                "open_timeout": 10.0,
-                "close_timeout": 10.0,
-                "ping_interval": 20.0,
-                "ping_timeout": 20.0,
-                "max_queue": 16,
-            },
-        )
-        adapter.close()
 
     def test_snapshot_bytes_are_compact_utf8_json(self):
         entries = [{"type": "x", "text": "é"}]

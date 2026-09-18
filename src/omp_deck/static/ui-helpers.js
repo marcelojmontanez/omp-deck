@@ -149,3 +149,7 @@ function returnToSessions() {
     : el['history-toggle'];
   (card || fallback).focus();
 }
+
+function formatImageLimit(bytes) {
+  return bytes >= 1024 * 1024 ? `${bytes / (1024 * 1024)} MiB` : `${Math.ceil(bytes / 1024)} KiB`;
+}

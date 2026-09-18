@@ -74,7 +74,7 @@ class BlobReaderTests(unittest.TestCase):
         poisoned.unlink()
         oversized = self.root / f"{self.digest}.png"
         with oversized.open("wb") as stream:
-            stream.truncate(16 * 1024 * 1024 + 1)
+            stream.truncate(20 * 1024 * 1024 + 1)
         if os.name == "nt":
             from omp_deck._windows_security import secure_created_path
 

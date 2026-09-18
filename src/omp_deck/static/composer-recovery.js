@@ -136,7 +136,7 @@ function createComposerRecovery({
     const operation = (async () => {
       const {response, payload} = await ompDeckNetwork.fetchJsonBounded(
         `/api/sessions/${encodeURIComponent(agent.id)}/deliveries`,
-        {cache: 'no-store'}, 12_000, ompDeckApi.request,
+        {cache: 'no-store'}, 120_000, ompDeckApi.request,
       );
       if (!response.ok) throw new Error(`Delivery recovery failed (${response.status})`);
       const incoming = validate(payload, agent.id, agent.localId || agent.id);

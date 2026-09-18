@@ -12,10 +12,10 @@ from pathlib import Path
 from typing import Any
 
 from ._private_state import PrivateStateFile
-from .attachments import validated_image_content
+from .attachments import MAX_IMAGES, validated_image_content
 
 _SCHEMA_VERSION = 2
-_MAX_FILE_BYTES = 24 * 1024 * 1024
+_MAX_FILE_BYTES = 128 * 1024 * 1024
 _RECOVERY_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000
 _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 
@@ -279,7 +279,7 @@ class RequestLedger:
         images = recovery.get("images")
         if not isinstance(message, str) or len(message) > 4_000:
             raise RequestLedgerError("invalid request recovery")
-        if not isinstance(images, list) or len(images) > 4 or (not message and not images):
+        if not isinstance(images, list) or len(images) > MAX_IMAGES or (not message and not images):
             raise RequestLedgerError("invalid request recovery")
         try:
             validated_image_content(images)
@@ -455,5 +455,5 @@ class RequestLedger:
             separators=(",", ":"),
         ).encode("utf-8")
         if len(payload) > _MAX_FILE_BYTES:
-            raise RequestLedgerError("request ledger is too large")
+            raise RequestLedgerError("delivery recovery capacity is full; dismiss older delivery receipts and retry")
         self._storage.replace(payload)

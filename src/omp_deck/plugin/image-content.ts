@@ -1,11 +1,10 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 
 const MAX_TEXT_BYTES = 512 * 1024;
-const MAX_IMAGES = 4;
-const MAX_IMAGE_BYTES = 700 * 1024;
+export const MAX_IMAGES = 4;
+export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_ENCODED_IMAGE_CHARS = Math.ceil(MAX_IMAGE_BYTES / 3) * 4;
 const MIME_TYPE = /^image\/[A-Za-z0-9.+-]{1,64}$/;
-const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 type UserMessageContent = Parameters<ExtensionAPI["sendUserMessage"]>[0];
@@ -41,12 +40,12 @@ function imageContent(value: unknown): ValidatedImage {
   if (
     image.data.length === 0
     || image.data.length > MAX_ENCODED_IMAGE_CHARS
-    || !BASE64.test(image.data)
     || !MIME_TYPE.test(image.mimeType)
   ) {
     throw new Error("invalid image");
   }
   const decoded = Buffer.from(image.data, "base64");
+  if (decoded.toString("base64") !== image.data) throw new Error("invalid image");
   if (detectedMimeType(decoded) !== image.mimeType) throw new Error("invalid image");
   return {
     content: { type: "image", data: image.data, mimeType: image.mimeType },
@@ -69,7 +68,7 @@ function userMessageContent(message: unknown, images: unknown): UserMessageConte
   for (const value of imageValues) {
     const image = imageContent(value);
     decodedBytes += image.bytes;
-    if (decodedBytes > MAX_IMAGE_BYTES) throw new Error("images exceed 700 KiB");
+    if (decodedBytes > MAX_IMAGE_BYTES) throw new Error("images exceed 20 MiB");
     content.push(image.content);
   }
   if (content.length === 0) throw new Error("message content is empty");

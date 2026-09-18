@@ -1044,6 +1044,24 @@ class TestRpcSessionManager(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "already used for another command"):
             self.manager.dispatch(session_id, "request-1", "sendMessage", {"message": "different"})
 
+    def test_completed_turn_refreshes_messages_after_early_acceptance(self):
+        session_id = self.launch()["id"]
+        client = FakeRpcClient.instances[-1]
+        self.manager.dispatch(session_id, "early-image-acceptance", "sendMessage", {"message": "inspect image"})
+        self.assertEqual(self.model.get(session_id)["messages"], [])
+
+        client.state = dataclasses.replace(client.state, message_count=1)
+        cursor = self.model.journal.latest_id
+        client.emit_event({"type": "agent_end", "messages": []})
+        deadline = time.monotonic() + 2
+        while not self.model.get(session_id)["messages"] and time.monotonic() < deadline:
+            events = self.model.journal.wait_after(cursor, timeout=max(0, deadline - time.monotonic()))
+            if events:
+                cursor = events[-1].id
+
+        session = self.model.get(session_id)
+        self.assertEqual([message["content"] for message in session["messages"]], [[{"type": "text", "text": "ready"}]])
+
     def test_accepted_command_is_not_failed_when_followup_snapshot_is_busy(self):
         session_id = self.launch()["id"]
         adapter = self.manager._runtime(session_id).adapter

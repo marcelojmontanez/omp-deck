@@ -42,10 +42,11 @@ WRITE_TOKEN_BYTES = 16
 ENVELOPE_HEADER_LENGTH = 4
 IV_LENGTH = 12
 TAG_LENGTH = 16
-# The relay's replicated plaintext limit is 1 MiB.  A packed binary message
-# additionally carries the peer prefix and AES-GCM IV/authentication tag.
-MAX_REPLICATED_PAYLOAD_BYTES = 1024 * 1024
-MAX_FRAME_BYTES = MAX_REPLICATED_PAYLOAD_BYTES + ENVELOPE_HEADER_LENGTH + IV_LENGTH + TAG_LENGTH
+# Deck guest prompts share OMP's Bun WebSocket connection with host replication.
+# Keep encrypted envelopes below Bun's 16 MiB default while leaving enough room
+# for a 10 MiB decoded image set after base64 and JSON encoding.
+MAX_COLLAB_PAYLOAD_BYTES = 15 * 1024 * 1024
+MAX_FRAME_BYTES = MAX_COLLAB_PAYLOAD_BYTES + ENVELOPE_HEADER_LENGTH + IV_LENGTH + TAG_LENGTH
 
 _ROOM_RE = re.compile(r"[A-Za-z0-9_-]{10,64}\Z")
 _B64_RE = re.compile(r"[A-Za-z0-9_-]+\Z")
@@ -201,7 +202,7 @@ def unpack_envelope(data: bytes, *, max_frame_bytes: int = MAX_FRAME_BYTES) -> t
     return struct.unpack(">I", data[:4])[0], data[4:]
 
 
-def encode_frame(frame: Mapping[str, Any], *, max_frame_bytes: int = MAX_REPLICATED_PAYLOAD_BYTES) -> bytes:
+def encode_frame(frame: Mapping[str, Any], *, max_frame_bytes: int = MAX_COLLAB_PAYLOAD_BYTES) -> bytes:
     validated = validate_frame(frame)
     try:
         data = json.dumps(validated, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
@@ -213,7 +214,7 @@ def encode_frame(frame: Mapping[str, Any], *, max_frame_bytes: int = MAX_REPLICA
 
 
 def decode_frame(
-    data: bytes, *, max_frame_bytes: int = MAX_REPLICATED_PAYLOAD_BYTES, direction: str | None = None
+    data: bytes, *, max_frame_bytes: int = MAX_COLLAB_PAYLOAD_BYTES, direction: str | None = None
 ) -> dict[str, Any]:
     if not isinstance(data, bytes):
         raise TypeError("frame payload must be bytes")
@@ -242,7 +243,7 @@ def decode_frame(
     return validate_frame(frame, direction=direction)
 
 
-def seal_frame(key: bytes, frame: Mapping[str, Any], *, max_frame_bytes: int = MAX_REPLICATED_PAYLOAD_BYTES) -> bytes:
+def seal_frame(key: bytes, frame: Mapping[str, Any], *, max_frame_bytes: int = MAX_COLLAB_PAYLOAD_BYTES) -> bytes:
     if not isinstance(key, bytes) or len(key) != ROOM_KEY_BYTES:
         raise ValueError("room key must be 32 bytes")
     plaintext = encode_frame(frame, max_frame_bytes=max_frame_bytes)
@@ -251,7 +252,7 @@ def seal_frame(key: bytes, frame: Mapping[str, Any], *, max_frame_bytes: int = M
 
 
 def open_frame(
-    key: bytes, sealed: bytes, *, max_frame_bytes: int = MAX_REPLICATED_PAYLOAD_BYTES, direction: str | None = None
+    key: bytes, sealed: bytes, *, max_frame_bytes: int = MAX_COLLAB_PAYLOAD_BYTES, direction: str | None = None
 ) -> dict[str, Any]:
     if not isinstance(key, bytes) or len(key) != ROOM_KEY_BYTES:
         raise ValueError("room key must be 32 bytes")

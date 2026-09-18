@@ -11,7 +11,7 @@ from ._http_common import ThreadingHTTPServer as ThreadingHTTPServer
 from ._rpc_dispatch import SessionCommandConflictError, SessionNotConnectedError
 from ._sse import send_stream
 from ._terminal_commands import TerminalCommandConflict
-from .attachments import detect_image_mime, read_blob
+from .attachments import MAX_IMAGE_REQUEST_BYTES, detect_image_mime, read_blob
 from .auth import COOKIE_NAME as COOKIE_NAME
 from .auth import AuthenticationFailed, AuthError, AuthManager
 from .auth_policy import AuthPolicy
@@ -28,6 +28,10 @@ from .terminal_sessions import (
     TerminalSessionNotConnected,
 )
 from .usage import UsageService
+
+_IMAGE_REQUEST_BODY_TIMEOUT = 120.0
+_IMAGE_RESPONSE_TIMEOUT = 120.0
+
 
 SETTINGS = load_settings()
 HOST = SETTINGS.host
@@ -312,14 +316,12 @@ class Handler(DeckHttpHandler):
             self.reply(404, {"error": "image not found"})
             return
         _, body = blob
-        try:
-            self.send_response(200)
-            self.send_header("Content-Type", detect_image_mime(body) or "application/octet-stream")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        self.reply_bytes(
+            200,
+            body,
+            content_type=detect_image_mime(body) or "application/octet-stream",
+            write_timeout=_IMAGE_RESPONSE_TIMEOUT,
+        )
 
     def do_GET(self):
         request_path = urlparse(self.path).path
@@ -391,7 +393,10 @@ class Handler(DeckHttpHandler):
                 result = (400, {"error": "invalid session"})
             except (OSError, RuntimeError):
                 result = (503, {"error": "delivery recovery unavailable"})
-            self.reply(*(result or (404, {"error": "not found"})))
+            self.reply(
+                *(result or (404, {"error": "not found"})),
+                write_timeout=_IMAGE_RESPONSE_TIMEOUT,
+            )
             return
         if request_path == "/api/usage":
             self.reply(200, _usage_service.snapshot())
@@ -444,11 +449,10 @@ class Handler(DeckHttpHandler):
         return False
 
     def _read_post_body(self, request_path):
-        limit = (
-            2 * 1024 * 1024 if re.fullmatch(r"/api/sessions/[^/]+/(messages|follow-ups)", request_path) else 64 * 1024
-        )
+        image_request = re.fullmatch(r"/api/sessions/[^/]+/(messages|follow-ups)", request_path) is not None
+        limit = MAX_IMAGE_REQUEST_BYTES if image_request else 64 * 1024
         try:
-            return self.read_json(limit)
+            return self.read_json(limit, timeout=_IMAGE_REQUEST_BODY_TIMEOUT if image_request else None)
         except (TypeError, ValueError, json.JSONDecodeError) as error:
             self.reply(400, {"error": str(error)})
         except TimeoutError:

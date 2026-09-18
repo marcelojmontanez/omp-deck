@@ -324,7 +324,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
       && agent?.nodeAvailable !== false
       && agent?.bridgeConnected
     );
-    const canAttach = canCompose && Boolean(capabilities.attachments);
+    const canAttach = canCompose && Boolean(capabilities.attachments && agent?.attachmentLimits);
     el.composer.hidden = !isLiveSession;
     el.message.setAttribute('aria-label', agent ? `Message ${agent.label}` : 'Message selected OMP');
     el.message.placeholder = agentLifecycle === 'history'
@@ -333,8 +333,9 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
         : agent && !canCompose ? 'Messaging is unavailable for this session' : 'Message this OMP…';
     el.message.disabled = !isLiveSession;
     el.attach.disabled = !canAttach;
-    el.attach.title = canAttach ? '' : 'Attachments are unavailable for this session';
-    el['attachment-status'].hidden = !canCompose || canAttach;
+    el.attach.title = canAttach ? `Up to ${agent.attachmentLimits.maxImages} images, ${formatImageLimit(agent.attachmentLimits.maxTotalBytes)} total` : 'Image uploads are unavailable in this session.';
+    el['attachment-status'].textContent = canAttach ? agent.attachmentLimits.reason || el.attach.title : el.attach.title;
+    el['attachment-status'].hidden = !canCompose || (canAttach && !agent.attachmentLimits.reason);
     el.send.disabled = !canMessage;
     getComposer().syncDeliveryMode(agent);
   }

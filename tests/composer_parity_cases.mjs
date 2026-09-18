@@ -37,6 +37,7 @@ export async function verifyComposerParity(page) {
       inboxState: 'read',
       bridgeConnected: true,
       capabilities: {sendMessage: true, attachments: true, compact: true, shutdown: true, setThinking: true},
+      attachmentLimits: {maxImages: 4, maxTotalBytes: 20 * 1024 * 1024},
       transport: {kind: 'rpc', status: 'connected', label: 'RPC'},
       pendingUiRequest: null,
       subagents: [],
@@ -84,6 +85,7 @@ export async function verifyComposerParity(page) {
 
   try {
     await page.setViewport({width: 390, height: 844, deviceScaleFactor: 1});
+    await verifyAttachmentLayout(page);
     const messages = await page.evaluate(() => [...document.querySelectorAll('#activity .event-detail')]
       .map(element => element.textContent.trim()));
     assert.deepEqual(messages, ['Newest fixture response', 'Older fixture request']);
@@ -291,5 +293,84 @@ export async function verifyComposerParity(page) {
       delete globalThis.__composerParityRestore;
     });
     await nextPaint(page);
+  }
+}
+
+async function verifyAttachmentLayout(page) {
+  const viewport = page.viewport();
+  try {
+    await page.evaluate(async () => {
+      const files = new DataTransfer();
+      for (let index = 0; index < 4; index += 1) {
+        const canvas = document.createElement('canvas');
+        canvas.width = index % 2 ? 1200 : 300;
+        canvas.height = index % 2 ? 300 : 1200;
+        const context = canvas.getContext('2d');
+        context.fillStyle = index % 2 ? '#00aacc' : '#dd5577';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+        files.items.add(new File([blob], `layout-${index}.png`, {type: 'image/png'}));
+      }
+      el.attach.files = files.files;
+      el.attach.dispatchEvent(new Event('change', {bubbles: true}));
+    });
+    await page.waitForFunction(() => {
+      const images = [...document.querySelectorAll('.attachment img')];
+      return images.length === 4 && images.every(image => image.complete && image.naturalWidth);
+    });
+    for (const width of [1440, 390, 320]) {
+      await page.setViewport({...viewport, width, height: 568});
+      await nextPaint(page);
+      const layout = await page.evaluate(() => {
+        const strip = el.attachments.getBoundingClientRect();
+        const shell = document.querySelector('.composer-shell').getBoundingClientRect();
+        return {
+          pageContained: document.documentElement.scrollWidth <= innerWidth,
+          stripScrolls: el.attachments.scrollWidth > el.attachments.clientWidth,
+          cards: [...document.querySelectorAll('.attachment')].map(card => {
+            const bounds = card.getBoundingClientRect();
+            const preview = card.querySelector('.attachment-preview').getBoundingClientRect();
+            const remove = card.querySelector('[data-remove-attachment]').getBoundingClientRect();
+            return {
+              contained: preview.bottom <= bounds.bottom && remove.bottom <= bounds.bottom
+                && remove.right <= bounds.right && bounds.bottom <= strip.bottom
+                && bounds.bottom <= shell.top,
+              touchTarget: remove.width >= 44 && remove.height >= 44,
+              fit: getComputedStyle(card.querySelector('img')).objectFit,
+            };
+          }),
+        };
+      });
+      assert(layout.pageContained, `attachments must not widen the page at ${width}px`);
+      assert(layout.cards.every(card => card.contained && card.touchTarget && card.fit === 'contain'),
+        `portrait and landscape previews and remove controls stay inside their cards at ${width}px`);
+      if (width === 320) assert(layout.stripScrolls, 'four attachments scroll inside the phone composer');
+    }
+    await page.click('.attachment-preview');
+    await page.waitForSelector('#image-viewer[open]');
+    assert.deepEqual(await page.$eval('#image-viewer-image', image => ({
+      width: image.naturalWidth, height: image.naturalHeight,
+    })), {width: 300, height: 1200}, 'preview opens the original portrait image');
+    await page.click('.image-viewer-close');
+    await page.evaluate(() => {
+      const remove = document.querySelector('[data-remove-attachment="3"]');
+      remove.scrollIntoView({block: 'nearest', inline: 'nearest'});
+      remove.focus();
+    });
+    assert(await page.$eval('[data-remove-attachment="3"]', remove => {
+      const button = remove.getBoundingClientRect();
+      const strip = el.attachments.getBoundingClientRect();
+      return document.activeElement === remove && button.left >= strip.left && button.right <= strip.right;
+    }), 'last remove control remains reachable by scrolling and keyboard focus');
+    await page.keyboard.press('Enter');
+    assert.deepEqual(await page.$$eval('.attachment img', images => images.map(image => image.alt)),
+      ['layout-0.png', 'layout-1.png', 'layout-2.png'], 'remove affects only its selected attachment');
+  } finally {
+    await page.evaluate(() => {
+      for (let index = 0; index < 4; index += 1) {
+        document.querySelector('[data-remove-attachment]')?.click();
+      }
+    });
+    await page.setViewport(viewport);
   }
 }

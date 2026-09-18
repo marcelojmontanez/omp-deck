@@ -7,14 +7,19 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { authenticateNamedPipe } from "./named-pipe-auth.ts";
 import { BoundedSocketWriter } from "./bounded-writer.ts";
 import { BoundedEventQueue } from "./bounded-event-queue.ts";
+import { BoundedLineReader } from "./bounded-line-reader.ts";
+import { BoundedRequestDispatcher } from "./bounded-request-dispatcher.ts";
 import { captureHistory, projectMessage, projectTodoResult, streamHistory } from "./history-sync.ts";
 import { deliverUserMessage } from "./image-content.ts";
+import { REGISTRATION_ATTACHMENT_LIMITS, REGISTRATION_CAPABILITIES } from "./registration.ts";
 import { degradedSnapshot, readThinkingState, setThinking } from "./thinking-state.ts";
 const PROTOCOL = "omp-deck-fallback-v1";
 const MAX_LINE_BYTES = 1024 * 1024;
+const MAX_REQUEST_LINE_BYTES = 32 * 1024 * 1024;
 const HEARTBEAT_MS = 15_000;
 const MAX_MISSED_HEARTBEATS = 3;
 const MAX_QUEUED_REQUESTS = 64;
+const MAX_QUEUED_REQUEST_BYTES = 2 * MAX_REQUEST_LINE_BYTES;
 const MAX_QUEUED_EVENTS = 256;
 const MAX_PENDING_WRITE_BYTES = 4 * MAX_LINE_BYTES;
 const WINDOWS = process.platform === "win32";
@@ -26,10 +31,9 @@ type JsonObject = Record<string, unknown>;
 type ManagedTimer = Parameters<ExtensionContext["clearTimer"]>[0];
 interface Peer {
   socket: net.Socket;
-  input: Buffer;
+  input: BoundedLineReader;
   lastPong: number;
-  queuedRequests: number;
-  dispatchTail: Promise<void>;
+  requests: BoundedRequestDispatcher<JsonObject>;
   sequence: number;
   writer: BoundedSocketWriter;
   events: BoundedEventQueue;
@@ -75,18 +79,8 @@ export default function ompDeck(pi: ExtensionAPI) {
       title: session.title,
       project: context.cwd,
       thinkingLevels: readThinkingState(pi, context).thinkingLevels,
-      capabilities: {
-        sendMessage: true,
-        followUp: true,
-        interrupt: true,
-        shutdown: true,
-        todos: true,
-        subagents: true,
-        attachments: true,
-        setThinking: true,
-        answerUiRequest: false,
-        answer_ui_request: false,
-      },
+      attachmentLimits: REGISTRATION_ATTACHMENT_LIMITS,
+      capabilities: REGISTRATION_CAPABILITIES,
     };
   };
   function encoded(payload: JsonObject): string | undefined {
@@ -268,10 +262,17 @@ export default function ompDeck(pi: ExtensionAPI) {
   function attach(socket: net.Socket, context: ExtensionContext): void {
     const peer: Peer = {
       socket,
-      input: Buffer.alloc(0),
+      input: new BoundedLineReader(MAX_REQUEST_LINE_BYTES),
       lastPong: Date.now(),
-      queuedRequests: 0,
-      dispatchTail: Promise.resolve(),
+      requests: new BoundedRequestDispatcher(
+        MAX_QUEUED_REQUESTS,
+        MAX_QUEUED_REQUEST_BYTES,
+        (request) => dispatch(peer, request),
+        (error, priority) => pi.logger.warn(
+          priority ? "OMP Deck fallback priority request failed" : "OMP Deck fallback request failed",
+          { error: errorText(error) },
+        ),
+      ),
       sequence: 0,
       writer: new BoundedSocketWriter(socket, MAX_PENDING_WRITE_BYTES, (error) => {
         pi.logger.warn("OMP Deck fallback write failed", { error: errorText(error) });
@@ -292,43 +293,29 @@ export default function ompDeck(pi: ExtensionAPI) {
     }
     void peer.writer.write(registrationLine);
     sendEvent(peer, "snapshot", snapshots(context));
-    socket.on("data", (chunk: Buffer) => {
-      if (peer.input.length + chunk.length > MAX_LINE_BYTES) {
-        send(peer, { protocol: PROTOCOL, type: "response", id: null, ok: false, error: "line exceeds 1 MiB" });
-        socket.destroy();
-        return;
-      }
-      peer.input = peer.input.length === 0 ? chunk : Buffer.concat([peer.input, chunk], peer.input.length + chunk.length);
-      let newline = peer.input.indexOf(10);
-      while (newline >= 0) {
-        const line = peer.input.subarray(0, newline);
-        peer.input = peer.input.subarray(newline + 1);
-        if (line.length) {
-          try {
-            const parsed: unknown = JSON.parse(line.toString("utf8"));
-            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("request must be an object");
-            const request = parsed as JsonObject;
-            if (request.action === "pong" || request.action === "interrupt" || request.action === "shutdown") {
-              void dispatch(peer, request).catch((error) => {
-                pi.logger.warn("OMP Deck fallback priority request failed", { error: errorText(error) });
-              });
-            } else {
-              if (peer.queuedRequests >= MAX_QUEUED_REQUESTS) {
-                send(peer, { protocol: PROTOCOL, type: "response", id: null, ok: false, error: "request queue limit exceeded" });
-                socket.destroy();
-                return;
-              }
-              peer.queuedRequests++;
-              peer.dispatchTail = peer.dispatchTail
-                .then(() => dispatch(peer, request))
-                .catch((error) => pi.logger.warn("OMP Deck fallback request failed", { error: errorText(error) }))
-                .finally(() => { peer.queuedRequests--; });
-            }
-          } catch (error) {
-            send(peer, { protocol: PROTOCOL, type: "response", id: null, ok: false, error: `invalid JSON: ${errorText(error)}` });
-          }
+    const handleLine = (line: Buffer): boolean => {
+      if (!line.length) return true;
+      try {
+        const parsed: unknown = JSON.parse(line.toString("utf8"));
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("request must be an object");
+        const request = parsed as JsonObject;
+        const priority =
+          request.action === "pong" || request.action === "interrupt" || request.action === "shutdown";
+        if (!peer.requests.submit(request, line.length, priority)) {
+          send(peer, { protocol: PROTOCOL, type: "response", id: null, ok: false, error: "request queue limit exceeded" });
+          socket.destroy();
+          return false;
         }
-        newline = peer.input.indexOf(10);
+      } catch (error) {
+        send(peer, { protocol: PROTOCOL, type: "response", id: null, ok: false, error: `invalid JSON: ${errorText(error)}` });
+      }
+      return true;
+    };
+    socket.on("data", (chunk: Buffer) => {
+      const result = peer.input.push(chunk, handleLine);
+      if (result === "overflow") {
+        send(peer, { protocol: PROTOCOL, type: "response", id: null, ok: false, error: "line exceeds 32 MiB" });
+        socket.destroy();
       }
     });
     socket.on("error", (error) => pi.logger.warn("OMP Deck fallback peer error", { error: error.message }));

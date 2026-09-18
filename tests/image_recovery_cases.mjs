@@ -13,7 +13,7 @@ async function holdImage(page, stage, shortenDeadline = true) {
     const held = {originalFetch, originalTimeout, release: () => {}, signal: null};
     window.imageRecoveryFixture = held;
     window.setTimeout = (callback, delay, ...args) => originalTimeout(
-      callback, shortenDeadline && delay === ompDeckNetwork.STARTUP_TIMEOUT_MS ? 120 : delay, ...args,
+      callback, shortenDeadline ? Math.min(delay, 120) : delay, ...args,
     );
     window.fetch = (input, options = {}) => {
       const pathname = new URL(typeof input === 'string' ? input : input.url, location.href).pathname;
@@ -35,6 +35,7 @@ async function holdImage(page, stage, shortenDeadline = true) {
     ompDeckImages.clear();
     touchRender();
     renderDetail();
+    window.setTimeout = originalTimeout;
   }, {stage, shortenDeadline});
 }
 

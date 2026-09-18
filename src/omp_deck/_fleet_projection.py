@@ -7,72 +7,12 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
 
+from ._attachment_limits import extension_attachment_limits, platform_attachment_limits
+from ._platform_capabilities import platform_capabilities
 from ._session_activity import completion_state
 from ._thinking import normalized_thinking, thinking_levels_for_model
-from .attachments import assistant_image_content
+from .attachments import assistant_image_content, decode_image
 from .rpc_adapter import AdapterSnapshot, PendingUiRequest
-
-CAPABILITIES: dict[str, dict[str, bool]] = {
-    "rpc": {
-        "sendMessage": True,
-        "followUp": True,
-        "interrupt": True,
-        "shutdown": True,
-        "remove": False,
-        "setModel": True,
-        "setThinking": False,
-        "answerUiRequest": True,
-        "cancelUiRequest": True,
-        "subagents": True,
-        "todos": True,
-        "attachments": True,
-        "branch": True,
-        "switch": True,
-        "resume": True,
-        "compact": True,
-    },
-    "collab": {
-        "sendMessage": True,
-        "followUp": False,
-        "interrupt": True,
-        "shutdown": False,
-        "remove": True,
-        "setModel": False,
-        "setThinking": False,
-        "answerUiRequest": True,
-        "cancelUiRequest": True,
-        "subagents": True,
-        "todos": False,
-        "attachments": True,
-        "branch": False,
-        "switch": False,
-        "resume": False,
-        "compact": False,
-    },
-    "extension": {
-        "sendMessage": True,
-        "followUp": True,
-        "interrupt": True,
-        "shutdown": True,
-        "remove": True,
-        "setModel": False,
-        "setThinking": False,
-        "answerUiRequest": False,
-        "cancelUiRequest": False,
-        "subagents": True,
-        "todos": True,
-        "attachments": False,
-        "branch": False,
-        "switch": False,
-        "resume": False,
-        "compact": False,
-    },
-}
-
-
-def platform_capabilities(adapter_kind: str) -> dict[str, bool]:
-    return dict(CAPABILITIES[adapter_kind])
-
 
 MAX_MESSAGES = 500
 MAX_MESSAGE_BYTES = 2 * 1024 * 1024
@@ -131,6 +71,11 @@ def _message_content(message: Mapping[str, Any]) -> list[Any]:
         elif value.get("type") == "image":
             data = value.get("data")
             digest = data.removeprefix("blob:sha256:") if isinstance(data, str) else ""
+            if isinstance(data, str) and not data.startswith("blob:sha256:"):
+                try:
+                    digest = hashlib.sha256(decode_image(data, value.get("mimeType"))).hexdigest()
+                except ValueError:
+                    digest = ""
             url = value.get("url")
             if (
                 not digest
@@ -358,6 +303,7 @@ def rpc_projection(
             "reason": snapshot.reason,
         },
         "capabilities": capabilities,
+        "attachmentLimits": platform_attachment_limits("rpc"),
         "messages": normalize_messages(snapshot.messages, session_id),
         "todos": normalize_todos(snapshot.todos),
         "subagents": bounded_collection(snapshot.subagents),
@@ -421,6 +367,11 @@ def collab_projection(
             "reason": snapshot.reason,
         },
         "capabilities": capabilities,
+        "attachmentLimits": (
+            platform_attachment_limits("collab")
+            if capabilities["attachments"] and snapshot.transport_status == "connected"
+            else None
+        ),
         "messages": normalize_messages(entries, session_id),
         "subagents": bounded_collection([agent for agent in snapshot.agents if agent.get("kind") == "sub"]),
         "pendingUiRequest": pending,
@@ -479,6 +430,7 @@ def extension_projection(
             "reason": snapshot.reason,
         },
         "capabilities": capabilities,
+        "attachmentLimits": extension_attachment_limits(registration, capabilities["attachments"]),
         "subagents": bounded_collection(subagents),
         "pendingUiRequest": pending,
         "workingOn": None if snapshot.idle else session.get("workingOn"),

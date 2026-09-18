@@ -159,14 +159,25 @@ class DeckHttpHandler(SimpleHTTPRequestHandler):
             return self.auth_backend().validate_csrf(credential, self.headers.get("X-OMP-Deck-CSRF"))
         return self.auth_backend().authenticate(credential)
 
-    def read_json(self, max_bytes: int = 64 * 1024):
-        return read_json_request(self, max_bytes)
+    def read_json(self, max_bytes: int = 64 * 1024, *, timeout: float | None = None):
+        return read_json_request(self, max_bytes, timeout=timeout)
 
-    def reply(self, status: int, payload, *, headers=()) -> None:
-        body = json.dumps(payload).encode()
+    def reply(self, status: int, payload, *, headers=(), write_timeout: float | None = None) -> None:
+        self.reply_bytes(
+            status,
+            json.dumps(payload).encode(),
+            content_type="application/json",
+            headers=headers,
+            write_timeout=write_timeout,
+        )
+
+    def reply_bytes(self, status: int, body: bytes, *, content_type: str, headers=(), write_timeout=None) -> None:
+        previous_timeout = self.connection.gettimeout() if write_timeout is not None else None
         try:
+            if write_timeout is not None:
+                self.connection.settimeout(write_timeout)
             self.send_response(status)
-            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Type", content_type)
             for name, value in headers:
                 self.send_header(name, value)
             self.send_header("Content-Length", str(len(body)))
@@ -174,6 +185,14 @@ class DeckHttpHandler(SimpleHTTPRequestHandler):
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
             pass
+        except TimeoutError:
+            self.close_connection = True
+        finally:
+            if write_timeout is not None:
+                try:
+                    self.connection.settimeout(previous_timeout)
+                except OSError:
+                    pass
 
     def host_valid(self) -> bool:
         return request_host(self.headers, self.allowed_hosts()) is not None

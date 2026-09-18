@@ -64,6 +64,30 @@ async function fixture(messages, options = {}) {
   return {connect, cleanup, context, handlers, timers, intervalCallbacks, get abortCalls() { return abortCalls; }};
 }
 
+test('fragmented request input preserves extension framing', async () => {
+  const app = await fixture([]);
+  let socket;
+  try {
+    socket = await app.connect();
+    const lines = readline.createInterface({input: socket, crlfDelay: Infinity});
+    const frames = lines[Symbol.asyncIterator]();
+    await frames.next();
+    await frames.next();
+    const request = `${JSON.stringify({
+      protocol: 'omp-deck-fallback-v1', type: 'request', id: 'fragmented', action: 'interrupt',
+    })}\n`;
+    for (let offset = 0; offset < request.length; offset += 3) socket.write(request.slice(offset, offset + 3));
+    const response = JSON.parse((await frames.next()).value);
+    assert.equal(response.id, 'fragmented');
+    assert.equal(response.ok, true);
+    assert.equal(app.abortCalls, 1);
+    lines.close();
+  } finally {
+    socket?.destroy();
+    await app.cleanup();
+  }
+});
+
 test('oversized snapshots retain their small thinking state when collections degrade', async () => {
   const app = await fixture([], {
     thinking: 'high',

@@ -12,7 +12,14 @@ from typing import Any
 BLOB_ROOT = None
 _DIGEST = re.compile(r"[a-f0-9]{64}")
 _PROFILE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
-_MAX_BLOB_BYTES = 16 * 1024 * 1024
+MAX_IMAGES = 4
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+COLLAB_MAX_IMAGE_BYTES = 10 * 1024 * 1024
+LEGACY_EXTENSION_MAX_IMAGE_BYTES = 700 * 1024
+MAX_IMAGE_REQUEST_BYTES = 32 * 1024 * 1024
+MAX_ENCODED_IMAGE_CHARS = ((MAX_IMAGE_BYTES + 2) // 3) * 4
+
+_MAX_BLOB_BYTES = MAX_IMAGE_BYTES
 _CANDIDATE_SUFFIXES = ("", ".png", ".jpg", ".jpeg", ".gif", ".webp")
 _ASSISTANT_IMAGE = re.compile(r"!\[[^\]\r\n]{0,256}\]\(blob:sha256:([a-f0-9]{64})\)[ \t]*")
 _CODE_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
@@ -187,41 +194,57 @@ def detect_image_mime(data):
     return None
 
 
-_MAX_IMAGES = 4
-_MAX_IMAGE_BYTES = 700 * 1024
-_MAX_ENCODED_IMAGE_CHARS = ((_MAX_IMAGE_BYTES + 2) // 3) * 4
+def _encoded_image_chars(max_bytes: int) -> int:
+    return ((max_bytes + 2) // 3) * 4
 
 
-def validated_image_content(images: Any) -> list[dict[str, str]]:
+def _formatted_image_limit(max_bytes: int) -> str:
+    if max_bytes % (1024 * 1024) == 0:
+        return f"{max_bytes // (1024 * 1024)} MiB"
+    return f"{max_bytes} bytes"
+
+
+def decode_image(data: Any, mime_type: Any, *, max_bytes: int = MAX_IMAGE_BYTES) -> bytes:
+    if (
+        not isinstance(data, str)
+        or not data
+        or not isinstance(mime_type, str)
+        or len(mime_type) > 70
+        or not mime_type.startswith("image/")
+    ):
+        raise ValueError("invalid image")
+    if len(data) > _encoded_image_chars(max_bytes):
+        raise ValueError(f"images exceed {_formatted_image_limit(max_bytes)}")
+    try:
+        raw = base64.b64decode(data, validate=True)
+    except (ValueError, binascii.Error):
+        raise ValueError("invalid image") from None
+    if base64.b64encode(raw).decode("ascii") != data:
+        raise ValueError("invalid image")
+    if len(raw) > max_bytes:
+        raise ValueError(f"images exceed {_formatted_image_limit(max_bytes)}")
+    if detect_image_mime(raw) != mime_type:
+        raise ValueError("invalid image")
+    return raw
+
+
+def validated_image_content(
+    images: Any, *, max_images: int = MAX_IMAGES, max_bytes: int = MAX_IMAGE_BYTES
+) -> list[dict[str, str]]:
     if images is None:
         return []
-    if not isinstance(images, (list, tuple)) or len(images) > _MAX_IMAGES:
+    if not isinstance(images, (list, tuple)) or len(images) > max_images:
         raise ValueError("invalid images")
     normalized = []
     decoded_bytes = 0
     for value in images:
-        if not isinstance(value, Mapping) or set(value) != {"type", "data", "mimeType"}:
+        if not isinstance(value, Mapping) or set(value) != {"type", "data", "mimeType"} or value.get("type") != "image":
             raise ValueError("invalid image")
         data = value.get("data")
         mime_type = value.get("mimeType")
-        if (
-            value.get("type") != "image"
-            or not isinstance(data, str)
-            or not data
-            or len(data) > _MAX_ENCODED_IMAGE_CHARS
-            or not isinstance(mime_type, str)
-            or len(mime_type) > 70
-            or not mime_type.startswith("image/")
-        ):
-            raise ValueError("invalid image")
-        try:
-            raw = base64.b64decode(data, validate=True)
-        except (ValueError, binascii.Error):
-            raise ValueError("invalid image") from None
+        raw = decode_image(data, mime_type, max_bytes=max_bytes)
         decoded_bytes += len(raw)
-        if decoded_bytes > _MAX_IMAGE_BYTES:
-            raise ValueError("images exceed 700 KiB")
-        if detect_image_mime(raw) != mime_type:
-            raise ValueError("invalid image")
+        if decoded_bytes > max_bytes:
+            raise ValueError(f"images exceed {_formatted_image_limit(max_bytes)}")
         normalized.append({"type": "image", "data": data, "mimeType": mime_type})
     return normalized

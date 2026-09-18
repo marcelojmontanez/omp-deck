@@ -13,6 +13,7 @@ from typing import Any
 
 from . import _collab_transport as _transport
 from ._collab_transport import CollabSnapshot, _freeze, _Reply, _Socket
+from .attachments import COLLAB_MAX_IMAGE_BYTES, validated_image_content
 from .collab_protocol import (
     COLLAB_PROTO,
     MAX_FRAME_BYTES,
@@ -191,9 +192,10 @@ class CollabAdapter:
     ) -> None:
         if streaming_behavior is not None:
             raise ValueError("streaming_behavior is not supported by collaboration")
+        normalized_images = validated_image_content(images, max_bytes=COLLAB_MAX_IMAGE_BYTES)
         frame: dict[str, Any] = {"t": "prompt", "text": message}
-        if images is not None:
-            frame["images"] = [dict(image) for image in images]
+        if normalized_images:
+            frame["images"] = normalized_images
         self._send_mutating(frame)
 
     prompt = send_message

@@ -1,8 +1,5 @@
 import assert from 'node:assert/strict';
 
-function receiptSelector(action, requestId) {
-  return `#activity [data-delivery-action="${action}"][data-delivery-id="${requestId}"]`;
-}
 
 export async function verifyDeliveryRecovery(page, expectedSessionId) {
   const message = 'Accepted while the browser loses its response';
@@ -106,11 +103,11 @@ export async function verifyDeliveryRecovery(page, expectedSessionId) {
     ));
     await page.type('#message', newerDraft);
     await page.evaluate(() => window.deliveryRecoveryFixture.releaseRetry());
-    await page.waitForFunction((id, expected) => {
-      const restore = document.querySelector(`[data-delivery-action="restore"][data-delivery-id="${id}"]`);
-      return /accepted/i.test(restore?.closest('.event')?.querySelector('.event-title')?.textContent || '')
-        && document.getElementById('message').value === expected;
-    }, {}, requestId, newerDraft);
+    await page.waitForFunction((id, expected) => (
+      !document.querySelector(`[data-delivery-id="${id}"]`)
+      && document.getElementById('send-state').textContent === 'Accepted'
+      && document.getElementById('message').value === expected
+    ), {}, requestId, newerDraft);
     await page.waitForFunction(expected => selectedAgent().session.activity.filter(event => (
       event.kind === 'user' && event.detail === expected
     )).length === 1, {}, message);
@@ -119,6 +116,9 @@ export async function verifyDeliveryRecovery(page, expectedSessionId) {
       calls: deliveryRecoveryFixture.calls,
       responses: deliveryRecoveryFixture.responses,
       draft: document.getElementById('message').value,
+      pending: composer.pendingFor(selectedAgent().id).length,
+      acceptedCards: [...document.querySelectorAll('#activity .event-title')]
+        .filter(title => /accepted/i.test(title.textContent)).length,
       nativeMessages: selectedAgent().session.activity.filter(event => (
         event.kind === 'user' && event.detail === expected
       )).length,
@@ -128,6 +128,8 @@ export async function verifyDeliveryRecovery(page, expectedSessionId) {
       'an explicit uncertain retry must retain its request identity');
     assert.equal(accepted.responses[1].requestId, requestId);
     assert.equal(accepted.draft, newerDraft, 'late acceptance must not clear a newer draft');
+    assert.equal(accepted.pending, 0, 'accepted sends must leave no local receipt payload');
+    assert.equal(accepted.acceptedCards, 0, 'accepted sends must not render receipt cards');
     assert.equal(accepted.nativeMessages, 1,
       'the native session must enqueue a stable requestId only once');
 
@@ -138,34 +140,20 @@ export async function verifyDeliveryRecovery(page, expectedSessionId) {
     await page.reload({waitUntil: 'domcontentloaded'});
     await page.waitForFunction(id => (
       !document.getElementById('app').hidden && selectedAgent()?.id === id
+      && document.getElementById('send-state').textContent === 'Accepted'
     ), {}, expectedSessionId);
-    await page.waitForSelector(receiptSelector('restore', requestId), {visible: true});
 
-    const recovered = await page.$eval(
-      receiptSelector('restore', requestId),
-      button => ({
-        title: button.closest('.event').querySelector('.event-title').textContent,
-        text: button.closest('.event').querySelector('.event-detail').textContent,
-      }),
-    );
-    assert.match(recovered.title, /accepted/i);
-    assert.equal(recovered.text, message);
+    const recoveredAccepted = await page.evaluate(id => ({
+      card: Boolean(document.querySelector(`[data-delivery-id="${id}"]`)),
+      pending: composer.pendingFor(selectedAgent().id).length,
+      status: document.getElementById('send-state').textContent,
+    }), requestId);
+    assert.deepEqual(recoveredAccepted, {card: false, pending: 0, status: 'Accepted'});
     const sendsAfterRecovery = routedRequests.filter(request => (
       request.method === 'POST' && request.path === `/api/sessions/${encodeURIComponent(identity.localId)}/messages`
     ));
     assert.equal(sendsAfterRecovery.length, 2,
-      'authoritative receipt recovery after reload must not send automatically');
-
-
-    await page.type('#message', newerDraft);
-    await page.click(receiptSelector('restore', requestId));
-    assert.equal(await page.$eval('#message', input => input.value), `${newerDraft}\n${message}`,
-      'restoring a receipt must merge its text without replacing the current draft');
-    const restoredDraft = await page.$eval('#message', input => input.value);
-    await page.click(receiptSelector('dismiss', requestId));
-    await page.waitForFunction(id => !document.querySelector(`[data-delivery-id="${id}"]`), {}, requestId);
-    assert.equal(await page.$eval('#message', input => input.value), restoredDraft,
-      'dismissing a receipt must not modify the draft');
+      'authoritative accepted recovery must not send automatically');
 
     const replay = await page.evaluate(async ({sessionId, payload}) => {
       const response = await ompDeckApi.request(
@@ -182,7 +170,132 @@ export async function verifyDeliveryRecovery(page, expectedSessionId) {
     assert.deepEqual(replay.body, {requestId, status: 'accepted', acceptance: 'accepted'});
     assert.equal(await page.evaluate(expected => selectedAgent().session.activity.filter(event => (
       event.kind === 'user' && event.detail === expected
-    )).length, message), 1, 'dismissing a receipt must preserve native request deduplication');
+    )).length, message), 1, 'hidden accepted recovery must preserve native request deduplication');
+
+    const acceptedAttachmentRecovery = await page.evaluate(
+      async ({origin, localId, recoveredRequestId, recoveredMessage}) => {
+        const agent = selectedAgent();
+        const originalFetch = window.fetch;
+        const originalCreateObjectURL = URL.createObjectURL;
+        const targetPath = `/api/sessions/${encodeURIComponent(localId)}/deliveries`;
+        let createdObjectUrls = 0;
+        URL.createObjectURL = blob => {
+          createdObjectUrls += 1;
+          return originalCreateObjectURL.call(URL, blob);
+        };
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+          const method = (options.method || (typeof input === 'object' && input.method) || 'GET').toUpperCase();
+          if (url.origin === origin && url.pathname === targetPath && method === 'GET') {
+            const now = Date.now();
+            return new Response(JSON.stringify({version: 1, deliveries: [{
+              requestId: recoveredRequestId,
+              sessionId: localId,
+              action: 'sendMessage',
+              message: recoveredMessage,
+              state: 'accepted',
+              attachments: [{name: 'accepted.png', type: 'image/png', data: 'data:image/png;base64,aQ=='}],
+              createdAt: now - 10,
+              updatedAt: now,
+              expiresAt: now + 60_000,
+            }]}), {status: 200, headers: {'Content-Type': 'application/json'}});
+          }
+          return originalFetch(input, options);
+        };
+        try {
+          composer.remove(agent.id);
+          composer.select(agent.id);
+          await composer.recover(agent);
+          return {
+            createdObjectUrls,
+            pending: composer.pendingFor(agent.id).length,
+            card: Boolean(document.querySelector(`[data-delivery-id="${recoveredRequestId}"]`)),
+            status: document.getElementById('send-state').textContent,
+          };
+        } finally {
+          window.fetch = originalFetch;
+          URL.createObjectURL = originalCreateObjectURL;
+          composer.remove(agent.id);
+          composer.select(agent.id);
+        }
+      },
+      {
+        origin: identity.machineOrigin,
+        localId: identity.localId,
+        recoveredRequestId: `${requestId}-accepted-image`,
+        recoveredMessage: message,
+      },
+    );
+    assert.deepEqual(acceptedAttachmentRecovery, {
+      createdObjectUrls: 0,
+      pending: 0,
+      card: false,
+      status: 'Accepted',
+    });
+
+    const recoveredUncertain = await page.evaluate(
+      async ({origin, localId, recoveredRequestId}) => {
+        const agent = selectedAgent();
+        const originalFetch = window.fetch;
+        const targetPath = `/api/sessions/${encodeURIComponent(localId)}/deliveries`;
+        let messagePosts = 0;
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+          const method = (options.method || (typeof input === 'object' && input.method) || 'GET').toUpperCase();
+          if (url.origin === origin && url.pathname === targetPath && method === 'GET') {
+            const now = Date.now();
+            return new Response(JSON.stringify({version: 1, deliveries: [{
+              requestId: recoveredRequestId,
+              sessionId: localId,
+              action: 'sendMessage',
+              message: 'Still uncertain after reload',
+              state: 'uncertain',
+              attachments: [{name: 'uncertain.png', type: 'image/png', data: 'data:image/png;base64,aQ=='}],
+              createdAt: now - 10,
+              updatedAt: now,
+              expiresAt: now + 60_000,
+            }]}), {status: 200, headers: {'Content-Type': 'application/json'}});
+          }
+          if (url.origin === origin && url.pathname.endsWith('/messages') && method === 'POST') {
+            messagePosts += 1;
+          }
+          return originalFetch(input, options);
+        };
+        try {
+          composer.remove(agent.id);
+          composer.select(agent.id);
+          await composer.recover(agent);
+          const card = document.querySelector(`[data-delivery-id="${recoveredRequestId}"]`)?.closest('.event');
+          return {
+            messagePosts,
+            pending: composer.pendingFor(agent.id).length,
+            title: card?.querySelector('.event-title')?.textContent,
+            text: card?.querySelector('.event-detail')?.textContent,
+            restore: Boolean(card?.querySelector('[data-delivery-action="restore"]')),
+            dismiss: Boolean(card?.querySelector('[data-delivery-action="dismiss"]')),
+            status: document.getElementById('send-state').textContent,
+          };
+        } finally {
+          window.fetch = originalFetch;
+          composer.remove(agent.id);
+          composer.select(agent.id);
+        }
+      },
+      {
+        origin: identity.machineOrigin,
+        localId: identity.localId,
+        recoveredRequestId: `${requestId}-uncertain`,
+      },
+    );
+    assert.deepEqual(recoveredUncertain, {
+      messagePosts: 0,
+      pending: 1,
+      title: 'You · Delivery uncertain',
+      text: 'Still uncertain after reload',
+      restore: true,
+      dismiss: true,
+      status: 'Delivery uncertain',
+    });
 
     const localPrefix = `/api/sessions/${encodeURIComponent(identity.localId)}`;
     const messageRequests = routedRequests.filter(request => (
@@ -194,15 +307,8 @@ export async function verifyDeliveryRecovery(page, expectedSessionId) {
     assert(routedRequests.some(request => (
       request.method === 'GET' && request.path === `${localPrefix}/deliveries`
     )), 'reload recovery must route the composite fleet session to its local session ID');
-    assert(routedRequests.some(request => (
-      request.method === 'POST'
-      && request.path === `${localPrefix}/deliveries/${encodeURIComponent(requestId)}/dismiss`
-    )), 'receipt dismissal must route to the local session ID');
-
-    await page.$eval('#message', input => {
-      input.value = '';
-      input.dispatchEvent(new Event('input', {bubbles: true}));
-    });
+    assert.equal(routedRequests.some(request => request.path.includes('/dismiss')), false,
+      'accepted recovery must not require a dismissal request');
   } finally {
     page.off('request', observeRequest);
     await page.evaluate(() => {

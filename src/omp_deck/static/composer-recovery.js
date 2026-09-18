@@ -1,6 +1,5 @@
 function setComposerDeliveryState(item, state) {
   item.state = state;
-  item.accepted = state === 'accepted';
 }
 
 function mergeComposerAttachments(...groups) {
@@ -37,6 +36,40 @@ function createComposerRecovery({
   const inFlight = new Map();
   const epochs = new Map();
   const records = new Map();
+
+  function releasePending(id, item) {
+    const pending = pendingFor(id);
+    const index = pending.indexOf(item);
+    if (index >= 0) pending.splice(index, 1);
+    const drafted = new Set(attachmentsFor(id));
+    item.attachments.filter(attachment => !drafted.has(attachment)).forEach(revokeAttachment);
+    item.attachments = [];
+    item.text = '';
+    dismissRetryBatch(id, item.id);
+  }
+
+  function showState(id, state) {
+    if (selectedAgent()?.id !== id) return;
+    if (pendingFor(id).some(item => item.state === 'submitting')) state = 'submitting';
+    const labels = {
+      submitting: 'Submitting', uncertain: 'Delivery uncertain', accepted: 'Accepted',
+      failed: 'Not sent', cancelled: 'Cancelled', stale: 'Stale',
+    };
+    elements['send-state'].textContent = labels[state];
+    elements['send-state'].className = `send-state ${
+      state === 'accepted' ? 'ok'
+        : ['uncertain', 'failed', 'cancelled', 'stale'].includes(state) ? 'error' : ''
+    }`.trim();
+  }
+
+  function accept(id, item) {
+    // An older recovery read cannot resurrect a locally acknowledged request.
+    inFlight.get(id)?.accepted.add(item.id);
+    records.delete(`${id}\0${item.id}`);
+    deliveryState(item, 'accepted');
+    releasePending(id, item);
+    showState(id, 'accepted');
+  }
 
   function recoveredAttachment(raw) {
     const match = /^data:(image\/[A-Za-z0-9.+-]{1,64});base64,([A-Za-z0-9+/]*={0,2})$/.exec(raw?.data || '');
@@ -88,7 +121,7 @@ function createComposerRecovery({
   }
 
 
-  function apply(agent, incoming) {
+  function apply(agent, incoming, updateStatus) {
     const pending = pendingFor(agent.id);
     const byId = new Map(pending.map(item => [item.id, item]));
     const retainedIds = new Set(incoming.map(record => record.requestId));
@@ -97,14 +130,22 @@ function createComposerRecovery({
       const key = `${agent.id}\0${item.id}`;
       if (!records.has(key) || retainedIds.has(item.id)) continue;
       records.delete(key);
-      pending.splice(index, 1);
-      const drafted = new Set(attachmentsFor(agent.id));
-      item.attachments.filter(attachment => !drafted.has(attachment)).forEach(revokeAttachment);
-      dismissRetryBatch(agent.id, item.id);
+      byId.delete(item.id);
+      releasePending(agent.id, item);
     }
     for (const record of incoming) {
-      records.set(`${agent.id}\0${record.requestId}`, record);
+      const key = `${agent.id}\0${record.requestId}`;
       let item = byId.get(record.requestId);
+      if (record.state === 'accepted') {
+        records.delete(key);
+        if (item) {
+          byId.delete(record.requestId);
+          deliveryState(item, 'accepted');
+          releasePending(agent.id, item);
+        }
+        continue;
+      }
+      records.set(key, record);
       const recoveredSubmitting = record.state === 'submitting' && (!item || item.state === 'uncertain');
       if (!item) {
         item = {
@@ -113,15 +154,18 @@ function createComposerRecovery({
           attachments: record.attachments.map(recoveredAttachment).filter(Boolean),
           action: record.action,
           createdAt: record.createdAt,
-          accepted: false,
           state: record.state,
         };
         pending.push(item);
         byId.set(item.id, item);
       }
-      if (item.state === 'accepted' && record.state !== 'accepted') continue;
       deliveryState(item, recoveredSubmitting ? 'uncertain' : record.state);
     }
+    const latest = incoming.reduce(
+      (current, record) => !current || record.updatedAt >= current.updatedAt ? record : current,
+      null,
+    );
+    if (latest && updateStatus) showState(agent.id, latest.state);
     touchRender();
     if (selectedAgent()?.id === agent.id) renderDetail();
   }
@@ -133,6 +177,7 @@ function createComposerRecovery({
     const epoch = epochs.get(agent.id) || 0;
     if (now - (checks.get(agent.id) || 0) < 2_000) return;
     checks.set(agent.id, now);
+    const accepted = new Set();
     const operation = (async () => {
       const {response, payload} = await ompDeckNetwork.fetchJsonBounded(
         `/api/sessions/${encodeURIComponent(agent.id)}/deliveries`,
@@ -141,7 +186,7 @@ function createComposerRecovery({
       if (!response.ok) throw new Error(`Delivery recovery failed (${response.status})`);
       const incoming = validate(payload, agent.id, agent.localId || agent.id);
       if (generation !== dataGeneration() || epoch !== (epochs.get(agent.id) || 0)) return;
-      apply(agent, incoming);
+      apply(agent, incoming.filter(record => !accepted.has(record.requestId)), accepted.size === 0);
       recovered.add(agent.id);
     })().catch(error => {
       if (generation !== dataGeneration() || epoch !== (epochs.get(agent.id) || 0)) return;
@@ -150,9 +195,9 @@ function createComposerRecovery({
         elements['send-state'].className = 'send-state error';
       }
     }).finally(() => {
-      if (inFlight.get(agent.id) === operation) inFlight.delete(agent.id);
+      if (inFlight.get(agent.id)?.promise === operation) inFlight.delete(agent.id);
     });
-    inFlight.set(agent.id, operation);
+    inFlight.set(agent.id, {promise: operation, accepted});
     await operation;
   }
 
@@ -204,14 +249,8 @@ function createComposerRecovery({
     }
     epochs.set(agent.id, epoch + 1);
     records.delete(`${agent.id}\0${requestId}`);
-    const pending = pendingFor(agent.id);
-    const item = pending.find(candidate => candidate.id === requestId);
-    if (item) {
-      pending.splice(pending.indexOf(item), 1);
-      const draftsForSession = new Set(attachmentsFor(agent.id));
-      item.attachments.filter(attachment => !draftsForSession.has(attachment)).forEach(revokeAttachment);
-    }
-    dismissRetryBatch(agent.id, requestId);
+    const item = pendingFor(agent.id).find(candidate => candidate.id === requestId);
+    if (item) releasePending(agent.id, item);
     touchRender();
     renderDetail();
     return true;
@@ -234,6 +273,7 @@ function createComposerRecovery({
         if (key.startsWith(`${id}\0`)) records.delete(key);
       }
     },
+    accept,
     recover,
     reconcile,
     restoreDelivery,

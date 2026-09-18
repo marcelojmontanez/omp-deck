@@ -94,12 +94,13 @@ class RequestLedger:
                     (
                         i
                         for i, item in enumerate(data["records"])
-                        if item["state"] == "complete" and item["recovery"] is None
+                        if item["state"] == "complete"
+                        and (item["recovery"] is None or self._is_accepted_recovery(item))
                     ),
                     None,
                 )
                 if completed is None:
-                    raise RequestLedgerError("request ledger capacity is occupied by pending operations")
+                    raise RequestLedgerError("request ledger capacity is occupied by pending or unresolved operations")
                 data["records"].pop(completed)
             if recovery_record is not None:
                 recovery_record["state"] = "submitting"
@@ -324,6 +325,37 @@ class RequestLedger:
                 changed = True
         return changed
 
+    @staticmethod
+    def _is_accepted_recovery(record: Mapping[str, Any]) -> bool:
+        recovery = record["recovery"]
+        outcome = record["outcome"]
+        return (
+            record["state"] == "complete"
+            and isinstance(recovery, Mapping)
+            and recovery.get("state") == "accepted"
+            and isinstance(outcome, Mapping)
+            and outcome.get("status") == "accepted"
+        )
+
+    @classmethod
+    def _reclaim_accepted_recoveries(cls, data: dict[str, Any], bytes_needed: int) -> bool:
+        reclaimed = 0
+        for record in data["records"]:
+            if not cls._is_accepted_recovery(record):
+                continue
+            recovery = record["recovery"]
+            reclaimed += len(
+                json.dumps(
+                    recovery,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ) - len(b"null")
+            record["recovery"] = None
+            if reclaimed >= bytes_needed:
+                break
+        return reclaimed > 0
+
     @contextmanager
     def _locked(self) -> Iterator[None]:
         with self._thread_lock:
@@ -454,6 +486,14 @@ class RequestLedger:
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")
+        if len(payload) > _MAX_FILE_BYTES and self._reclaim_accepted_recoveries(data, len(payload) - _MAX_FILE_BYTES):
+            payload = json.dumps(
+                data,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
         if len(payload) > _MAX_FILE_BYTES:
-            raise RequestLedgerError("delivery recovery capacity is full; dismiss older delivery receipts and retry")
+            raise RequestLedgerError(
+                "delivery recovery capacity is full; unresolved delivery receipts require attention"
+            )
         self._storage.replace(payload)

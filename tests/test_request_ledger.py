@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from omp_deck.request_ledger import RequestConflictError, RequestLedger
+from omp_deck.request_ledger import RequestConflictError, RequestLedger, RequestLedgerError
 
 
 class RequestLedgerTests(unittest.TestCase):
@@ -96,6 +96,173 @@ class RequestLedgerTests(unittest.TestCase):
                     "acceptance": "accepted",
                     "result": None,
                 },
+            )
+
+    def test_file_pressure_reclaims_accepted_payload_without_losing_dedup_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "requests.json"
+            ledger = RequestLedger(path)
+            recovery = {
+                "kind": "message",
+                "sessionId": "session",
+                "action": "sendMessage",
+                "message": "accepted payload " * 200,
+                "images": [],
+            }
+            outcome = {
+                "requestId": "accepted-message",
+                "status": "accepted",
+                "acceptance": "accepted",
+                "result": None,
+            }
+            ledger.reserve(
+                "rpc-command:session",
+                "accepted-message",
+                "a" * 64,
+                recovery=recovery,
+            )
+            ledger.complete(
+                "rpc-command:session",
+                "accepted-message",
+                "a" * 64,
+                outcome,
+            )
+            restarted = RequestLedger(path)
+
+            with patch(
+                "omp_deck.request_ledger._MAX_FILE_BYTES",
+                path.stat().st_size + 64,
+            ):
+                self.assertIsNone(
+                    restarted.reserve(
+                        "rpc-command:session",
+                        "next-message",
+                        "b" * 64,
+                    )
+                )
+                self.assertEqual(restarted.deliveries("session"), [])
+                self.assertEqual(
+                    restarted.reserve(
+                        "rpc-command:session",
+                        "accepted-message",
+                        "a" * 64,
+                    ),
+                    outcome,
+                )
+                with self.assertRaises(RequestConflictError):
+                    restarted.reserve(
+                        "rpc-command:session",
+                        "accepted-message",
+                        "c" * 64,
+                    )
+
+    def test_record_pressure_evicts_accepted_before_unresolved_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "requests.json"
+            ledger = RequestLedger(path, max_records=2)
+            unresolved = {
+                "kind": "message",
+                "sessionId": "session",
+                "action": "sendMessage",
+                "message": "needs recovery",
+                "images": [],
+            }
+            ledger.reserve(
+                "rpc-command:session",
+                "unresolved-message",
+                "a" * 64,
+                recovery=unresolved,
+            )
+            ledger.mark_uncertain(
+                "rpc-command:session",
+                "unresolved-message",
+                "a" * 64,
+            )
+            ledger.reserve(
+                "rpc-command:session",
+                "accepted-message",
+                "b" * 64,
+                recovery={
+                    **unresolved,
+                    "message": "already accepted",
+                },
+            )
+            ledger.complete(
+                "rpc-command:session",
+                "accepted-message",
+                "b" * 64,
+                {
+                    "requestId": "accepted-message",
+                    "status": "accepted",
+                    "acceptance": "accepted",
+                    "result": None,
+                },
+            )
+
+            self.assertIsNone(
+                ledger.reserve(
+                    "rpc-command:session",
+                    "next-message",
+                    "c" * 64,
+                )
+            )
+            self.assertIsNone(
+                ledger.lookup(
+                    "rpc-command:session",
+                    "accepted-message",
+                    "b" * 64,
+                )
+            )
+            with self.assertRaises(RequestLedgerError):
+                ledger.reserve(
+                    "rpc-command:session",
+                    "overflow-message",
+                    "d" * 64,
+                )
+            self.assertEqual(
+                [(item["requestId"], item["state"], item["message"]) for item in ledger.deliveries("session")],
+                [("unresolved-message", "uncertain", "needs recovery")],
+            )
+
+    def test_file_pressure_preserves_unresolved_recovery_and_disk_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "requests.json"
+            ledger = RequestLedger(path)
+            ledger.reserve(
+                "rpc-command:session",
+                "unresolved-message",
+                "a" * 64,
+                recovery={
+                    "kind": "message",
+                    "sessionId": "session",
+                    "action": "sendMessage",
+                    "message": "unresolved payload " * 200,
+                    "images": [],
+                },
+            )
+            ledger.mark_uncertain(
+                "rpc-command:session",
+                "unresolved-message",
+                "a" * 64,
+            )
+            persisted = path.read_bytes()
+
+            with patch(
+                "omp_deck.request_ledger._MAX_FILE_BYTES",
+                path.stat().st_size + 64,
+            ):
+                with self.assertRaises(RequestLedgerError):
+                    ledger.reserve(
+                        "rpc-command:session",
+                        "next-message",
+                        "b" * 64,
+                    )
+                self.assertEqual(path.read_bytes(), persisted)
+                deliveries = RequestLedger(path).deliveries("session")
+
+            self.assertEqual(
+                [(item["requestId"], item["state"], item["message"]) for item in deliveries],
+                [("unresolved-message", "uncertain", "unresolved payload " * 200)],
             )
 
     def test_uncertain_identical_messages_remain_distinct_without_text_or_order_inference(self):

@@ -1133,12 +1133,15 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     try {
       const routes = [];
       let releaseFirst;
+      let releaseSecond;
       ompDeckApi.request = (path, options) => {
         if (path.endsWith('/deliveries')) return Promise.resolve({ok: true, json: async () => ({version: 1, deliveries: []})});
         routes.push(path);
-        if (routes.length === 1) {
+        if (routes.length <= 2) {
           return new Promise(resolve => {
-            releaseFirst = () => resolve(response(options));
+            const release = () => resolve(response(options));
+            if (routes.length === 1) releaseFirst = release;
+            else releaseSecond = release;
           });
         }
         return Promise.resolve(response(options));
@@ -1150,6 +1153,9 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       agent.executionState = 'working';
       releaseFirst();
       await waitUntil(() => routes.length === 2, 'follow-up request');
+      const statusWhileSecondPending = document.getElementById('send-state').textContent;
+      releaseSecond();
+      await waitUntil(() => composer.pendingFor(agent.id).length === 0, 'follow-up acceptance');
 
       agent.status = 'idle';
       agent.executionState = 'idle';
@@ -1185,6 +1191,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
         failedRequests,
         retryRequests,
         restoredDraft,
+        statusWhileSecondPending,
       };
     } finally {
       ompDeckApi.request = originalRequest;
@@ -1194,6 +1201,8 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     '/api/sessions/queue-session/messages',
     '/api/sessions/queue-session/messages',
   ]);
+  assert.equal(queueBehavior.statusWhileSecondPending, 'Submitting',
+    'an older acceptance must not replace a newer submitting status');
   assert.deepEqual(
     queueBehavior.failedRequests.map(request => request.path),
     ['/api/sessions/queue-session/messages'],
@@ -1208,96 +1217,67 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     queueBehavior.failedRequests[0].body.requestId,
   );
 
-  const echoReconciliation = await page.evaluate(async () => {
+  const acceptedReceiptProjection = await page.evaluate(async () => {
     const originalRequest = ompDeckApi.request;
     const previousAgents = state.agents;
     const previousSelectedId = state.selectedId;
     const agent = {
-      id: 'echo-session', project: 'demo', label: 'Echo session',
+      id: 'accepted-receipt-session', project: 'demo', label: 'Accepted receipt session',
       lifecycle: 'ongoing',
       status: 'idle', executionState: 'idle', inboxState: 'read',
       bridgeConnected: true, capabilities: {sendMessage: true},
       transport: {kind: 'rpc', status: 'connected', label: 'RPC'},
       pendingUiRequest: null, subagents: [],
-      session: {
-        activity: [{
-          id: 'old-identical', kind: 'user', detail: 'duplicate',
-          time: '2099-01-01T00:00:00Z',
-        }],
-        todo: '', updatedMs: Date.now(),
-      },
+      session: {activity: [], todo: '', updatedMs: Date.now()},
     };
-    state.agents = [agent];
-    state.selectedId = agent.id;
-    composer.select(agent.id);
-    const submit = message => {
-      el.message.value = message;
-      el.composer.requestSubmit();
+    let requestCount = 0;
+    const waitUntil = async predicate => {
+      const deadline = Date.now() + 2_000;
+      while (!predicate()) {
+        if (Date.now() >= deadline) throw new Error('accepted receipt projection timed out');
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
     };
     try {
-      ompDeckApi.request = async (path, options) => path.endsWith('/deliveries')
-        ? {ok: true, json: async () => ({version: 1, deliveries: []})}
-        : {ok: true, status: 202, json: async () => ({requestId: JSON.parse(options.body).requestId, status: 'accepted', acceptance: 'accepted'})};
-      submit('duplicate');
-      submit('duplicate');
-      await new Promise(resolve => setTimeout(resolve, 0));
-      composer.reconcile(agent);
-      const afterOld = composer.pendingFor(agent.id).length;
-      agent.session.activity.push({
-        id: 'new-one', kind: 'user', detail: 'duplicate',
-        time: '1999-01-01T00:00:00Z',
-      });
-      composer.reconcile(agent);
-      const afterOne = composer.pendingFor(agent.id).length;
-      composer.reconcile(agent);
-      const afterRepeatedSnapshot = composer.pendingFor(agent.id).length;
-      agent.session.activity.push({
-        id: 'new-two', kind: 'user', detail: 'duplicate',
-        time: '1998-01-01T00:00:00Z',
-      });
-      composer.reconcile(agent);
-      const afterTwo = composer.pendingFor(agent.id).length;
-
-      submit('lost after truncation');
-      await new Promise(resolve => setTimeout(resolve, 0));
-      agent.session.activity = Array.from({length: 500}, (_, index) => ({
-        id: index === 0 ? 'old-identical' : `replacement-${index}`,
-        kind: 'user',
-        detail: index === 0 ? 'lost after truncation' : `post-submit-${index}`,
-        time: '1997-01-01T00:00:00Z',
-      }));
-      composer.reconcile(agent);
-      const afterTruncationWithoutEcho = composer.pendingFor(agent.id).length;
-      agent.session.activity.shift();
-      agent.session.activity.push({
-        id: 'delivered-after-truncation',
-        kind: 'user',
-        detail: 'lost after truncation',
-        time: '1996-01-01T00:00:00Z',
-      });
-      composer.reconcile(agent);
+      ompDeckApi.request = async (path, options = {}) => {
+        if (path.endsWith('/deliveries')) {
+          return {ok: true, json: async () => ({version: 1, deliveries: []})};
+        }
+        requestCount += 1;
+        const body = JSON.parse(options.body);
+        return {ok: true, status: 202, json: async () => ({
+          requestId: body.requestId, status: 'accepted', acceptance: 'accepted',
+        })};
+      };
+      state.agents = [agent];
+      selectAgent(agent.id, {pushHistory: false});
+      for (let index = 0; index < 1_001; index += 1) {
+        el.message.value = `accepted ${index}`;
+        el.composer.requestSubmit();
+        await waitUntil(() => composer.pendingFor(agent.id).length === 0);
+      }
       return {
-        afterOld,
-        afterOne,
-        afterRepeatedSnapshot,
-        afterTwo,
-        afterTruncationWithoutEcho,
-        afterDeliveredEcho: composer.pendingFor(agent.id).length,
+        requestCount,
+        pending: composer.pendingFor(agent.id).length,
+        acceptedCards: [...el.activity.querySelectorAll('.event-title')]
+          .filter(title => /accepted/i.test(title.textContent)).length,
+        deliveryControls: el.activity.querySelectorAll('[data-delivery-action]').length,
+        status: el['send-state'].textContent,
       };
     } finally {
+      composer.remove(agent.id);
       ompDeckApi.request = originalRequest;
       state.agents = previousAgents;
       state.selectedId = previousSelectedId;
       composer.select(previousSelectedId);
     }
   });
-  assert.deepEqual(echoReconciliation, {
-    afterOld: 2,
-    afterOne: 2,
-    afterRepeatedSnapshot: 2,
-    afterTwo: 2,
-    afterTruncationWithoutEcho: 3,
-    afterDeliveredEcho: 3,
+  assert.deepEqual(acceptedReceiptProjection, {
+    requestCount: 1_001,
+    pending: 0,
+    acceptedCards: 0,
+    deliveryControls: 0,
+    status: 'Accepted',
   });
 
   const clearedQueue = await page.evaluate(async () => {

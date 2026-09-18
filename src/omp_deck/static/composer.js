@@ -51,8 +51,8 @@ function createComposer({
     renderAttachments,
     touchRender,
     renderDetail,
-    dismissRetryBatch: (id, requestId) => retryBatches.get(id)?.jobs.some(job => job.pending?.id === requestId) && retryBatches.delete(id),
     queueToken,
+    dismissRetryBatch: (id, requestId) => retryBatches.get(id)?.jobs.some(job => job.pending?.id === requestId) && retryBatches.delete(id),
     setRetryBatch: (id, value) => {
       if (value) retryBatches.set(id, {...value, revision: commands.revision({id})});
       else retryBatches.delete(id);
@@ -253,10 +253,8 @@ function createComposer({
       error.reuseRequestId = true;
       throw error;
     }
-    setComposerDeliveryState(pending, payload.acceptance);
-    if (sessionId === id) elements['send-state'].textContent = 'Accepted';
+    recovery.accept(id, pending);
     touchRender();
-    if (sessionId === id) elements['send-state'].className = 'send-state ok';
     renderDetail();
   }
 
@@ -400,7 +398,6 @@ function createComposer({
       attachments: outgoingAttachments,
       action,
       createdAt: Date.now(),
-      accepted: false,
       state: 'submitting',
     };
     pendingFor(id).push(pending);

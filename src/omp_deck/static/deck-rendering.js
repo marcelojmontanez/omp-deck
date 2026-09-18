@@ -288,7 +288,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
       ? `<div class="archive-separator"><button type="button" data-toggle-archive aria-expanded="${state.showArchive}">${state.showArchive ? 'Hide earlier history' : 'Show earlier history'}</button></div>${state.showArchive ? archivedEvents.reverse().map(event => `<article class="event archived ${escapeHtml(event.kind)}"><div class="event-head"><span class="event-title">${escapeHtml(event.title)}</span><time class="event-time">${escapeHtml(clockTime(event.time))}</time></div>${eventAttachments(event)}${renderEventDetail(event)}</article>`).join('') : ''}`
       : '';
     const pending = isLiveSession && agent
-      ? [...getComposer().pendingFor(agent.id)].reverse().map(deliveryEvent)
+      ? [...getComposer().pendingFor(agent.id)].reverse().map(deliveryEvent).filter(Boolean)
       : [];
     events.unshift(...pending);
     if (isLiveSession && executionState === 'working') {

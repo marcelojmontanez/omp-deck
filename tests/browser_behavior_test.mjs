@@ -5,6 +5,7 @@ import vm from 'node:vm';
 
 const source = await readFile(new URL('../src/omp_deck/static/fleet-projection.js', import.meta.url), 'utf8');
 const helperSource = await readFile(new URL('../src/omp_deck/static/ui-helpers.js', import.meta.url), 'utf8');
+const recoverySource = await readFile(new URL('../src/omp_deck/static/composer-recovery.js', import.meta.url), 'utf8');
 
 const todoSource = await readFile(new URL('../src/omp_deck/static/todo-ui.js', import.meta.url), 'utf8');
 const sseParserSource = await readFile(
@@ -267,6 +268,48 @@ test('composer queue stops after a failed delivery and preserves later jobs', as
   assert.deepEqual(attempted, [1]);
   assert.deepEqual(restored, [1, 2]);
   assert.deepEqual(queue, []);
+});
+
+test('a stale recovery response cannot resurrect an accepted send', async () => {
+  const agent = {id: 'session'};
+  const pending = [];
+  const status = {};
+  let finishRead;
+  const context = vm.createContext({
+    Date,
+    ompDeckApi: {},
+    ompDeckNetwork: {
+      fetchJsonBounded: () => new Promise(resolve => { finishRead = resolve; }),
+    },
+  });
+  vm.runInContext(recoverySource, context, {filename: 'composer-recovery.js'});
+  const recovery = context.createComposerRecovery({
+    elements: {'send-state': status},
+    selectedAgent: () => agent,
+    pendingFor: () => pending,
+    attachmentsFor: () => [],
+    revokeAttachment: () => {},
+    dismissRetryBatch: () => {},
+    deliveryState: context.setComposerDeliveryState,
+    touchRender: () => {},
+    renderDetail: () => {},
+    dataGeneration: () => 1,
+  });
+  const read = recovery.recover(agent);
+  const item = {id: 'request', state: 'submitting', text: 'hello', attachments: []};
+  pending.push(item);
+  recovery.accept(agent.id, item);
+  finishRead({
+    response: {ok: true},
+    payload: {version: 1, deliveries: [{
+      sessionId: agent.id, requestId: item.id, action: 'sendMessage',
+      state: 'uncertain', message: 'hello', attachments: [],
+      createdAt: 1, updatedAt: 2, expiresAt: 3,
+    }]},
+  });
+  await read;
+  assert.equal(pending.length, 0, 'an older snapshot must not restore a delivery warning');
+  assert.equal(status.className, 'send-state ok');
 });
 
 test('frames large character-fragmented events across CRLF boundaries', () => {

@@ -114,7 +114,7 @@ omp-deck serve
 
 **Ongoing** is the default view. It includes sessions with a current transport owner and managed sessions whose recovery is still requested. **Needs attention** includes pending input, failures, unavailable machines, connection recovery, and incomplete history. Summary counts and filters apply to ongoing sessions, not old records.
 
-Matching session names are distinguished as **Live session** or **Saved conversation**. Numbering appears only when the same machine and project have multiple matching sessions of the same kind.
+When History is enabled, matching session names are distinguished as **Live session** or **Saved conversation**. Numbering appears only when the same machine and project have multiple matching sessions of the same kind. These labels are hidden when History is disabled.
 
 **History** is hidden by default. Set `"show_history": true` in the configuration of the service whose dashboard you open to restore it. History contains retained records without a current attachment or managed recovery intent. Conversations are read-only; their Deck names and pins remain editable. Hiding History only changes presentation: records and transcripts remain available to the authenticated API, so this is not an access-control or deletion setting. A restored live attachment returns a record to Ongoing. Machine outages preserve the browser's last-known grouping rather than reclassifying every session as history.
 

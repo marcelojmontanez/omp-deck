@@ -113,7 +113,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     const focusedId = el['agent-list'].contains(document.activeElement)
       ? document.activeElement.closest('[data-id]')?.dataset.id : null;
     const visible = state.agents.filter(matchesFilter).sort(compareAgents);
-    const duplicateLabels = sessionDuplicateLabels(state.agents);
+    const duplicateLabels = state.showHistory ? sessionDuplicateLabels(state.agents) : null;
     el['agent-list'].innerHTML = visible.length ? visible.map(agent => {
       const session = agent.session || {};
       const agentLifecycle = lifecycle(agent);
@@ -124,7 +124,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
         `<span class="subagent"><i class="status-dot ${escapeHtml(subagent.executionState)}"></i><span><strong>${escapeHtml(subagent.label)}</strong><small>${escapeHtml(subagent.activitySummary || subagent.executionState)}</small></span></span>`
       ).join('');
       const {title, project, machine, metadata} = sessionIdentity(agent);
-      const duplicate = duplicateLabels.get(agent.id) || '';
+      const duplicate = duplicateLabels?.get(agent.id) || '';
       const lifecycleNote = agentLifecycle === 'history'
         ? 'Saved conversation'
         : agentLifecycle === 'unknown'

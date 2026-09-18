@@ -489,6 +489,28 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   assert.equal(rendering.removeVisible, true);
   assert.equal(rendering.removeDenied, true);
   assert.equal(rendering.metricOverflow, false);
+  const historyLabels = await page.evaluate(() => {
+    const other = state.agents.find(agent => agent.id !== state.selectedId);
+    const original = {showHistory: state.showHistory, lifecycle: other.lifecycle};
+    try {
+      other.lifecycle = 'history';
+      state.showHistory = true;
+      renderList();
+      const enabled = document.querySelectorAll('.agent-disambiguator').length;
+      state.showHistory = false;
+      renderList();
+      return {
+        enabled,
+        disabled: document.querySelectorAll('.agent-disambiguator').length,
+        visibleCards: document.querySelectorAll('.agent-card').length,
+      };
+    } finally {
+      state.showHistory = original.showHistory;
+      other.lifecycle = original.lifecycle;
+      renderList();
+    }
+  });
+  assert.deepEqual(historyLabels, {enabled: 1, disabled: 0, visibleCards: 1});
   const presentationUi = await page.evaluate(async () => {
     const originalRequest = ompDeckApi.request;
     const selected = selectedAgent();

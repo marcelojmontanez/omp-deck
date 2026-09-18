@@ -8,8 +8,8 @@
   border-radius: 16px;
   background: rgba(14, 18, 29, .72);
 }
-.machine-picker { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 9px; align-items: center; }
-.machine-picker label { color: var(--muted); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .07em; white-space: nowrap; }
+.machine-picker { display: grid; grid-template-columns: minmax(0, 1fr); gap: 5px; align-items: center; }
+.machine-picker label { color: var(--muted); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .07em; }
 .machine-picker select {
   width: 100%;
   min-width: 0;
@@ -20,7 +20,6 @@
   background: var(--panel-solid);
   color: var(--text);
 }
-.machine-picker-help { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
 .machine-status-list { min-width: 0; display: flex; flex-wrap: wrap; gap: 6px; }
 .machine-status {
   display: inline-flex;
@@ -65,7 +64,6 @@
 }
 @media (max-width: 760px) {
   .machine-panel { grid-template-columns: 1fr; padding: 10px; }
-  .machine-picker { grid-template-columns: 1fr; gap: 5px; }
   .machine-status-list { max-height: 92px; overflow-y: auto; }
   .fleet-reload { align-items: stretch; flex-direction: column; }
   .fleet-reload button { width: 100%; }

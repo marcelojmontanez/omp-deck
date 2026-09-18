@@ -110,9 +110,11 @@ omp-deck serve
 - rename or reset a session’s Deck display name and pin or unpin it from the session menu, independently of whether its OMP transport supports native renaming;
 - answer pending RPC or Collab input requests in the request panel; extension-fallback requests remain terminal-only.
 
-**Target machine** chooses where to start a new OMP, connect a writable Collab link, and read usage. It is not a session filter: the list still includes every enrolled machine. Each session's machine label identifies its actual owner, independently of this selector.
+**Machine for new sessions and usage** chooses where to start a new OMP, connect a writable Collab link, and read usage. It is not a session filter: the list still includes every enrolled machine. Each session's machine label identifies its actual owner, independently of this selector.
 
 **Ongoing** is the default view. It includes sessions with a current transport owner and managed sessions whose recovery is still requested. **Needs attention** includes pending input, failures, unavailable machines, connection recovery, and incomplete history. Summary counts and filters apply to ongoing sessions, not old records.
+
+Matching session names are distinguished as **Live session** or **Saved conversation**. Numbering appears only when the same machine and project have multiple matching sessions of the same kind.
 
 **History** is hidden by default. Set `"show_history": true` in the configuration of the service whose dashboard you open to restore it. History contains retained records without a current attachment or managed recovery intent. Conversations are read-only; their Deck names and pins remain editable. Hiding History only changes presentation: records and transcripts remain available to the authenticated API, so this is not an access-control or deletion setting. A restored live attachment returns a record to Ongoing. Machine outages preserve the browser's last-known grouping rather than reclassifying every session as history.
 

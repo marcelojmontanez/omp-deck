@@ -24,9 +24,10 @@
 - Keep session execution, transport connectivity, and history availability distinct; identify Deck connectivity separately and preserve last-known grouping during machine outages.
 - Identify a directly connected machine by its Deck address instead of `This machine`; preserve enrolled machine names.
 - Allow newer OMP versions without a manually maintained version list. Doctor distinguishes installed and running versions; unknown version text is a warning, while actual protocol and capability failures remain explicit.
-- Explain that Target machine controls new-session launches, terminal connections, and usage, while the session list remains fleet-wide.
+- Label the machine selector by its scope: new sessions and usage.
 - Derive each Deck package version automatically from its committed source revision. Reject dirty or ambiguous builds, and preserve verified source identity through source-distribution rebuilds.
 - Raise image attachments to four images totaling 20 MiB for managed RPC and extension 1.3.4, or 10 MiB for writable Collab. Already-running older extensions retain 700 KiB until an idle restart and resume. Allow more time for large image transfers and make full recovery-storage errors actionable.
+- Distinguish live sessions from saved conversations with matching names; number only duplicates of the same kind.
 
 ### Fixed
 

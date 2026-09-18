@@ -48,26 +48,35 @@ function todosText(todos) {
   }).join('\n')}`).join('\n');
 }
 
-function sessionDuplicateOrdinals(agents) {
+function sessionDuplicateLabels(agents) {
   const groups = new Map();
   for (const agent of agents) {
     const key = JSON.stringify([agent.machineId, agent.project, agent.label]);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(agent);
   }
-  const ordinals = new Map();
+  const labels = new Map();
   for (const group of groups.values()) {
     if (group.length < 2) continue;
-    group.sort((left, right) => {
-      const leftId = String(left.localId || left.id);
-      const rightId = String(right.localId || right.id);
-      return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
-    });
-    group.forEach((agent, index) => {
-      ordinals.set(agent.id, `Session ${index + 1} of ${group.length}`);
-    });
+    const kinds = new Map();
+    for (const agent of group) {
+      const label = agent.lifecycle === 'ongoing' ? 'Live session'
+        : agent.lifecycle === 'history' ? 'Saved conversation' : 'Session status unavailable';
+      if (!kinds.has(label)) kinds.set(label, []);
+      kinds.get(label).push(agent);
+    }
+    for (const [label, peers] of kinds) {
+      peers.sort((left, right) => {
+        const leftId = String(left.localId || left.id);
+        const rightId = String(right.localId || right.id);
+        return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+      });
+      peers.forEach((agent, index) => {
+        labels.set(agent.id, peers.length === 1 ? label : `${label} ${index + 1} of ${peers.length}`);
+      });
+    }
   }
-  return ordinals;
+  return labels;
 }
 
 function sessionIdentity(agent) {

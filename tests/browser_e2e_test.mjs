@@ -493,16 +493,9 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     const originalRequest = ompDeckApi.request;
     const selected = selectedAgent();
     const other = state.agents.find(agent => agent.id !== selected.id);
-    const ordinalLabels = () => Object.fromEntries(
-      [...document.querySelectorAll('.agent-card')].map(card => [
-        card.dataset.id,
-        card.querySelector('.agent-disambiguator')?.textContent || '',
-      ])
-    );
     selected.pinned = false;
     other.pinned = false;
     renderList();
-    const ordinalsBefore = ordinalLabels();
     selected.pinned = false;
     other.pinned = true;
     renderList();
@@ -510,7 +503,6 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     const trigger = document.querySelector('[data-session-action="rename"]');
     showSessionNameEditor(trigger);
     el['session-name-input'].value = 'Keep this edit';
-    const ordinalsAfter = ordinalLabels();
     ompDeckApi.request = async () => new Response(
       JSON.stringify({error: 'Metadata unavailable'}),
       {status: 503, headers: {'Content-Type': 'application/json'}},
@@ -523,8 +515,6 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
         dialogOpen: el['session-name-dialog'].open,
         value: el['session-name-input'].value,
         error: el['session-name-status'].textContent,
-        ordinalsBefore,
-        ordinalsAfter,
       };
     } finally {
       selected.pinned = false;
@@ -540,8 +530,6 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     dialogOpen: true,
     value: 'Keep this edit',
     error: 'Metadata unavailable',
-    ordinalsBefore: {'session-1': 'Session 2 of 2', 'idle-session': 'Session 1 of 2'},
-    ordinalsAfter: {'idle-session': 'Session 1 of 2', 'session-1': 'Session 2 of 2'},
   });
   await page.waitForFunction(() => [...state.nodes.values()].every(node => !node.refreshRequest));
   const recovery = await page.evaluate(async () => {

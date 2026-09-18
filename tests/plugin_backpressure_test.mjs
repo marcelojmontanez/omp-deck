@@ -19,6 +19,7 @@ async function fixture(messages, options = {}) {
   const timers = new Set();
   const intervalCallbacks = [];
   let abortCalls = 0;
+  const sentUserMessages = [];
   const blobRoot = path.join(root, 'blobs');
   const warnings = [];
   const context = {
@@ -28,6 +29,7 @@ async function fixture(messages, options = {}) {
       getSessionName: () => 'Backpressure test',
       getBranch: () => messages.map((message, index) => ({type: 'message', id: String(index), message})),
       async putBlob(data) {
+        if (options.putBlob) return options.putBlob(data);
         const hash = createHash('sha256').update(data).digest('hex');
         const blobPath = path.join(blobRoot, hash);
         await mkdir(blobRoot, {recursive: true});
@@ -41,7 +43,9 @@ async function fixture(messages, options = {}) {
       },
     },
     isIdle: () => true, hasPendingMessages: () => false,
-    getAsyncJobSnapshot: () => options.asyncJobs ?? [],
+    getAsyncJobSnapshot: () => options.asyncJobs ?? {
+      running: [], recent: [], delivery: {queued: 0, delivering: false, pendingJobIds: []},
+    },
     setTimeout(callback, delay) { const timer = setTimeout(callback, delay); timers.add(timer); return timer; },
     setInterval(callback, delay) { intervalCallbacks.push(callback); const timer = setInterval(callback, delay); timers.add(timer); return timer; },
     clearTimer(timer) { clearTimeout(timer); clearInterval(timer); timers.delete(timer); },
@@ -50,7 +54,7 @@ async function fixture(messages, options = {}) {
   const pi = {
     pi: {VERSION: 'test'}, logger: {warn(message, details) { warnings.push([message, details]); }},
     on(name, handler) { handlers.set(name, handler); },
-    async sendUserMessage() {},
+    sendUserMessage(content, deliveryOptions) { sentUserMessages.push({content, options: deliveryOptions}); },
     getThinkingLevel() { return options.thinking; },
     setThinkingLevel() {},
   };
@@ -78,7 +82,7 @@ async function fixture(messages, options = {}) {
     await rm(root, {recursive: true, force: true});
   }
   return {
-    blobRoot, connect, cleanup, context, handlers, timers, warnings, intervalCallbacks,
+    blobRoot, connect, cleanup, context, handlers, timers, warnings, intervalCallbacks, sentUserMessages,
     get abortCalls() { return abortCalls; },
   };
 }
@@ -107,6 +111,67 @@ test('fragmented request input preserves extension framing', async () => {
   }
 });
 
+test('queued prompt is cancelled when its peer session is replaced', {timeout: 5_000}, async () => {
+  let enterProjection;
+  let releaseProjection;
+  const projectionEntered = new Promise(resolve => { enterProjection = resolve; });
+  const projectionBlocked = new Promise(resolve => { releaseProjection = resolve; });
+  const app = await fixture([{
+    role: 'user',
+    content: [{
+      type: 'image',
+      data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl9ZAAAAABJRU5ErkJggg==',
+      mimeType: 'image/png',
+    }],
+  }], {
+    async putBlob(data) {
+      enterProjection();
+      await projectionBlocked;
+      const hash = createHash('sha256').update(data).digest('hex');
+      return {hash, path: '', displayPath: '', ref: `blob:sha256:${hash}`};
+    },
+  });
+  let socket;
+  try {
+    socket = await app.connect();
+    const lines = readline.createInterface({input: socket, crlfDelay: Infinity});
+    const frames = lines[Symbol.asyncIterator]();
+    await frames.next();
+    await frames.next();
+    socket.write(
+      `${JSON.stringify({
+        protocol: 'omp-deck-fallback-v1', type: 'request', id: 'history', action: 'syncHistory',
+      })}\n`
+      + `${JSON.stringify({
+        protocol: 'omp-deck-fallback-v1', type: 'request', id: 'old-prompt',
+        action: 'sendMessage', message: 'must stay in the old session',
+      })}\n`,
+    );
+    await projectionEntered;
+
+    const replacement = {
+      ...app.context,
+      cwd: '/work/replacement',
+      sessionManager: {
+        ...app.context.sessionManager,
+        getSessionId: () => 'replacement-session',
+        getSessionName: () => 'Replacement session',
+        getBranch: () => [],
+      },
+    };
+    await app.handlers.get('session_switch')({}, replacement);
+    releaseProjection();
+    for (let attempt = 0; attempt < 10; attempt++) await new Promise(resolve => setImmediate(resolve));
+
+    assert.deepEqual(app.sentUserMessages, []);
+    lines.close();
+  } finally {
+    releaseProjection?.();
+    socket?.destroy();
+    await app.cleanup();
+  }
+});
+
 test('oversized snapshots retain their small thinking state when collections degrade', async () => {
   const app = await fixture([], {
     thinking: 'high',
@@ -116,7 +181,14 @@ test('oversized snapshots retain their small thinking state when collections deg
       reasoning: true,
       thinking: {mode: 'effort', efforts: ['low', 'medium', 'high', 'xhigh']},
     },
-    asyncJobs: [{output: 'x'.repeat(2 * 1024 * 1024)}],
+    asyncJobs: {
+      running: [{
+        id: 'oversized', type: 'task', status: 'running',
+        label: 'x'.repeat(2 * 1024 * 1024), startTime: 1,
+      }],
+      recent: [],
+      delivery: {queued: 0, delivering: false, pendingJobIds: []},
+    },
   });
   let socket;
   try {
@@ -128,7 +200,9 @@ test('oversized snapshots retain their small thinking state when collections deg
     const degraded = JSON.parse((await frames.next()).value);
 
     assert.equal(snapshot.kind, 'snapshot');
-    assert.deepEqual(snapshot.data.async, []);
+    assert.deepEqual(snapshot.data.async, {
+      running: [], recent: [], delivery: {queued: 0, delivering: false, pendingJobIds: []},
+    });
     assert.equal(snapshot.data.thinking, 'high');
     assert.deepEqual(snapshot.data.thinkingLevels, ['off', 'low', 'medium', 'high', 'xhigh']);
     assert.equal(degraded.kind, 'degraded');

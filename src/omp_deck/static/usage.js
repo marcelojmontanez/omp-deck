@@ -1,5 +1,11 @@
+const USAGE_REFRESH_INTERVAL_MS = 5 * 60_000;
+const USAGE_REFRESH_THROTTLE_MS = 60_000;
 let usageLoadedAt = 0;
 let usageMachineId = null;
+let usageMachineOrigin = null;
+let usageRequest = null;
+let usageTimer = null;
+let usageActive = false;
 
 function usageResetTime(value) {
   const seconds = Math.max(0, Math.round((value - Date.now()) / 1000));
@@ -29,36 +35,126 @@ function renderUsage(payload) {
   }).join('');
 }
 
-async function refreshUsage() {
+function cancelUsageRequest() {
+  usageRequest?.controller.abort();
+  usageRequest = null;
+}
+
+function usageContextIsCurrent(machineId, machineOrigin) {
+  return ompDeckApi.authenticated()
+    && !state.reloadRequiredMachines.has(machineId)
+    && state.selectedMachineId === machineId
+    && ompDeckApi.machine(machineId)?.origin === machineOrigin;
+}
+
+async function refreshUsage({replace = false} = {}) {
+  if (!ompDeckApi.authenticated()) return;
   const machineId = state.selectedMachineId;
   const machineOrigin = ompDeckApi.machine(machineId)?.origin;
   if (!machineId) {
+    cancelUsageRequest();
+    usageMachineId = null;
+    usageLoadedAt = 0;
+    usageMachineOrigin = null;
     renderUsage({reports: []});
     return;
   }
   if (state.reloadRequiredMachines.has(machineId)) {
+    cancelUsageRequest();
     renderUsage({error: 'Reload the dashboard to authorize this machine origin.'});
     return;
   }
-  if (usageMachineId === machineId && Date.now() - usageLoadedAt < 60_000) return;
+  if (
+    !replace
+    && usageMachineId === machineId
+    && usageMachineOrigin === machineOrigin
+    && Date.now() - usageLoadedAt < USAGE_REFRESH_THROTTLE_MS
+  ) return;
+  if (usageRequest) {
+    if (
+      !replace
+      && usageRequest.machineId === machineId
+      && usageRequest.machineOrigin === machineOrigin
+    ) return usageRequest.promise;
+    cancelUsageRequest();
+  }
+
   usageMachineId = machineId;
   usageLoadedAt = Date.now();
-  try {
-    const response = await ompDeckApi.request('/api/usage', {machineId, cache: 'no-store'});
-    if (!response.ok) throw new Error(`Usage returned ${response.status}`);
-    const payload = await response.json();
-    if (
-      ompDeckApi.authenticated()
-      && !state.reloadRequiredMachines.has(machineId)
-      && state.selectedMachineId === machineId
-      && ompDeckApi.machine(machineId)?.origin === machineOrigin
-    ) renderUsage(payload);
-  } catch (error) {
-    if (
-      ompDeckApi.authenticated()
-      && !state.reloadRequiredMachines.has(machineId)
-      && state.selectedMachineId === machineId
-      && ompDeckApi.machine(machineId)?.origin === machineOrigin
-    ) renderUsage({error: error.message});
-  }
+  usageMachineOrigin = machineOrigin;
+  const request = {
+    machineId,
+    machineOrigin,
+    controller: new AbortController(),
+    promise: null,
+  };
+  usageRequest = request;
+  request.promise = (async () => {
+    try {
+      const {response, payload} = await ompDeckNetwork.fetchJsonBounded('/api/usage', {
+        machineId,
+        cache: 'no-store',
+        signal: request.controller.signal,
+      }, ompDeckNetwork.STARTUP_TIMEOUT_MS, ompDeckApi.request);
+      if (!response.ok) throw new Error(`Usage returned ${response.status}`);
+      if (usageRequest === request && usageContextIsCurrent(machineId, machineOrigin)) {
+        renderUsage(payload);
+      }
+    } catch (error) {
+      if (
+        !request.controller.signal.aborted
+        && usageRequest === request
+        && usageContextIsCurrent(machineId, machineOrigin)
+      ) renderUsage({error: error.message});
+    } finally {
+      if (usageRequest === request) usageRequest = null;
+    }
+  })();
+  return request.promise;
 }
+
+function startUsageRefresh() {
+  usageActive = true;
+  if (!usageTimer) {
+    usageTimer = setInterval(() => {
+      if (document.visibilityState === 'visible') void refreshUsage();
+    }, USAGE_REFRESH_INTERVAL_MS);
+  }
+  return refreshUsage();
+}
+
+function stopUsageRefresh() {
+  usageActive = false;
+  clearInterval(usageTimer);
+  usageTimer = null;
+  cancelUsageRequest();
+  usageLoadedAt = 0;
+  usageMachineId = null;
+  usageMachineOrigin = null;
+}
+
+function invalidateUsageRefresh() {
+  cancelUsageRequest();
+  usageLoadedAt = 0;
+  usageMachineId = null;
+  usageMachineOrigin = null;
+  if (usageActive) return refreshUsage();
+}
+
+function foregroundUsageRefresh() {
+  if (!usageActive || document.visibilityState !== 'visible') return;
+  return refreshUsage();
+}
+
+function usageMachineChanged() {
+  return invalidateUsageRefresh();
+}
+
+window.ompDeckUsage = Object.freeze({
+  start: startUsageRefresh,
+  stop: stopUsageRefresh,
+  foreground: foregroundUsageRefresh,
+  machineChanged: usageMachineChanged,
+  refresh: refreshUsage,
+  invalidate: invalidateUsageRefresh,
+});

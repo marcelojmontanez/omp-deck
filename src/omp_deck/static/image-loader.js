@@ -61,6 +61,25 @@
     }
   }
 
+  function admitRecord(machineId, path) {
+    const key = keyFor(machineId, path);
+    let record = records.get(key);
+    if (record || records.size >= MAX_OBJECT_URLS) return record || null;
+    record = {
+      key,
+      machineId,
+      path,
+      owners: new Set(),
+      elements: new Set(),
+      size: 0,
+      controller: null,
+      url: null,
+      error: '',
+    };
+    records.set(key, record);
+    return record;
+  }
+
   function showLoaded(element, url) {
     if (!element.isConnected) return;
     element.dataset.viewImage = url;
@@ -184,30 +203,24 @@
         if (!element.isConnected) record.elements.delete(element);
       }
     }
-    const nextKeys = new Set();
     const elements = [...container.querySelectorAll('[data-image-path][data-image-machine]')];
+    const nextKeys = new Set(elements.map(element =>
+      keyFor(element.dataset.imageMachine, element.dataset.imagePath)
+    ));
+    const previousKeys = owners.get(owner) || new Set();
+    for (const key of previousKeys) {
+      if (nextKeys.has(key)) continue;
+      const record = records.get(key);
+      record?.owners.delete(owner);
+      if (record && !record.owners.size) revoke(record);
+    }
+    owners.set(owner, nextKeys);
     for (const element of elements) {
       const machineId = element.dataset.imageMachine;
       const path = element.dataset.imagePath;
-      const key = keyFor(machineId, path);
-      nextKeys.add(key);
-      let record = records.get(key);
-      if (!record && records.size < MAX_OBJECT_URLS) {
-        record = {
-          key,
-          machineId,
-          path,
-          owners: new Set(),
-          elements: new Set(),
-          size: 0,
-          controller: null,
-          url: null,
-          error: '',
-        };
-        records.set(key, record);
-      }
+      const record = admitRecord(machineId, path);
       if (!record) {
-        showFailure(element, 'Image display limit reached', false);
+        showFailure(element, 'Image display limit reached');
         continue;
       }
       record.owners.add(owner);
@@ -217,22 +230,32 @@
       else if (record.controller) showLoading(element);
       else retry(record);
     }
-    const previousKeys = owners.get(owner) || new Set();
-    owners.set(owner, nextKeys);
-    for (const key of previousKeys) {
-      if (nextKeys.has(key)) continue;
-      const record = records.get(key);
-      record?.owners.delete(owner);
-      if (record && !record.owners.size) revoke(record);
-    }
+
   }
 
   document.addEventListener('click', event => {
     const element = event.target.closest('.image-failed[data-image-path][data-image-machine]');
     if (!element || element.disabled) return;
-    const record = records.get(keyFor(element.dataset.imageMachine, element.dataset.imagePath));
-    if (!record || record.url || record.controller) return;
     event.preventDefault();
+    const key = keyFor(element.dataset.imageMachine, element.dataset.imagePath);
+    let record = records.get(key);
+    if (!record) {
+      record = admitRecord(element.dataset.imageMachine, element.dataset.imagePath);
+      if (!record) {
+        showFailure(element, 'Image display limit reached');
+        return;
+      }
+      for (const [owner, keys] of owners) {
+        if (keys.has(key)) record.owners.add(owner);
+      }
+      if (!record.owners.size) {
+        revoke(record);
+        showFailure(element, 'Image no longer available', false);
+        return;
+      }
+      record.elements.add(element);
+    }
+    if (record.url || record.controller || !record.owners.size) return;
     retry(record);
   });
 

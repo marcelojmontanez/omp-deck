@@ -231,11 +231,16 @@ function createComposerCommands({
         if (!valid.has(id)) revisions.delete(id);
       }
     },
+    draftChanged(id = selectedAgent()?.id) {
+      if (!id) return;
+      revisions.set(id, ++editRevision);
+      if (selectedAgent()?.id === id) {
+        suppressSuggestions = false;
+        sync();
+      }
+    },
     inputChanged() {
-      const id = selectedAgent()?.id;
-      if (id) revisions.set(id, ++editRevision);
-      suppressSuggestions = false;
-      sync();
+      this.draftChanged();
     },
   };
 }

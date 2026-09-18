@@ -9,10 +9,13 @@ import time
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from tools.release_lib import node
+from tools.release_lib import node, node_plugin, node_rollback
 from tools.release_lib.node_common import ReleaseError, profile, read_file, restart_token, tree_digest
+
+from omp_deck.installation_paths import mark_owned
 
 if os.name != "nt":
     import pwd
@@ -134,11 +137,122 @@ class ReleaseNodeTests(unittest.TestCase):
         with self.assertRaisesRegex(ReleaseError, "restart-safe"):
             restart_token(live, registry)
 
+    def test_changed_plugin_install_and_rollback_track_exact_owned_sources(self) -> None:
+        store = self.root / "plugin-store"
+        mark_owned(store, mode=0o700)
+        original = store / "plugin-original"
+        candidate = store / "plugin-candidate"
+        original.mkdir()
+        candidate.mkdir()
+        (original / "package.json").write_text('{"name":"omp-deck","version":"1"}')
+        (original / "index.js").write_text("old")
+        (candidate / "package.json").write_text('{"name":"omp-deck","version":"2"}')
+        (candidate / "index.js").write_text("new")
+        active = {"source": original}
+
+        def release_run(_profile, arguments, **_kwargs):
+            arguments = [str(value) for value in arguments]
+            if arguments[1:4] == ["plugin", "list", "--json"]:
+                payload = {"npm": [{"name": "omp-deck", "path": str(active["source"])}]}
+                return SimpleNamespace(returncode=0, stdout=json.dumps(payload).encode())
+            if "--json" in arguments:
+                active["source"] = candidate
+                payload = {"version": 1, "pluginSource": str(candidate)}
+                return SimpleNamespace(returncode=0, stdout=json.dumps(payload).encode())
+            if arguments[1:3] == ["plugin", "install"]:
+                active["source"] = Path(arguments[3])
+                return SimpleNamespace(returncode=0, stdout=b"")
+            raise AssertionError(arguments)
+
+        release_profile = SimpleNamespace(
+            omp=self.root / "omp",
+            tool_python=self.root / "tool/bin/python",
+            plugin_expected=self.root / "obsolete-environment/plugin",
+        )
+        with (
+            patch("omp_deck._plugin_lifecycle.plugin_storage_root", return_value=store),
+            patch.object(node_plugin, "run", side_effect=release_run),
+        ):
+            installed = node_plugin.install_plugin(
+                release_profile,
+                tree_digest(candidate),
+                {},
+                original,
+            )
+            self.assertEqual(installed, candidate.resolve())
+            self.assertEqual(active["source"], candidate)
+            self.assertTrue(original.is_dir())
+            restored = node_plugin.restore_plugin(
+                release_profile,
+                tree_digest(original),
+                {},
+                original,
+                self.root / "guard/snapshots/plugin",
+            )
+        self.assertEqual(restored, original.resolve())
+        self.assertEqual(active["source"].resolve(), original.resolve())
+        self.assertFalse(candidate.exists())
+
+    def test_legacy_plugin_backup_is_republished_to_owned_storage_on_rollback(self) -> None:
+        store = self.root / "plugin-store"
+        mark_owned(store, mode=0o700)
+        candidate = store / "plugin-candidate"
+        candidate.mkdir()
+        (candidate / "package.json").write_text('{"name":"omp-deck","version":"2"}')
+        (candidate / "index.js").write_text("new")
+        backup = self.root / "guard/snapshots/plugin"
+        backup.mkdir(parents=True)
+        (backup / "package.json").write_text('{"name":"omp-deck","version":"1"}')
+        (backup / "index.js").write_text("old")
+        active = {"source": candidate, "version": "2"}
+
+        def release_run(_profile, arguments, **_kwargs):
+            arguments = [str(value) for value in arguments]
+            if arguments[1:4] == ["plugin", "list", "--json"]:
+                record = {
+                    "name": "omp-deck",
+                    "path": str(active["source"]),
+                    "version": active["version"],
+                    "manifest": {"version": active["version"]},
+                }
+                return SimpleNamespace(returncode=0, stdout=json.dumps({"npm": [record]}).encode())
+            if arguments[1:4] == ["plugin", "doctor", "--json"]:
+                checks = [{"name": "plugin:omp-deck", "status": "ok"}]
+                return SimpleNamespace(returncode=0, stdout=json.dumps(checks).encode())
+            if arguments[1:3] == ["plugin", "install"]:
+                active.update(source=Path(arguments[3]), version="1")
+                return SimpleNamespace(returncode=0, stdout=b"")
+            raise AssertionError(arguments)
+
+        release_profile = SimpleNamespace(
+            omp=self.root / "omp",
+            tool_python=self.root / "tool/bin/python",
+            plugin_expected=self.root / "tool/lib/omp_deck/plugin",
+        )
+        with (
+            patch("omp_deck._plugin_lifecycle.plugin_storage_root", return_value=store),
+            patch.object(node_plugin, "run", side_effect=release_run),
+        ):
+            restored = node_plugin.restore_plugin(
+                release_profile,
+                tree_digest(backup),
+                {},
+                release_profile.plugin_expected,
+                backup,
+            )
+        self.assertEqual(active["source"].resolve(), restored)
+        self.assertEqual(restored.parent, store.resolve())
+        self.assertEqual(tree_digest(restored), tree_digest(backup))
+        self.assertFalse(candidate.exists())
+
     def test_rollback_restores_when_failed_install_removed_tool_root(self) -> None:
         tool_root = self.root / "tool"
-        backup = self.root / "backup"
-        backup.mkdir()
+        backup = self.root / "guard/snapshots/uv-tool-environment"
+        backup.mkdir(parents=True)
         (backup / "identity").write_text("retained")
+        plugin_backup = self.root / "guard/snapshots/plugin"
+        plugin_backup.mkdir()
+        (plugin_backup / "package.json").write_text('{"name":"omp-deck"}')
         manifest = {
             "version": 1,
             "transaction": "release-1",
@@ -155,22 +269,30 @@ class ReleaseNodeTests(unittest.TestCase):
             "constraintsSha256": "e" * 64,
             "originals": {
                 "environmentBackup": str(backup),
-                "pluginBackup": str(self.root / "plugin"),
+                "pluginBackup": str(plugin_backup),
                 "serviceEnvironment": {},
                 "serviceEnabled": True,
             },
-            "cutover": {"registryStable": [], "authSha256": "unused"},
+            "cutover": {
+                "registryStable": [],
+                "authSha256": hashlib.sha256(b"auth").hexdigest(),
+            },
             "loopbackHTTP": None,
         }
-        fake_profile = type("Profile", (), {"tool_root": tool_root, "auth": self.root / "auth"})()
+        fake_profile = type(
+            "Profile",
+            (),
+            {"tool_root": tool_root, "auth": self.root / "auth", "plugin_expected": self.root / "plugin"},
+        )()
         (self.root / "auth").write_text("auth")
         with (
             patch.object(node, "_guard_files"),
             patch.object(node, "_verify_staged"),
             patch.object(node, "running", return_value=False),
-            patch.object(node, "quiescent", return_value=True),
+            patch.object(node_rollback, "quiescent", return_value=True),
+            patch.object(node, "_environment_identity", return_value={"version": "1", "revision": "a" * 40}),
             patch.object(node, "_installed", return_value={"version": "1", "revision": "a" * 40}),
-            patch.object(node, "_install_plugin"),
+            patch.object(node_plugin, "restore_plugin", return_value=self.root / "restored-plugin"),
             patch.object(node, "start"),
             patch.object(node, "health"),
             patch.object(node, "service_enabled", return_value=True),

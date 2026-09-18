@@ -35,6 +35,7 @@ export async function projectMessage(
   value: unknown,
   context: ExtensionContext,
   warn: ProjectionWarning,
+  current: () => boolean = () => true,
 ): Promise<unknown> {
   if (!value || typeof value !== "object") return value;
   const source = value as Record<string, unknown>;
@@ -64,6 +65,7 @@ export async function projectMessage(
       continue;
     }
     if (typeof item.data === "string") {
+      if (!current()) throw new Error("image projection cancelled");
       try {
         const image = normalizeInlineImage(item);
         const blob = await context.sessionManager.putBlob(image.data);
@@ -98,6 +100,7 @@ export async function captureHistory(
   context: ExtensionContext,
   warn: ProjectionWarning,
   branch: readonly HistoryEntry[] = context.sessionManager.getBranch(),
+  current: () => boolean = () => true,
 ): Promise<readonly unknown[]> {
   const messages: unknown[] = [];
   const selected: unknown[] = [];
@@ -106,7 +109,8 @@ export async function captureHistory(
     if (entry.type === "message" && entry.message !== undefined) selected.push(entry.message);
   }
   for (let index = selected.length - 1; index >= 0; index--) {
-    messages.push(await projectMessage(selected[index], context, warn));
+    if (!current()) throw new Error("history projection cancelled");
+    messages.push(await projectMessage(selected[index], context, warn, current));
   }
   return messages;
 }

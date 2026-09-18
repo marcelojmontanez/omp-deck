@@ -107,6 +107,18 @@ class HttpSecurityTests(unittest.TestCase):
         cookie = headers["Set-Cookie"].split(";", 1)[0]
         return cookie, payload["csrfToken"]
 
+    def test_initialized_health_rejects_corrupt_persisted_authentication(self):
+        cookie, _ = self.pair()
+        with patch.object(server, "_cursor_store", SimpleNamespace(healthy=True)):
+            self.assertEqual(self.request("GET", "/healthz")[0], 200)
+            (self.settings.state_root / "auth.json").write_text('{"broken":', encoding="utf-8")
+            status, headers, payload = self.request("GET", "/healthz")
+            self.assertEqual(status, 503)
+            self.assertFalse(payload["authentication"])
+            self.assertFalse(payload["ok"])
+            self.assertEqual(headers["Cache-Control"], "no-store")
+            self.assertEqual(self.request("GET", "/api/auth/session", headers={"Cookie": cookie})[0], 503)
+
     def test_http_startup_does_not_require_reverse_dns(self):
         with patch("socket.getfqdn", side_effect=OSError("reverse DNS unavailable")):
             httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)

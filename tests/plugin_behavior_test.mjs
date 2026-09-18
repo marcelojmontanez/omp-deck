@@ -66,7 +66,9 @@ test('plugin events preserve sequence and synchronize active history', async () 
     },
     isIdle: () => idle,
     hasPendingMessages: () => false,
-    getAsyncJobSnapshot: () => [],
+    getAsyncJobSnapshot: () => ({
+      running: [], recent: [], delivery: {queued: 0, delivering: false, pendingJobIds: []},
+    }),
     setTimeout(callback, delay) {
       const timer = setTimeout(callback, delay);
       timers.add(timer);
@@ -399,7 +401,9 @@ test('a stale reconnect timer cannot replace a newer session endpoint', {
     },
     isIdle: () => true,
     hasPendingMessages: () => false,
-    getAsyncJobSnapshot: () => [],
+    getAsyncJobSnapshot: () => ({
+      running: [], recent: [], delivery: {queued: 0, delivering: false, pendingJobIds: []},
+    }),
     abort() {},
     shutdown() {},
   });

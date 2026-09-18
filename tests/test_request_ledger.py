@@ -206,12 +206,18 @@ class RequestLedgerTests(unittest.TestCase):
                     "c" * 64,
                 )
             )
-            self.assertIsNone(
+            self.assertEqual(
                 ledger.lookup(
                     "rpc-command:session",
                     "accepted-message",
                     "b" * 64,
-                )
+                ),
+                {
+                    "requestId": "accepted-message",
+                    "status": "accepted",
+                    "acceptance": "accepted",
+                    "result": None,
+                },
             )
             with self.assertRaises(RequestLedgerError):
                 ledger.reserve(

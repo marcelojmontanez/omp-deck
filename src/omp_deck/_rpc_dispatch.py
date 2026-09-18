@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from . import _rpc_commands
+from ._rpc_projection import plain
 from .request_ledger import RequestConflictError
 
 
@@ -106,22 +107,24 @@ def execute(
     if adapter is None:
         raise disconnected_error(session_id)
     result = _rpc_commands.invoke(adapter, action, payload)
+    if _rpc_commands.is_cancelled(result):
+        return {"accepted": False, "result": plain(result)}
     if action in {"respondToUi", "cancelUi"}:
         _refresh_if_desired(manager, session_id)
-        return {"accepted": True, "result": _rpc_commands.plain(result)}
+        return {"accepted": True, "result": plain(result)}
     try:
         snapshot = adapter.snapshot()
         with manager._lock:
             shutting_down = runtime.session_id in manager._shutdown_requested
             current = manager._runtimes.get(session_id) is runtime
             if not current and not shutting_down:
-                return {"accepted": True, "result": _rpc_commands.plain(result)}
+                return {"accepted": True, "result": plain(result)}
             if action in {"branch", "switchSession"}:
                 final = manager._persist_rpc_identity(manager._record(session_id), snapshot)
                 runtime.generation = final["generation"]
                 manager.model.load_record(final)
             if shutting_down:
-                return {"accepted": True, "result": _rpc_commands.plain(result)}
+                return {"accepted": True, "result": plain(result)}
             manager.model.apply_rpc_snapshot(
                 session_id,
                 instance_id=runtime.instance_id,
@@ -130,4 +133,4 @@ def execute(
             )
     except Exception:
         _refresh_if_desired(manager, session_id)
-    return {"accepted": True, "result": _rpc_commands.plain(result)}
+    return {"accepted": True, "result": plain(result)}

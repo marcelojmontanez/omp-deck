@@ -13,16 +13,22 @@ from omp_rpc import (
     ReadyEvent,
     RpcCommandError,
     RpcConcurrencyError,
-    RpcError,
-    RpcProcessExitError,
     RpcProtocolError,
     RpcTimeoutError,
 )
 
+from ._rpc_callbacks import OrderedCallbackDelivery
+from ._rpc_errors import (
+    AdapterDisconnectedError,
+    AdapterError,
+    AdapterIncompatibleError,
+    project_protocol_error,
+    translate_error,
+)
 from ._rpc_projection import PendingUiRequest, project_ui_request
 from ._rpc_projection import objects as _project_objects
 from ._rpc_projection import plain as _plain
-from ._rpc_subagents import SubagentClient, SubagentProtocolError, snapshot_subagents, subscribe_subagents
+from ._rpc_subagents import SubagentClient, snapshot_subagents, subscribe_subagents
 
 
 class RpcClientLike(SubagentClient, Protocol):
@@ -32,6 +38,7 @@ class RpcClientLike(SubagentClient, Protocol):
     def on_event(self, listener: Callable[[Any], None]) -> Callable[[], None]: ...
     def on_ui_request(self, listener: Callable[[ExtensionUiRequest], None]) -> Callable[[], None]: ...
     def on_protocol_error(self, listener: Callable[[RpcProtocolError], None]) -> Callable[[], None]: ...
+    def collect_events(self, timeout: float | None = None) -> Sequence[Any]: ...
     def on_extension_error(self, listener: Callable[[ExtensionError], None]) -> Callable[[], None]: ...
     def next_ui_request(self, timeout: float | None = None) -> ExtensionUiRequest: ...
     def get_state(self) -> Any: ...
@@ -52,31 +59,6 @@ class RpcClientLike(SubagentClient, Protocol):
 
 TransportStatus = Literal["connected", "disconnected", "incompatible"]
 UiOutcome = Literal["accepted", "cancelled", "stale"]
-
-
-class AdapterError(RuntimeError):
-    """Base error retaining the transport failure category."""
-
-    def __init__(self, message: str, *, kind: str, cause: BaseException | None = None):
-        super().__init__(message)
-        self.kind = kind
-        self.__cause__ = cause
-
-
-class AdapterTimeoutError(AdapterError):
-    pass
-
-
-class AdapterCancelledError(AdapterError):
-    pass
-
-
-class AdapterDisconnectedError(AdapterError):
-    pass
-
-
-class AdapterIncompatibleError(AdapterError):
-    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +115,7 @@ class SessionAdapter:
         self._callback = on_event
         self._clock = clock
         self._lock = threading.RLock()
+        self._callback_delivery = OrderedCallbackDelivery[AdapterEvent]()
         self._events: deque[AdapterEvent] = deque(maxlen=event_limit)
         self._ui_limit = ui_limit
         self._client: RpcClientLike | None = None
@@ -413,7 +396,8 @@ class SessionAdapter:
         self._emit(str(event_type), payload if isinstance(payload, dict) else {"value": payload})
 
     def _ingest_protocol_error(self, error: RpcProtocolError) -> None:
-        self._emit("protocol_error", {"error": str(error)})
+        event_type, payload = project_protocol_error(error)
+        self._emit(event_type, payload)
 
     def _ingest_extension_error(self, error: ExtensionError) -> None:
         payload = _plain(error)
@@ -464,37 +448,38 @@ class SessionAdapter:
         self._emit("ui_request", _plain(projected))
 
     def _emit(self, event_type: str, payload: Mapping[str, Any]) -> None:
+        # Allocate under the state lock, then serialize callback delivery without
+        # holding adapter locks across consumer code.
         with self._lock:
             self._sequence += 1
             event = AdapterEvent(self._sequence, event_type, dict(payload), self._clock())
             self._events.append(event)
             callback = self._callback
-        if callback is not None:
-            callback(event)
+        self._callback_delivery.deliver(event.sequence, event, callback)
+
+    def check_lifecycle(self, timeout: float) -> None:
+        """Observe SDK reader/process closure without issuing a snapshot request."""
+        client = self._require_client()
+        try:
+            client.collect_events(timeout=timeout)
+        except RpcTimeoutError:
+            # No terminal event during a supervision tick is a healthy idle or
+            # active transport, not a failed command.
+            return
+        except RpcCommandError:
+            # Late prompt failures are delivered by on_protocol_error with the
+            # native identity. They are command outcomes, not transport death.
+            return
+        except RpcConcurrencyError:
+            # Another documented lifecycle collector owns this interval.
+            return
+        except BaseException as exc:
+            raise self._translate(exc) from exc
 
     def _translate(self, exc: BaseException) -> AdapterError:
-        if isinstance(exc, AdapterError):
-            return exc
-        if isinstance(exc, RpcTimeoutError) or isinstance(exc, TimeoutError):
-            return AdapterTimeoutError(str(exc), kind="timeout", cause=exc)
-        if isinstance(exc, RpcProcessExitError):
+        error = translate_error(exc)
+        if isinstance(error, AdapterDisconnectedError):
             with self._lock:
                 self._status = "disconnected"
-                self._reason = str(exc)
-            return AdapterDisconnectedError(str(exc), kind="process_exit", cause=exc)
-        if isinstance(exc, (RpcProtocolError, RpcConcurrencyError, SubagentProtocolError)):
-            return AdapterIncompatibleError(str(exc), kind="protocol", cause=exc)
-        if isinstance(exc, RpcCommandError):
-            text = str(exc)
-            cancellation = f"{exc.code or ''} {exc.error}".lower()
-            if any(marker in cancellation for marker in ("cancel", "abort")):
-                return AdapterCancelledError(text, kind="cancelled", cause=exc)
-            return AdapterError(text, kind="command", cause=exc)
-        if isinstance(exc, (BrokenPipeError, EOFError, ConnectionError)):
-            with self._lock:
-                self._status = "disconnected"
-                self._reason = str(exc)
-            return AdapterDisconnectedError(str(exc), kind="disconnect", cause=exc)
-        if isinstance(exc, RpcError):
-            return AdapterError(str(exc), kind="rpc", cause=exc)
-        return AdapterError(str(exc), kind="internal", cause=exc)
+                self._reason = str(error)
+        return error

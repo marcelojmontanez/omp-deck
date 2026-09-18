@@ -12,10 +12,14 @@ function renderInlineMarkdown(value) {
     code.push(`<code>${content}</code>`);
     return token;
   });
+  const expandCode = value => value.replace(
+    /\u0000CODE(\d+)\u0000/g,
+    (_, index) => code[Number(index)],
+  );
   html = html
     .replace(/\[([^\]\n]*)\]\((https?:\/\/[^\s)]+)\)/g, (_, label, url) => {
       const token = `\u0000LINK${links.length}\u0000`;
-      links.push(`<a href="${url}" target="_blank" rel="noopener noreferrer">${label || url}</a>`);
+      links.push(`<a href="${url}" target="_blank" rel="noopener noreferrer">${expandCode(label || url)}</a>`);
       return token;
     })
     .replace(/(^|[\s(])(https?:\/\/[^\s<]+)/g, (_, prefix, rawUrl) => {
@@ -96,7 +100,7 @@ function renderMarkdown(value) {
     if (table) {
       const header = renderTableRow(table.header, 'th');
       const body = table.rows.map(row => renderTableRow(row, 'td')).join('');
-      output.push(`<table><thead>${header}</thead><tbody>${body}</tbody></table>`);
+      output.push(`<div class="table-scroll" role="region" aria-label="Scrollable table" tabindex="0"><table><thead>${header}</thead><tbody>${body}</tbody></table></div>`);
       index = table.next;
       continue;
     }

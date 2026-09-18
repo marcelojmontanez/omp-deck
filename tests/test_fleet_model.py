@@ -144,8 +144,11 @@ class FleetModelTests(unittest.TestCase):
                 "capabilities",
                 "attachmentLimits",
                 "messages",
+                "streamingMessage",
+                "deliveryError",
                 "todos",
                 "subagents",
+                "subagentError",
                 "pendingUiRequest",
                 "unread",
                 "updatedAt",
@@ -526,7 +529,9 @@ class FleetModelTests(unittest.TestCase):
         self.assertEqual(session["state"], "degraded")
         resync = model.journal.replay_after(0)[-1]
         self.assertEqual(resync.type, "session_resync_required")
-        self.assertEqual(resync.payload, {"expectedSequence": 1, "receivedSequence": 2})
+        self.assertEqual(resync.payload["expectedSequence"], 1)
+        self.assertEqual(resync.payload["receivedSequence"], 2)
+        self.assertEqual(resync.payload["sessionPatch"]["state"], "degraded")
         self.assertTrue(
             model.apply_rpc_snapshot(
                 "deck-1",

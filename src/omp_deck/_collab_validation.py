@@ -25,55 +25,97 @@ HOST_FRAME_TYPES = frozenset(
 )
 
 
+def _custom_message_entry(item: dict[str, Any]) -> None:
+    _str(item["customType"])
+    _bool(item["display"])
+    if not isinstance(item["content"], str):
+        _array(item["content"], _content)
+    for key in ("details", "attribution"):
+        if key in item:
+            _json(item[key])
+
+
+def _compaction_entry(item: dict[str, Any]) -> None:
+    _str(item["summary"])
+    _str(item["firstKeptEntryId"])
+    _num(item["tokensBefore"])
+    for key in ("shortSummary", "method", "providerReplayThroughEntryId", "warning"):
+        if key in item:
+            _str(item[key])
+    if "tokensAfter" in item:
+        _num(item["tokensAfter"])
+    for key in ("details", "preserveData"):
+        if key in item:
+            _json(item[key])
+    if "fromExtension" in item:
+        _bool(item["fromExtension"])
+
+
+def _branch_summary_entry(item: dict[str, Any]) -> None:
+    _str(item["fromId"])
+    _str(item["summary"])
+    if "details" in item:
+        _json(item["details"])
+    if "fromExtension" in item:
+        _bool(item["fromExtension"])
+
+
+def _model_change_entry(item: dict[str, Any]) -> None:
+    _str(item["model"])
+    if "role" in item:
+        _str(item["role"])
+    if "resolvedModelIsFallback" in item:
+        _bool(item["resolvedModelIsFallback"])
+
+
+def _thinking_level_entry(item: dict[str, Any]) -> None:
+    for key in ("thinkingLevel", "configured"):
+        if key in item and item[key] is not None:
+            _str(item[key])
+
+
+def _message_entry(item: dict[str, Any]) -> None:
+    _message(item["message"])
+
+
+_ENTRY_BASE = frozenset(("type", "id", "parentId", "timestamp"))
+_ENTRY_REQUIRED = {
+    "message": _ENTRY_BASE | {"message"},
+    "custom_message": _ENTRY_BASE | {"customType", "content", "display"},
+    "compaction": _ENTRY_BASE | {"summary", "firstKeptEntryId", "tokensBefore"},
+    "branch_summary": _ENTRY_BASE | {"fromId", "summary"},
+    "model_change": _ENTRY_BASE | {"model"},
+    "thinking_level_change": _ENTRY_BASE,
+}
+_ENTRY_VALIDATORS = {
+    "message": _message_entry,
+    "custom_message": _custom_message_entry,
+    "compaction": _compaction_entry,
+    "branch_summary": _branch_summary_entry,
+    "model_change": _model_change_entry,
+    "thinking_level_change": _thinking_level_entry,
+}
+
+
 def _entry(value: Any) -> None:
     if not isinstance(value, dict) or not isinstance(value.get("type"), str):
         _fail()
     kind = value["type"]
-    schemas = {
-        "message": ({"type", "id", "parentId", "timestamp", "message"}, set()),
-        "custom_message": ({"type", "id", "parentId", "timestamp", "customType", "content", "display"}, {"details"}),
-        "compaction": (
-            {"type", "id", "parentId", "timestamp", "summary", "firstKeptEntryId", "tokensBefore"},
-            {"shortSummary"},
-        ),
-        "branch_summary": ({"type", "id", "parentId", "timestamp", "fromId", "summary"}, set()),
-        "model_change": ({"type", "id", "parentId", "timestamp", "model"}, {"role"}),
-        "thinking_level_change": ({"type", "id", "parentId", "timestamp"}, {"thinkingLevel"}),
-    }
-    if kind not in schemas:
-        _json(value)
-        return
-    item = _obj(value, *schemas[kind])
-    _str(item["id"])
-    _str(item["timestamp"])
-    if item["parentId"] is not None:
-        _str(item["parentId"])
-    if kind == "message":
-        _message(item["message"])
-    elif kind == "custom_message":
-        _str(item["customType"])
-        _bool(item["display"])
-        if isinstance(item["content"], str):
-            pass
-        else:
-            _array(item["content"], _content)
-        if "details" in item:
-            _json(item["details"])
-    elif kind == "compaction":
-        _str(item["summary"])
-        _str(item["firstKeptEntryId"])
-        _num(item["tokensBefore"])
-        if "shortSummary" in item:
-            _str(item["shortSummary"])
-    elif kind == "branch_summary":
-        _str(item["fromId"])
-        _str(item["summary"])
-    elif kind == "model_change":
-        _str(item["model"])
-        if "role" in item:
-            _str(item["role"])
-    elif "thinkingLevel" in item and item["thinkingLevel"] is not None:
-        _str(item["thinkingLevel"])
+    if not _ENTRY_REQUIRED.get(kind, _ENTRY_BASE) <= set(value):
+        _fail()
+    # SessionEntry is an open host contract. pi-wire publishes only the
+    # variants and fields its renderer consumes, while the host replicates the
+    # complete producer objects. Validate the complete value as bounded JSON,
+    # then strictly type every field Deck consumes or whose official producer
+    # shape is known here.
+    _json(value)
+    _str(value["id"])
+    _str(value["timestamp"])
+    if value["parentId"] is not None:
+        _str(value["parentId"])
+    validator = _ENTRY_VALIDATORS.get(kind)
+    if validator is not None:
+        validator(value)
 
 
 def _participant(value: Any) -> None:

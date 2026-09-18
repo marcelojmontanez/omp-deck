@@ -33,20 +33,24 @@ function hasVisibleContent(message) {
   ));
 }
 
-function todosText(todos) {
-  if (!Array.isArray(todos) || !todos.length) return '';
-  const groups = new Map();
-  for (const todo of todos) {
-    const phase = String(todo.phase || todo.group || 'Tasks');
-    if (!groups.has(phase)) groups.set(phase, []);
-    groups.get(phase).push(todo);
-  }
-  return [...groups].map(([phase, items]) => `  ${phase}:\n${items.map(todo => {
-    const done = todo.done === true || ['done', 'completed'].includes(todo.status);
-    const suffix = todo.status === 'in_progress' ? ' (in progress)' : todo.status === 'blocked' ? ' (blocked)' : '';
-    return `    - [${done ? 'X' : ' '}] ${todo.text || todo.title || todo.content || 'Task'}${suffix}`;
-  }).join('\n')}`).join('\n');
+function projectMessage(message, machineId) {
+  if (!['user', 'assistant'].includes(message?.role) || !hasVisibleContent(message)) return null;
+  const images = Array.isArray(message.content)
+    ? message.content.filter(item => item?.type === 'image').map(item => {
+      const url = typeof item.url === 'string' ? item.url : null;
+      return {url, machineId, unavailable: !url};
+    })
+    : [];
+  return {
+    id: message.id,
+    kind: message.role,
+    title: message.role === 'user' ? 'You' : 'OMP',
+    detail: contentText(message.content),
+    time: message.createdAt,
+    attachments: images,
+  };
 }
+
 
 function sessionDuplicateLabels(agents) {
   const groups = new Map();
@@ -91,7 +95,7 @@ function sessionIdentity(agent) {
   };
 }
 
-function projectSession(session, machine = null) {
+function projectSession(session, machine = null, previous = null) {
   const status = normalizedStatus(session.state);
   const updatedMs = Date.parse(session.updatedAt || '') || Date.now();
   const machineId = machine?.id || null;
@@ -100,24 +104,16 @@ function projectSession(session, machine = null) {
   const thinkingLevels = Array.isArray(session.thinkingLevels)
     ? session.thinkingLevels.filter(level => typeof level === 'string' && level)
     : [];
-  const activity = (session.messages || []).filter(message => (
-    ['user', 'assistant'].includes(message?.role) && hasVisibleContent(message)
-  )).map(message => {
-    const images = Array.isArray(message.content)
-      ? message.content.filter(item => item?.type === 'image').map(item => {
-        const url = typeof item.url === 'string' ? item.url : null;
-        return {url, machineId, unavailable: !url};
-      })
-      : [];
-    return {
-      id: message.id,
-      kind: message.role,
-      title: message.role === 'user' ? 'You' : 'OMP',
-      detail: contentText(message.content),
-      time: message.createdAt,
-      attachments: images,
-    };
-  });
+  const messageSource = Array.isArray(session.messages) ? session.messages : [];
+  const completedActivity = previous?._messageSource === messageSource
+    && Array.isArray(previous._completedActivity)
+    ? previous._completedActivity
+    : messageSource.map(message => projectMessage(message, machineId)).filter(Boolean);
+  const streamingActivity = projectMessage(session.streamingMessage, machineId);
+  const activity = streamingActivity
+    && !completedActivity.some(item => item.id === streamingActivity.id)
+    ? [...completedActivity, streamingActivity]
+    : completedActivity;
   const activitySummary = session.pendingUiRequest
     ? 'Waiting for input'
     : workSummaryStatuses.has(status) && session.workingOn
@@ -159,7 +155,21 @@ function projectSession(session, machine = null) {
       ? session.historyError
       : null,
     transportLabel: session.transport?.label || 'Transport unavailable',
+    deliveryError: session.deliveryError && typeof session.deliveryError === 'object'
+      ? {
+        nativeRequestId: typeof session.deliveryError.nativeRequestId === 'string'
+          ? session.deliveryError.nativeRequestId : null,
+        errorCode: typeof session.deliveryError.errorCode === 'string'
+          ? session.deliveryError.errorCode : null,
+        correlationAvailable: session.deliveryError.correlationAvailable === true,
+        observedAt: typeof session.deliveryError.observedAt === 'string'
+          ? session.deliveryError.observedAt : null,
+      }
+      : null,
+    subagentError: typeof session.subagentError === 'string' ? session.subagentError : null,
     pendingUiRequest: session.pendingUiRequest || null,
+    _messageSource: messageSource,
+    _completedActivity: completedActivity,
     subagents: (session.subagents || []).map(item => {
       const executionState = normalizedSubagentStatus(item.executionState || item.status);
       return {
@@ -177,7 +187,140 @@ function projectSession(session, machine = null) {
       workingOn: session.workingOn,
       activity,
       archiveActivity: [],
-      todo: todosText(session.todos),
+      todos: Array.isArray(session.todos) ? session.todos : [],
     },
   };
+}
+
+function createFleetMutations({state, touchRender, renderFleet, showMenu, getComposer}) {
+  const MAX_CACHED_SESSIONS_PER_NODE = 500;
+
+  function canonicalSessions(machineId) {
+    const node = nodeState(machineId);
+    if (!(node.sessions instanceof Map)) node.sessions = new Map();
+    return node.sessions;
+  }
+
+  function rememberCanonicalSession(machineId, session) {
+    if (!session || typeof session.id !== 'string' || !session.id) return false;
+    const sessions = canonicalSessions(machineId);
+    if (!sessions.has(session.id) && sessions.size >= MAX_CACHED_SESSIONS_PER_NODE) {
+      sessions.delete(sessions.keys().next().value);
+    }
+    sessions.delete(session.id);
+    sessions.set(session.id, session);
+    return true;
+  }
+
+  function noteSnapshotGeneration(machineId, generation) {
+    if (Number.isSafeInteger(generation)) nodeState(machineId).snapshotGeneration = generation;
+  }
+
+  function applyFleetSnapshot(
+    payload,
+    requestedGeneration = null,
+    machineId = 'local',
+    requestedRevision = null,
+  ) {
+    if (!ompDeckApi.authenticated()) return;
+    const node = nodeState(machineId);
+    if (
+      (Number.isSafeInteger(requestedGeneration)
+        && node.snapshotGeneration !== requestedGeneration)
+      || (Number.isSafeInteger(requestedRevision)
+        && node.presentationRevision !== requestedRevision)
+    ) return;
+    const machine = ompDeckApi.machine(machineId);
+    if (!machine) return;
+    noteSnapshotGeneration(machineId, payload.snapshotGeneration);
+    node.hasSnapshot = true;
+    const sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
+    node.sessions = new Map(sessions
+      .filter(session => session && typeof session.id === 'string' && session.id)
+      .slice(0, MAX_CACHED_SESSIONS_PER_NODE)
+      .map(session => [session.id, session]));
+    const projected = sessions.map(session => projectSession(session, machine));
+    const projectedIds = new Set(projected.map(agent => agent.id));
+    for (const agent of state.agents) {
+      if (agent.machineId === machineId && !projectedIds.has(agent.id)) {
+        ompDeckImages.releaseOwner(agent.id);
+      }
+    }
+    state.agents = [
+      ...state.agents.filter(agent => agent.machineId !== machineId),
+      ...projected,
+    ];
+    touchRender();
+    renderFleet();
+  }
+
+  function applyFleetSession(session, snapshotGeneration, machineId = 'local') {
+    const machine = ompDeckApi.machine(machineId);
+    if (!machine || !ompDeckApi.authenticated()) return false;
+    if (!rememberCanonicalSession(machineId, session)) return false;
+    noteSnapshotGeneration(machineId, snapshotGeneration);
+    if (!Number.isSafeInteger(snapshotGeneration)) nodeState(machineId).presentationRevision += 1;
+    const projected = projectSession(session, machine);
+    const index = state.agents.findIndex(agent => agent.id === projected.id);
+    if (index < 0) state.agents.push(projected);
+    else state.agents[index] = projected;
+    touchRender();
+    renderFleet();
+    return true;
+  }
+
+  function applyFleetPatch(sessionId, patch, snapshotGeneration, machineId = 'local') {
+    const machine = ompDeckApi.machine(machineId);
+    if (
+      !machine
+      || !ompDeckApi.authenticated()
+      || typeof sessionId !== 'string'
+      || !sessionId
+      || !patch
+      || typeof patch !== 'object'
+      || Array.isArray(patch)
+    ) return false;
+    const sessions = canonicalSessions(machineId);
+    const current = sessions.get(sessionId);
+    if (!current) return false;
+    const merged = {...current, ...patch, id: sessionId};
+    sessions.delete(sessionId);
+    sessions.set(sessionId, merged);
+    noteSnapshotGeneration(machineId, snapshotGeneration);
+    if (!Number.isSafeInteger(snapshotGeneration)) nodeState(machineId).presentationRevision += 1;
+    const id = ompDeckApi.sessionKey(machineId, sessionId);
+    const index = state.agents.findIndex(agent => agent.id === id);
+    const projected = projectSession(merged, machine, index < 0 ? null : state.agents[index]);
+    if (index < 0) state.agents.push(projected);
+    else state.agents[index] = projected;
+    touchRender();
+    renderFleet();
+    return true;
+  }
+
+  function removeFleetSession(sessionId, snapshotGeneration, machineId = 'local') {
+    canonicalSessions(machineId).delete(sessionId);
+    noteSnapshotGeneration(machineId, snapshotGeneration);
+    if (!Number.isSafeInteger(snapshotGeneration)) nodeState(machineId).presentationRevision += 1;
+    const id = ompDeckApi.sessionKey(machineId, sessionId);
+    ompDeckImages.releaseOwner(id);
+    getComposer().remove(id);
+    state.agents = state.agents.filter(agent => agent.id !== id);
+    if (state.selectedId === id) {
+      state.selectedId = null;
+      const url = new URL(location.href);
+      url.searchParams.delete('session');
+      history.replaceState({view: 'menu'}, '', url);
+      showMenu();
+    }
+    touchRender();
+    renderFleet();
+  }
+
+  return Object.freeze({
+    applyFleetSnapshot,
+    applyFleetSession,
+    applyFleetPatch,
+    removeFleetSession,
+  });
 }

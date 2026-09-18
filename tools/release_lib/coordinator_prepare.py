@@ -45,7 +45,8 @@ def prepare(request: dict[str, Any], profile: dict[str, Any], root: Path, manife
         raise c.CoordinatorError("unexpected coordinator unit command")
     if not c._active(profile):
         raise c.CoordinatorError("coordinator service is not running")
-    current = c._identity(profile["tool_root"], profile)
+    c._health(profile)
+    current = c._live_identity(profile)
     expected_rollback = {"version": rollback["wheelVersion"], "revision": rollback["revision"]}
     if current != expected_rollback:
         raise c.CoordinatorError("installed coordinator identity mismatch")

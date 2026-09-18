@@ -22,7 +22,7 @@ def send_stream(handler: Any, fleet_model: Any, authenticate: Callable[[], Any])
         if replay is None:
             cursor, initial = _snapshot_event(fleet_model)
         else:
-            initial = [(event.id, event.public()) for event in replay]
+            initial = [(event.id, event.encoded) for event in replay]
 
     try:
         authenticate()
@@ -64,7 +64,7 @@ def send_stream(handler: Any, fleet_model: Any, authenticate: Callable[[], Any])
                 continue
             for event in events:
                 authenticate()
-                _write_event(handler, journal, event.id, event.public())
+                _write_event(handler, journal, event.id, event.encoded)
                 cursor = event.id
     except AuthError:
         handler.close_connection = True
@@ -80,7 +80,11 @@ def _snapshot_event(fleet_model: Any) -> tuple[int, list[tuple[int, dict[str, An
 
 
 def _write_event(handler: Any, journal: Any, event_id: int, payload: Any) -> None:
-    data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-    frame = f"id: {journal.cursor(event_id)}\nevent: fleet\ndata: {data}\n\n".encode()
+    data = (
+        payload
+        if isinstance(payload, bytes)
+        else json.dumps(payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+    )
+    frame = b"".join((f"id: {journal.cursor(event_id)}\nevent: fleet\ndata: ".encode(), data, b"\n\n"))
     handler.wfile.write(frame)
     handler.wfile.flush()

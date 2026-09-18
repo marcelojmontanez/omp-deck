@@ -10,12 +10,12 @@ from pathlib import Path
 from threading import Event, Thread, current_thread
 from unittest.mock import patch
 
-from omp_rpc import BranchResult, ReadyEvent, RpcProcessExitError
+from omp_rpc import BranchResult, ReadyEvent, RpcProcessExitError, RpcProtocolError, RpcTimeoutError
 
 from omp_deck._rpc_dispatch import SessionCommandConflictError, SessionNotConnectedError
+from omp_deck._rpc_errors import AdapterError, AdapterIncompatibleError
 from omp_deck.fleet_model import FleetModel
 from omp_deck.registry_store import RegistryStore
-from omp_deck.rpc_adapter import AdapterError
 from omp_deck.rpc_refresh import RpcRefreshScheduler
 from omp_deck.rpc_sessions import RpcSessionManager
 from omp_deck.settings import Settings
@@ -54,6 +54,8 @@ class FakeRpcClient:
     fail_new_session = False
     cancel_new_session = False
 
+    cancel_branch = False
+    cancel_switch = False
     fail_get_state_once: BaseException | None = None
     prompt_entered: dict[str, Event] = {}
     branch_entered: Event | None = None
@@ -76,6 +78,8 @@ class FakeRpcClient:
         type(self).instances.append(self)
         self.get_state_entered: Event | None = None
         self.get_state_release: Event | None = None
+        self.lifecycle_failure: BaseException | None = None
+        self.lifecycle_checked = Event()
 
     def _on(self, kind, listener):
         self.listeners[kind].append(listener)
@@ -121,6 +125,15 @@ class FakeRpcClient:
         self.stopped = True
         if type(self).fail_stop:
             raise RuntimeError("stop failed")
+
+    def collect_events(self, timeout=None):
+        self.lifecycle_checked.set()
+        if self.lifecycle_failure is not None:
+            raise self.lifecycle_failure
+        if self.stopped:
+            raise RpcProcessExitError("RPC process stopped")
+        time.sleep(min(timeout or 0.01, 0.01))
+        raise RpcTimeoutError("no terminal event")
 
     def get_state(self):
         state = self.state
@@ -198,6 +211,8 @@ class FakeRpcClient:
         release = type(self).branch_release
         if release is not None:
             release.wait(timeout=2)
+        if type(self).cancel_branch:
+            return BranchResult(text="", cancelled=True)
         session_file = self.session_root / "omp-branched.jsonl"
         self._write_session(session_file, "omp-branched")
         self.state = dataclasses.replace(
@@ -207,6 +222,8 @@ class FakeRpcClient:
 
     def switch_session(self, session_path):
         self._call("switch_session", session_path)
+        if type(self).cancel_switch:
+            return _Cancellation(True)
         resolved = Path(session_path).resolve()
         header = self._read_header(resolved)
         self.state = dataclasses.replace(self.state, session_id=header["id"], session_file=str(resolved))
@@ -280,6 +297,8 @@ class TestRpcSessionManager(unittest.TestCase):
         FakeRpcClient.cancel_new_session = False
         FakeRpcClient.fail_get_state_once = None
         FakeRpcClient.prompt_entered.clear()
+        FakeRpcClient.cancel_branch = False
+        FakeRpcClient.cancel_switch = False
         FakeRpcClient.prompt_release.clear()
         FakeRpcClient.branch_entered = None
         FakeRpcClient.ui_response_entered = None
@@ -503,6 +522,43 @@ class TestRpcSessionManager(unittest.TestCase):
         self.assertEqual(results["switchSession"]["result"]["session_id"], "omp-switched")
         self.assertEqual(results["compact"]["result"], "complete")
         self.assertTrue(all(result["accepted"] for result in results.values()))
+
+    def test_native_branch_and_switch_cancellation_are_durable_cancellations(self):
+        session_id = self.launch()["id"]
+        original_identity = self.registry.load()[0]["ompSessionId"]
+        switch_target = self.settings.session_root / "other.jsonl"
+        FakeRpcClient._write_session(switch_target, "omp-switched")
+        FakeRpcClient.cancel_branch = True
+
+        branch = self.manager.dispatch(session_id, "cancel-branch", "branch", {"entryId": "entry-7"})
+        branch_replay = self.manager.dispatch(session_id, "cancel-branch", "branch", {"entryId": "entry-7"})
+        FakeRpcClient.cancel_switch = True
+        switched = self.manager.dispatch(
+            session_id,
+            "cancel-switch",
+            "switchSession",
+            {"sessionPath": str(switch_target)},
+        )
+
+        expected_branch = {
+            "requestId": "cancel-branch",
+            "status": "cancelled",
+            "errorCode": "cancelled",
+        }
+        self.assertEqual(branch, expected_branch)
+        self.assertEqual(branch_replay, expected_branch)
+        self.assertEqual(
+            switched,
+            {
+                "requestId": "cancel-switch",
+                "status": "cancelled",
+                "errorCode": "cancelled",
+            },
+        )
+        self.assertEqual(self.registry.load()[0]["ompSessionId"], original_identity)
+        calls = [call[0] for call in FakeRpcClient.instances[-1].calls]
+        self.assertEqual(calls.count("branch"), 1)
+        self.assertEqual(calls.count("switch_session"), 1)
 
     def test_shutdown_clears_desired_state_and_disconnects(self):
         session_id = self.launch()["id"]
@@ -865,6 +921,24 @@ class TestRpcSessionManager(unittest.TestCase):
             record["recoveryMetadata"], {"sessionFile": str(self.settings.session_root / "omp-branched.jsonl")}
         )
 
+    def test_newer_same_owner_event_wins_over_a_captured_snapshot_without_degrading(self):
+        session_id = self.launch()["id"]
+        client = FakeRpcClient.instances[-1]
+        adapter = self.manager._runtime(session_id).adapter
+        original_snapshot = adapter.snapshot
+
+        def snapshot_then_event():
+            snapshot = original_snapshot()
+            client.emit_event({"type": "state_changed"})
+            return snapshot
+
+        with patch.object(adapter, "snapshot", side_effect=snapshot_then_event):
+            session = self.manager.refresh(session_id)
+
+        self.assertEqual(session["transport"]["status"], "connected")
+        self.assertIsNone(session["transport"]["reason"])
+        self.assertEqual(self.manager._runtime(session_id).adapter.transport_status, "connected")
+
     def test_repeated_recovery_does_not_mutate_generation_or_spawn_again(self):
         session_id = self.launch()["id"]
         self.manager.close()
@@ -913,6 +987,76 @@ class TestRpcSessionManager(unittest.TestCase):
             "connected",
             self.model.snapshot(),
         )
+
+    def test_idle_lifecycle_failure_recovers_without_refresh_or_browser_traffic(self):
+        session_id = self.launch()["id"]
+        original_runtime = self.manager._runtime(session_id)
+        original = FakeRpcClient.instances[-1]
+        late_protocol_error = original.listeners["protocol"][0]
+        self.assertTrue(original.lifecycle_checked.wait(timeout=1))
+
+        original.lifecycle_failure = RpcProcessExitError("RPC reader terminated")
+        deadline = time.monotonic() + 2
+        while len(FakeRpcClient.instances) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        replacement = self.manager._runtime(session_id)
+        self.assertIsNot(replacement, original_runtime)
+        self.assertTrue(original.stopped)
+        self.assertEqual(self.model.get(session_id)["transport"]["status"], "connected")
+
+        instance_count = len(FakeRpcClient.instances)
+        self.manager._replace_disconnected(
+            session_id,
+            RpcProcessExitError("duplicate stale watcher result"),
+            expected_runtime=original_runtime,
+        )
+        self.assertIs(self.manager._runtime(session_id), replacement)
+        self.assertEqual(len(FakeRpcClient.instances), instance_count)
+
+        journal_id = self.model.journal.latest_id
+        stale_error = RpcProtocolError(
+            {
+                "type": "response",
+                "id": "req_old",
+                "command": "prompt",
+                "success": False,
+                "error": "late old-generation failure",
+            }
+        )
+        late_protocol_error(stale_error)
+        late_protocol_error(stale_error)
+        self.assertEqual(self.model.journal.latest_id, journal_id)
+
+    def test_intentional_shutdown_stops_supervision_without_recovery(self):
+        session_id = self.launch()["id"]
+        client = FakeRpcClient.instances[-1]
+        self.assertTrue(client.lifecycle_checked.wait(timeout=1))
+
+        self.manager.shutdown(session_id)
+        client.lifecycle_failure = RpcProcessExitError("closed intentionally")
+        time.sleep(0.15)
+
+        self.assertEqual(len(FakeRpcClient.instances), 1)
+        self.assertIsNone(self.manager._runtime_or_none(session_id))
+        self.assertFalse(self.registry.load()[0]["desiredRpcRunning"])
+
+    def test_snapshot_contention_retries_without_degrading_healthy_transport(self):
+        session_id = self.launch()["id"]
+        adapter = self.manager._runtime(session_id).adapter
+        calls = []
+
+        def busy_snapshot():
+            calls.append(None)
+            raise AdapterError("state kept changing", kind="snapshot_busy")
+
+        with patch.object(adapter, "snapshot", side_effect=busy_snapshot):
+            self.manager._refreshes.refresh_now((session_id,))
+
+        self.assertEqual(len(calls), 2)
+        transport = self.model.get(session_id)["transport"]
+        self.assertEqual(transport["status"], "connected")
+        self.assertIsNone(transport["reason"])
 
     def test_background_recovery_does_not_let_a_slow_session_block_another(self):
         slow_id = self.launch()["id"]
@@ -970,7 +1114,7 @@ class TestRpcSessionManager(unittest.TestCase):
         finally:
             first_release.set()
 
-    def test_failed_reconnect_is_retried_on_next_connected_refresh(self):
+    def test_failed_reconnect_recovers_without_browser_or_refresh_traffic(self):
         session_id = self.launch()["id"]
         FakeRpcClient.fail_get_state_once = RpcProcessExitError("RPC process exited")
         FakeRpcClient.fail_start = True
@@ -979,13 +1123,79 @@ class TestRpcSessionManager(unittest.TestCase):
         self.assertEqual(self.model.get(session_id)["transport"]["status"], "disconnected")
 
         FakeRpcClient.fail_start = False
-        self.manager.request_refresh_connected()
         deadline = time.monotonic() + 2
         while self.model.get(session_id)["transport"]["status"] != "connected" and time.monotonic() < deadline:
             time.sleep(0.01)
 
         self.assertEqual(self.model.get(session_id)["transport"]["status"], "connected")
         self.assertEqual(len(FakeRpcClient.instances), 3)
+
+    def test_shutdown_cancels_pending_reconnect_without_resurrection(self):
+        session_id = self.launch()["id"]
+        FakeRpcClient.fail_get_state_once = RpcProcessExitError("RPC process exited")
+        FakeRpcClient.fail_start = True
+        self.manager.refresh_connected()
+        failed_instance_count = len(FakeRpcClient.instances)
+
+        self.manager.shutdown(session_id)
+        FakeRpcClient.fail_start = False
+        time.sleep(0.25)
+
+        self.assertEqual(len(FakeRpcClient.instances), failed_instance_count)
+        self.assertIsNone(self.manager._runtime_or_none(session_id))
+        self.assertFalse(self.registry.load()[0]["desiredRpcRunning"])
+
+    def test_close_cancels_pending_reconnect_without_resurrection(self):
+        session_id = self.launch()["id"]
+        FakeRpcClient.fail_get_state_once = RpcProcessExitError("RPC process exited")
+        FakeRpcClient.fail_start = True
+        self.manager.refresh_connected()
+        failed_instance_count = len(FakeRpcClient.instances)
+
+        self.manager.close()
+        FakeRpcClient.fail_start = False
+        time.sleep(0.25)
+
+        self.assertEqual(len(FakeRpcClient.instances), failed_instance_count)
+        self.assertIsNone(self.manager._runtime_or_none(session_id))
+
+    def test_duplicate_reconnect_requests_share_one_retry_owner(self):
+        session_id = self.launch()["id"]
+        FakeRpcClient.fail_get_state_once = RpcProcessExitError("RPC process exited")
+        FakeRpcClient.fail_start = True
+        self.manager.refresh_connected()
+        generation = self.registry.load()[0]["generation"]
+        failed_instance_count = len(FakeRpcClient.instances)
+
+        self.manager._recoveries.request(session_id, generation)
+        self.manager._recoveries.request(session_id, generation)
+        FakeRpcClient.fail_start = False
+        deadline = time.monotonic() + 2
+        while self.model.get(session_id)["transport"]["status"] != "connected" and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        self.assertEqual(self.model.get(session_id)["transport"]["status"], "connected")
+        self.assertEqual(len(FakeRpcClient.instances), failed_instance_count + 1)
+
+    def test_permanent_incompatibility_is_not_retried(self):
+        session_id = self.launch()["id"]
+        FakeRpcClient.fail_get_state_once = RpcProcessExitError("RPC process exited")
+        original_start = FakeRpcClient.start
+
+        def incompatible_after_original(client):
+            if client.instance_number > 1:
+                raise AdapterIncompatibleError("unsupported RPC protocol", kind="incompatible")
+            return original_start(client)
+
+        with patch.object(FakeRpcClient, "start", incompatible_after_original):
+            self.manager.refresh_connected()
+            failed_instance_count = len(FakeRpcClient.instances)
+            time.sleep(0.25)
+
+        self.assertEqual(len(FakeRpcClient.instances), failed_instance_count)
+        transport = self.model.get(session_id)["transport"]
+        self.assertEqual(transport["status"], "disconnected")
+        self.assertIn("unsupported RPC protocol", transport["reason"])
 
     def test_refresh_scheduler_releases_slot_when_failure_callback_raises(self):
         calls = []

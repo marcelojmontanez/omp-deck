@@ -12,6 +12,7 @@ from omp_deck._private_state import PrivateStateFile
 
 from .build import artifact, compatible, prepare_build
 from .model import configuration, deployment_order
+from .release_lease import operator_lock
 from .storage import MAX_JSON, ReleaseError, absolute, directory, identifier, load, save
 from .transport import Transport, run_browser
 
@@ -32,38 +33,49 @@ class Release:
         save(self.path, self.journal)
 
     @contextlib.contextmanager
-    def lease(self):
-        """A durable lease, not a lock held while calling another process or host."""
+    def lease(self, *, initialize=False):
+        """A durable fleet claim paired with an OS-owned process lifetime lock."""
         store = PrivateStateFile(self.state / "fleet.json", repair_root=False)
         nonce = secrets.token_hex(16)
-        with store.locked():
-            raw = store.read(MAX_JSON)
-            fleet = json.loads(raw) if raw else {"version": 1, "targets": {}}
-            owner = fleet.get("owner")
-            if owner:
-                try:
-                    os.kill(owner["pid"], 0)
-                except ProcessLookupError:
-                    pass
-                else:
-                    raise ReleaseError("another release operation is still running")
-            if fleet.get("active") not in {None, self.transaction}:
-                raise ReleaseError("an unfinished release must be resumed before preparing another")
-            fleet.update(active=self.transaction, owner={"pid": os.getpid(), "nonce": nonce})
-            store.replace(json.dumps(fleet).encode())
-        try:
-            yield fleet
-        finally:
+        with operator_lock(self.state / "operator.lock"):
             with store.locked():
-                current = json.loads(store.read(MAX_JSON))
-                if current.get("owner", {}).get("nonce") == nonce:
-                    current["owner"] = None
-                    # On uncertainty retain active ownership: another release must
-                    # not overwrite rollback assets while a watchdog may be working.
-                    if self.journal and self.journal["state"] in {"verified", "rolledback", "prepare_failed"}:
-                        current["active"] = None
-                    current["targets"] = fleet["targets"]
-                    store.replace(json.dumps(current).encode())
+                raw = store.read(MAX_JSON)
+                fleet = json.loads(raw) if raw else {"version": 1, "targets": {}}
+                if fleet.get("active") not in {None, self.transaction}:
+                    raise ReleaseError("an unfinished release must be resumed before preparing another")
+                if initialize:
+                    if self.journal:
+                        raise ReleaseError("release already exists; use status or resume")
+                    self.journal = {
+                        "version": 1,
+                        "transaction": self.transaction,
+                        "state": "preparing",
+                        "targets": [],
+                    }
+                    try:
+                        self.save()
+                    except BaseException:
+                        self.journal = None
+                        raise
+                fleet.update(active=self.transaction, owner={"pid": os.getpid(), "nonce": nonce})
+                store.replace(json.dumps(fleet).encode())
+            try:
+                yield fleet
+            finally:
+                with store.locked():
+                    current = json.loads(store.read(MAX_JSON))
+                    if current.get("owner", {}).get("nonce") == nonce:
+                        current["owner"] = None
+                        # On uncertainty retain active ownership: another release must
+                        # not overwrite rollback assets while a watchdog may be working.
+                        if self.journal and self.journal["state"] in {
+                            "verified",
+                            "rolledback",
+                            "prepare_failed",
+                        }:
+                            current["active"] = None
+                        current["targets"] = fleet["targets"]
+                        store.replace(json.dumps(current).encode())
 
     def transport(self, entry: dict) -> Transport:
         local = directory(self.root / entry["id"])
@@ -126,11 +138,7 @@ class Release:
 
     def prepare(self, message: str | None = None):
         directory(self.root)
-        with self.lease() as fleet:
-            if self.journal:
-                raise ReleaseError("release already exists; use status or resume")
-            self.journal = {"version": 1, "transaction": self.transaction, "state": "preparing", "targets": []}
-            self.save()
+        with self.lease(initialize=True) as fleet:
             try:
                 candidate = prepare_build(self.repository, self.root, message=message)
                 run_browser(self.repository, "--preflight")
@@ -165,6 +173,31 @@ class Release:
                 self.journal["state"] = "prepare_failed"
                 self.save()
                 raise
+        return self.summary()
+
+    def recover_missing_journal(self):
+        store = PrivateStateFile(self.state / "fleet.json", repair_root=False)
+        with operator_lock(self.state / "operator.lock"):
+            with store.locked():
+                raw = store.read(MAX_JSON)
+                fleet = json.loads(raw) if raw else {"version": 1, "targets": {}}
+                if fleet.get("active") != self.transaction:
+                    raise ReleaseError("release not found")
+                if not self.root.exists():
+                    raise ReleaseError("active release has no journal or owned release directory")
+                directory(self.root)
+                if any(self.root.iterdir()):
+                    raise ReleaseError("active release has no journal; preserving unknown release assets")
+                self.journal = {
+                    "version": 1,
+                    "transaction": self.transaction,
+                    "state": "prepare_failed",
+                    "targets": [],
+                    "abandonedAt": int(time.time()),
+                }
+                self.save()
+                fleet.update(active=None, owner=None)
+                store.replace(json.dumps(fleet).encode())
         return self.summary()
 
     def observe(self, entry: dict, *, persist: bool = True) -> dict:
@@ -205,9 +238,23 @@ class Release:
 
     def deploy(self, *, resume: bool = False):
         if not self.journal:
+            if resume:
+                return self.recover_missing_journal()
             raise ReleaseError("release not found")
         if not self.journal.get("candidate") or not self.journal["targets"]:
-            raise ReleaseError("preparation did not finish building; prepare a new release")
+            recoverable = (
+                resume
+                and not self.journal.get("candidate")
+                and self.journal["targets"] == []
+                and self.journal["state"] in {"preparing", "prepare_failed"}
+            )
+            if not recoverable:
+                raise ReleaseError("preparation did not finish building; prepare a new release")
+            with self.lease():
+                self.journal["state"] = "prepare_failed"
+                self.journal["abandonedAt"] = int(time.time())
+                self.save()
+            return self.summary()
         if self.journal["state"] in {"preparing", "prepare_failed"} or any(
             entry["state"] in {"staging", "prepare_failed"} for entry in self.journal["targets"]
         ):

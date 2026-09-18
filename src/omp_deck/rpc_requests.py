@@ -7,10 +7,10 @@ import threading
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from ._rpc_errors import AdapterError
 from .fleet_model import FleetModel
 from .projects import create_project_directory, resolve_project_path
 from .request_ledger import RequestLedger
-from .rpc_adapter import AdapterError
 from .settings import Settings
 
 
@@ -60,44 +60,44 @@ class RpcRequestCoordinator:
         with self._lock:
             launch_lock = self._launch_locks.setdefault(project_name, threading.Lock())
         with launch_lock:
-            persisted = self.ledger.reserve("rpc-launch", request_id, fingerprint)
-            if persisted is not None:
-                if persisted["status"] == "accepted":
-                    return {
+            with self.ledger.admission("rpc-launch", request_id, fingerprint) as persisted:
+                if persisted is not None:
+                    if persisted["status"] == "accepted":
+                        return {
+                            "requestId": request_id,
+                            "status": "accepted",
+                            "session": self.model.get(persisted["sessionId"]),
+                            "created": persisted["created"],
+                        }
+                    return dict(persisted)
+                created = False
+                try:
+                    if create:
+                        project_path = create_project_directory(self.settings.project_root, project_name)
+                        created = True
+                    session = start(project_name, project_path, title=title)
+                    result = {
                         "requestId": request_id,
                         "status": "accepted",
-                        "session": self.model.get(persisted["sessionId"]),
-                        "created": persisted["created"],
+                        "session": session,
+                        "created": created,
                     }
-                return dict(persisted)
-            created = False
-            try:
-                if create:
-                    project_path = create_project_directory(self.settings.project_root, project_name)
-                    created = True
-                session = start(project_name, project_path, title=title)
-                result = {
-                    "requestId": request_id,
-                    "status": "accepted",
-                    "session": session,
-                    "created": created,
-                }
-                durable = {
-                    "requestId": request_id,
-                    "status": "accepted",
-                    "sessionId": session["id"],
-                    "created": created,
-                }
-            except Exception:
-                result = {
-                    "requestId": request_id,
-                    "status": "failed",
-                    "errorCode": "launch_failed",
-                    "created": created,
-                }
-                durable = dict(result)
-            self.ledger.complete("rpc-launch", request_id, fingerprint, durable)
-            return result
+                    durable = {
+                        "requestId": request_id,
+                        "status": "accepted",
+                        "sessionId": session["id"],
+                        "created": created,
+                    }
+                except Exception:
+                    result = {
+                        "requestId": request_id,
+                        "status": "failed",
+                        "errorCode": "launch_failed",
+                        "created": created,
+                    }
+                    durable = dict(result)
+                self.ledger.complete("rpc-launch", request_id, fingerprint, durable)
+                return result
 
     def dispatch(
         self,
@@ -128,44 +128,51 @@ class RpcRequestCoordinator:
             if persisted is not None:
                 return persisted
             prepared = prepare() if prepare is not None else session_id
-            persisted = self.ledger.reserve(
+            with self.ledger.admission(
                 scope,
                 request_id,
                 fingerprint,
                 recovery=recovery,
-            )
-            if persisted is not None:
-                return persisted
-            try:
-                command_result = execute(prepared, action, payload)
-                outcome = command_result.get("result")
-                status = "stale" if outcome == "stale" else "accepted"
-                result = {
-                    "requestId": request_id,
-                    "status": status,
-                    "result": outcome,
-                }
-                if recovery is not None and status == "accepted":
-                    result["acceptance"] = "accepted"
-            except AdapterError as error:
-                if error.kind not in {"cancelled", "command"}:
-                    self.ledger.mark_uncertain(scope, request_id, fingerprint)
-                    return {
+            ) as persisted:
+                if persisted is not None:
+                    return persisted
+                try:
+                    command_result = execute(prepared, action, payload)
+                    outcome = command_result.get("result")
+                    if isinstance(outcome, Mapping) and outcome.get("cancelled") is True:
+                        result = {
+                            "requestId": request_id,
+                            "status": "cancelled",
+                            "errorCode": "cancelled",
+                        }
+                    else:
+                        status = "stale" if outcome == "stale" else "accepted"
+                        result = {
+                            "requestId": request_id,
+                            "status": status,
+                            "result": outcome,
+                        }
+                        if recovery is not None and status == "accepted":
+                            result["acceptance"] = "accepted"
+                except AdapterError as error:
+                    if error.kind not in {"cancelled", "command"}:
+                        self.ledger.mark_uncertain(scope, request_id, fingerprint)
+                        return {
+                            "requestId": request_id,
+                            "status": "uncertain",
+                            "errorCode": "outcome_unknown",
+                        }
+                    status = "cancelled" if error.kind == "cancelled" else "failed"
+                    result = {
                         "requestId": request_id,
-                        "status": "uncertain",
-                        "errorCode": "outcome_unknown",
+                        "status": status,
+                        "errorCode": error.kind,
                     }
-                status = "cancelled" if error.kind == "cancelled" else "failed"
-                result = {
-                    "requestId": request_id,
-                    "status": status,
-                    "errorCode": error.kind,
-                }
-            durable = dict(result)
-            if durable.get("status") == "accepted":
-                durable["result"] = None
-            self.ledger.complete(scope, request_id, fingerprint, durable)
-            return self.ledger.lookup(scope, request_id, fingerprint) or result
+                durable = dict(result)
+                if durable.get("status") == "accepted":
+                    durable["result"] = None
+                self.ledger.complete(scope, request_id, fingerprint, durable)
+                return self.ledger.lookup(scope, request_id, fingerprint) or result
 
     def deliveries(self, session_id: str) -> list[dict[str, Any]]:
         return self.ledger.deliveries(session_id)

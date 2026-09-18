@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Any
 
 from ._extension_activation import ExtensionEventActivation
 from ._extension_protocol import ExtensionDisconnected, ExtensionRequestTimeout
+from ._shutdown import close_terminal_manager
 from .collab_adapter import CollabAdapter
 from .extension_adapter import ExtensionAdapter
 from .registry_store import RegistryStore
@@ -97,6 +99,80 @@ class _RuntimeStore:
                 return False
             self._items.pop(runtime.session_id)
             return True
+
+
+def close_terminal_runtimes(
+    manager: Any,
+    runtimes: tuple[_Runtime, ...],
+    watcher: threading.Thread | None,
+    recovery_workers: tuple[threading.Thread, ...],
+    timeout: float,
+    lock_for: Callable[[str], threading.RLock],
+) -> None:
+    if timeout < 0:
+        raise ValueError("timeout must not be negative")
+    deadline = time.monotonic() + timeout
+    for runtime in runtimes:
+        if runtime.kind == "extension":
+            runtime.adapter.begin_close()
+    close_terminal_manager(
+        manager, runtimes, watcher, recovery_workers, max(0.0, deadline - time.monotonic()), lock_for
+    )
+
+
+def remove_terminal_session(manager: Any, session_id: str) -> bool:
+    with manager._commands.lock(session_id):
+        try:
+            record = _registry_record(manager.registry, session_id)
+        except KeyError:
+            return False
+        if record["adapterKind"] not in {"collab", "extension"}:
+            return False
+        runtime = manager._runtimes.get(session_id)
+        ignored = (
+            runtime.instance_id
+            if runtime is not None and runtime.kind == "extension"
+            else record.get("recoveryMetadata", {}).get("connectionId")
+        )
+        if record["adapterKind"] == "extension" and isinstance(ignored, str):
+            record = manager.registry.update(session_id, recovery_metadata={"connectionId": ignored, "removed": True})
+            with manager._lock:
+                manager._ignored_extensions[session_id] = ignored
+        if runtime is not None:
+            manager.model.set_transport(
+                session_id,
+                instance_id=runtime.instance_id,
+                generation=runtime.generation,
+                status="disconnected",
+                reason="removal pending",
+            )
+            if runtime.kind == "extension":
+                runtime.adapter.begin_close()
+    # A reader may be waiting for the operation lock. Retain ownership until it
+    # has stopped, but never join it while holding the lock it needs to retire.
+    if runtime is not None:
+        runtime.adapter.close()
+        if runtime.kind == "extension":
+            runtime.adapter.wait_closed()
+    with manager._commands.lock(session_id):
+        current = manager._runtimes.get(session_id)
+        if current is not None and current is not runtime:
+            raise TerminalSessionNotConnected("session changed during removal")
+        try:
+            remaining = _registry_record(manager.registry, session_id)
+        except KeyError:
+            return False
+        if remaining["generation"] != record["generation"]:
+            raise TerminalSessionNotConnected("session changed during removal")
+        if record["adapterKind"] == "collab":
+            manager.credentials.remove(session_id)
+            if not manager.registry.remove(session_id):
+                return False
+        if runtime is not None:
+            manager._runtimes.remove_if_current(runtime)
+        manager._commands.forget(session_id)
+        manager.model.remove(session_id)
+    return True
 
 
 def retire_extension(

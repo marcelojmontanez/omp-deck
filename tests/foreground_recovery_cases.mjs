@@ -75,6 +75,8 @@ export async function verifyForegroundRecovery(page) {
       };
       let read;
       try {
+        // Isolate the clock jump from unrelated stream liveness checks against old tickets.
+        stopEventStreams();
         Date.now = () => originalNow() + 120_000;
         read = ompDeckApi.request(
           `/api/sessions/${encodeURIComponent(selectedAgent().id)}/deliveries`,

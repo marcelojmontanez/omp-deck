@@ -1,9 +1,11 @@
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
 from tools.release_lib import orchestrator
+from tools.release_lib.build import CONTRACT_FILES, artifact, compatible
 from tools.release_lib.orchestrator import Release
 from tools.release_lib.storage import ReleaseError, directory, load, save
 
@@ -36,6 +38,100 @@ class FleetTransport:
             raise ReleaseError("unhealthy candidate")
         self.states[self.transaction] = "verified"
         return {"state": "verified"}
+
+
+class StagingTransport:
+    staged = False
+
+    def __init__(self, target, transaction, local_root, repository):
+        self.root = str(local_root / "remote")
+
+    def stage(self, bundle, wheel, rollback, request):
+        type(self).staged = True
+
+    def action(self, action):
+        return {"state": "prepared"}
+
+
+class ReleaseStorageCompatibilityTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+
+    def wheel(self, name, *, readable=None, writable=None, ledger="ledger") -> Path:
+        path = self.root / f"{name}.whl"
+        revision = ("a" if name == "candidate" else "b") * 40
+        package = ""
+        if readable is not None:
+            package = (
+                "def storage_compatibility():\n"
+                f"    return {{'requests': {{'read': {readable!r}, 'write': {writable!r}}}}}\n"
+            )
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("omp_deck/__init__.py", package)
+            archive.writestr("omp_deck/request_ledger.py", ledger)
+            archive.writestr("omp_deck/plugin/index.js", name)
+            for contract in CONTRACT_FILES:
+                archive.writestr(contract, "stable contract\n")
+            archive.writestr(
+                "omp_deck-1.0.dist-info/METADATA",
+                f"Name: omp-deck\nVersion: 1.0+g{revision}\n",
+            )
+        return path
+
+    def release(self, candidate: Path, rollback: Path) -> tuple[Release, dict, dict]:
+        config = {"state_root": str(self.root / "state"), "targets": []}
+        release = Release(config, self.root, "storage-release", transport=StagingTransport)
+        directory(release.root)
+        candidate_artifact = artifact(candidate)
+        release.journal = {
+            "version": 1,
+            "transaction": "storage-release",
+            "state": "preparing",
+            "candidate": candidate_artifact,
+            "targets": [],
+        }
+        entry = {
+            "id": "node",
+            "transaction": "storage-release-node-1",
+            "target": {
+                "id": "node",
+                "kind": "node",
+                "profile": {"tool_root": "/retained/tool"},
+                "work_root": "/retained/work",
+                "origin": "https://deck.example",
+            },
+        }
+        fleet = {
+            "targets": {
+                "node": {
+                    "artifact": artifact(rollback),
+                    "tool_root": "/retained/tool",
+                }
+            }
+        }
+        return release, entry, fleet
+
+    def test_legacy_rollback_without_storage_api_is_rejected_before_remote_staging(self):
+        candidate = self.wheel("candidate", readable=[1, 2, 3], writable=3, ledger="schema 3")
+        rollback = self.wheel("rollback", ledger="schema 2")
+        release, entry, fleet = self.release(candidate, rollback)
+        StagingTransport.staged = False
+        with self.assertRaisesRegex(ReleaseError, "incompatible storage schema"):
+            release.prepare_target(entry, fleet)
+        self.assertFalse(StagingTransport.staged)
+
+    def test_mutually_readable_storage_versions_allow_different_ledger_implementations(self):
+        candidate = self.wheel("candidate", readable=[1, 2, 3], writable=3, ledger="schema 3")
+        rollback = self.wheel("rollback", readable=[1, 2, 3], writable=2, ledger="schema 2 reader")
+        compatible(candidate, rollback)
+
+    def test_each_artifact_must_read_the_other_artifacts_write_version(self):
+        candidate = self.wheel("candidate", readable=[3], writable=3)
+        rollback = self.wheel("rollback", readable=[2, 3], writable=2)
+        with self.assertRaisesRegex(ReleaseError, "incompatible storage schema"):
+            compatible(candidate, rollback)
 
 
 class ReleaseOrchestrationTests(unittest.TestCase):

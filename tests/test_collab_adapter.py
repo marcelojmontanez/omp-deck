@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import base64
+import json
+import os
 import threading
+import time
 import unittest
 from collections import deque
+from unittest import mock
+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from websockets.sync.server import serve
 
 from omp_deck._collab_transport import _classify_fatal
+from omp_deck._rpc_errors import AdapterDisconnectedError, AdapterError, AdapterIncompatibleError
 from omp_deck.collab_adapter import CollabAdapter
 from omp_deck.collab_protocol import (
     b64url_encode,
@@ -15,7 +23,6 @@ from omp_deck.collab_protocol import (
     unpack_envelope,
 )
 from omp_deck.fleet_model import FleetModel
-from omp_deck.rpc_adapter import AdapterDisconnectedError, AdapterError, AdapterIncompatibleError
 
 KEY = bytes(range(32))
 TOKEN = bytes(range(16))
@@ -29,6 +36,13 @@ def link(write=True):
 
 def host(frame):
     return pack_envelope(7, seal_frame(KEY, frame))
+
+
+def producer_host(frame):
+    """Encode a host fixture without passing it through Deck's validator."""
+    plaintext = json.dumps(frame, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
+    iv = os.urandom(12)
+    return pack_envelope(7, iv + AESGCM(KEY).encrypt(iv, plaintext, None))
 
 
 class Socket:
@@ -88,7 +102,7 @@ class CollabAdapterTests(unittest.TestCase):
         frames = [
             host(WELCOME),
             host(CHUNK),
-            host({"t": "entry", "entry": {"type": "x", "id": "2"}}),
+            host({"t": "entry", "entry": {"type": "x", "id": "2", "parentId": None, "timestamp": "now"}}),
             host({"t": "event", "event": {"type": "turn_start"}}),
             host(
                 {
@@ -309,17 +323,21 @@ class CollabAdapterTests(unittest.TestCase):
         self.assertTrue(model.apply_adapter_event("deck", instance_id="collab", generation=1, event=event))
         self.assertEqual(model.get("deck")["workingOn"], "inspect")
 
-    def test_successful_ui_response_emits_authoritative_settlement(self):
+    def test_successful_ui_response_snapshots_remaining_pending_queue(self):
         events = []
         adapter, _ = self.make([])
         adapter._status = "connected"
         adapter._ws = Socket([])
-        adapter._ui[4] = {"reqId": 4, "kind": "editor", "title": "x"}
-        adapter._ui_order.append(4)
+        adapter._ui[3] = {"reqId": 3, "kind": "editor", "title": "older"}
+        adapter._ui[4] = {"reqId": 4, "kind": "editor", "title": "newest"}
+        adapter._ui_order.extend((3, 4))
         adapter._callback = events.append
 
         self.assertTrue(adapter.respond_ui(4, "yes"))
-        self.assertEqual((events[-1].type, events[-1].payload), ("ui_request_resolved", {"id": "4"}))
+
+        self.assertEqual((events[-1].type, events[-1].payload), ("ui_request_end", {"reqId": 4}))
+        self.assertEqual([request["reqId"] for request in adapter.snapshot().pending_ui_requests], [3])
+        self.assertFalse(adapter.respond_ui(4, "duplicate"))
         self.assertIsNone(adapter._ingest_ui_request_end({"reqId": 4}))
         self.assertEqual(len(events), 1)
 
@@ -412,8 +430,28 @@ class CollabAdapterTests(unittest.TestCase):
         )
         adapter = CollabAdapter(link(), "guest", connector=lambda url, **opts: sock, clock=lambda: next(ticks))
         adapter.start()
-        self.assertEqual(sock.timeouts[:3], [25.0, 20.0, 25.0])
+        self.assertEqual(sock.timeouts[:3], [25.0, 25.0, 25.0])
         adapter.close()
+
+    def test_startup_wait_extends_for_timely_snapshot_progress(self):
+        class DelayedSocket(Socket):
+            def recv(self, timeout=None):
+                if self.incoming:
+                    time.sleep(0.02)
+                return super().recv(timeout)
+
+        frames = [
+            producer_host({**WELCOME, "entryCount": 0}),
+            producer_host({"t": "snapshot-chunk", "entries": [], "final": False}),
+            producer_host({"t": "snapshot-chunk", "entries": [], "final": False}),
+            producer_host({"t": "snapshot-chunk", "entries": [], "final": True}),
+        ]
+        sock = DelayedSocket(frames)
+        adapter = CollabAdapter(link(), "guest", connector=lambda url, **opts: sock)
+        with mock.patch("omp_deck.collab_adapter.WELCOME_TIMEOUT", 0.05):
+            adapter.start()
+            self.assertEqual(adapter.transport_status, "connected")
+            adapter.close()
 
     def test_backoff_jitter_range_and_snapshot_resets_delay(self):
         class StopAfterWaits:
@@ -448,6 +486,125 @@ class CollabAdapterTests(unittest.TestCase):
         adapter._stopping = stop
         adapter._run()
         self.assertEqual(stop.waits[:2], [0.75, 0.75])
+
+    def test_producer_rich_entries_import_and_stream_without_deck_fixture_validation(self):
+        entries = [
+            {
+                "type": "model_change",
+                "id": "model",
+                "parentId": None,
+                "timestamp": "now",
+                "model": "openai/gpt-5",
+                "role": "default",
+                "resolvedModelIsFallback": False,
+            },
+            {
+                "type": "thinking_level_change",
+                "id": "thinking",
+                "parentId": "model",
+                "timestamp": "now",
+                "thinkingLevel": "high",
+                "configured": None,
+            },
+            {
+                "type": "compaction",
+                "id": "compaction",
+                "parentId": "thinking",
+                "timestamp": "now",
+                "summary": "summary",
+                "shortSummary": "short",
+                "firstKeptEntryId": "model",
+                "tokensBefore": 100,
+                "tokensAfter": 25,
+                "method": "summary",
+                "providerReplayThroughEntryId": "thinking",
+                "details": {"artifact": 1},
+                "preserveData": {"hook": True},
+                "fromExtension": False,
+                "warning": "low progress",
+            },
+        ]
+        adapter, _ = self.make([])
+
+        adapter._receive(producer_host({**WELCOME, "entryCount": len(entries)}))
+        adapter._receive(producer_host({"t": "snapshot-chunk", "entries": entries, "final": True}))
+        adapter._receive(
+            producer_host(
+                {
+                    "t": "entry",
+                    "entry": {
+                        **entries[0],
+                        "id": "model-live",
+                        "parentId": "compaction",
+                        "resolvedModelIsFallback": True,
+                    },
+                }
+            )
+        )
+
+        snapshot = adapter.snapshot()
+        self.assertEqual(
+            [entry["id"] for entry in snapshot.entries],
+            ["model", "thinking", "compaction", "model-live"],
+        )
+        self.assertTrue(snapshot.entries[-1]["resolvedModelIsFallback"])
+
+    def test_local_actual_protocol_disconnect_reconnect_smoke(self):
+        events = []
+        errors = []
+        reconnected = threading.Event()
+        release = threading.Event()
+        connection_lock = threading.Lock()
+        connection_count = 0
+
+        def on_event(event):
+            events.append(event)
+            connected_count = sum(
+                item.type == "transport" and item.payload.get("status") == "connected" for item in events
+            )
+            if connected_count >= 2:
+                reconnected.set()
+
+        def handler(connection):
+            nonlocal connection_count
+            try:
+                peer, sealed = unpack_envelope(connection.recv())
+                self.assertEqual(peer, 0)
+                self.assertEqual(open_frame(KEY, sealed, direction="guest")["t"], "hello")
+                with connection_lock:
+                    connection_count += 1
+                    current = connection_count
+                connection.send(producer_host({**WELCOME, "entryCount": 0}))
+                connection.send(producer_host({"t": "snapshot-chunk", "entries": [], "final": True}))
+                if current == 1:
+                    connection.close()
+                    return
+                release.wait(3)
+            except BaseException as error:
+                errors.append(error)
+
+        server = serve(handler, "127.0.0.1", 0)
+        server_thread = threading.Thread(target=server.serve_forever)
+        server_thread.start()
+        port = server.socket.getsockname()[1]
+        smoke_link = f"ws://127.0.0.1:{port}/r/{ROOM}.{b64url_encode(KEY + TOKEN)}"
+        adapter = CollabAdapter(smoke_link, "guest", on_event=on_event, random=lambda: 0)
+        try:
+            adapter.start()
+            self.assertTrue(reconnected.wait(3))
+            statuses = [
+                event.payload["status"] for event in events if event.type == "transport" and "status" in event.payload
+            ]
+            self.assertIn("disconnected", statuses)
+            self.assertGreaterEqual(statuses.count("connected"), 2)
+            self.assertEqual(errors, [])
+        finally:
+            release.set()
+            try:
+                adapter.close()
+            finally:
+                server.shutdown()
+                server_thread.join(3)
 
     def test_callback_failure_is_contained(self):
         seen = []
@@ -546,6 +703,20 @@ class CollabAdapterTests(unittest.TestCase):
         with self.assertRaises(AdapterError) as caught:
             adapter.start()
         self.assertNotIn(b64url_encode(KEY), repr(caught.exception))
+
+    def test_authenticated_schema_failure_is_protocol_not_crypto(self):
+        adapter, _ = self.make([])
+        malformed = producer_host(
+            {
+                "t": "entry",
+                "entry": {"type": "model_change", "model": "openai/gpt-5"},
+            }
+        )
+        with self.assertRaises(ValueError) as caught:
+            adapter._receive(malformed)
+        fatal = _classify_fatal(caught.exception)
+        self.assertIsInstance(fatal, AdapterIncompatibleError)
+        self.assertEqual(fatal.kind, "protocol")
 
     def test_bounds_rejected(self):
         adapter, _ = self.make([host({**WELCOME, "entryCount": 2})], entry_limit=1)

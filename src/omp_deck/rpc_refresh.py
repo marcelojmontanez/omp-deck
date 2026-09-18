@@ -4,7 +4,10 @@ import threading
 import time
 from collections.abc import Callable, Iterable
 
-from .rpc_adapter import AdapterDisconnectedError, AdapterError
+from ._rpc_errors import AdapterDisconnectedError, AdapterError
+
+_SNAPSHOT_BUSY_RETRIES = 1
+_SNAPSHOT_BUSY_DELAY_SECONDS = 0.05
 
 
 class RpcRefreshScheduler:
@@ -88,17 +91,26 @@ class RpcRefreshScheduler:
                 self._schedule(session_id)
 
     def _refresh_one(self, session_id: str) -> None:
-        try:
-            self._refresh(session_id)
-        except AdapterDisconnectedError as error:
+        for attempt in range(_SNAPSHOT_BUSY_RETRIES + 1):
             try:
-                self._disconnected(session_id, error)
+                self._refresh(session_id)
+                return
+            except AdapterDisconnectedError as error:
+                try:
+                    self._disconnected(session_id, error)
+                except Exception:
+                    self._report_failure(session_id, "reconnect failed")
+                return
+            except AdapterError as error:
+                if error.kind == "snapshot_busy":
+                    if attempt < _SNAPSHOT_BUSY_RETRIES:
+                        time.sleep(_SNAPSHOT_BUSY_DELAY_SECONDS * (attempt + 1))
+                    continue
+                self._report_failure(session_id, f"refresh failed: {error.kind}")
+                return
             except Exception:
-                self._report_failure(session_id, "reconnect failed")
-        except AdapterError as error:
-            self._report_failure(session_id, f"refresh failed: {error.kind}")
-        except Exception:
-            self._report_failure(session_id, "refresh failed")
+                self._report_failure(session_id, "refresh failed")
+                return
 
     def _report_failure(self, session_id: str, reason: str) -> None:
         try:

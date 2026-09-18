@@ -81,6 +81,12 @@ def default_install_root() -> Path:
     return root / "install" if os.name == "nt" else root
 
 
+def default_plugin_root() -> Path:
+    if os.name == "nt":
+        return data_home() / _APP_NAME / "plugin"
+    return data_home() / "omp-deck-plugin"
+
+
 def default_omp_path() -> Path:
     if os.name == "nt":
         return data_home() / "omp" / "omp.exe"

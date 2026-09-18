@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -10,8 +11,16 @@ def systemd_quote(value):
     return '"' + value.replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def service_unit(config_path, executable=sys.executable):
+def service_unit(config_path, omp_bin=None, executable=sys.executable):
     environment = {"HOME": str(Path.home()), "OMP_DECK_CONFIG": str(config_path)}
+    if omp_bin is not None:
+        resolved_omp = shutil.which(str(omp_bin))
+        if resolved_omp is None:
+            candidate = Path(omp_bin).expanduser()
+            if not candidate.is_absolute():
+                raise RuntimeError("cannot resolve the configured OMP executable")
+            resolved_omp = str(candidate)
+        environment["OMP_DECK_OMP_BIN"] = str(Path(resolved_omp).absolute())
     for name in (
         "XDG_CACHE_HOME",
         "XDG_CONFIG_HOME",

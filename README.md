@@ -35,6 +35,8 @@ Capabilities can differ by transport, authorization, connection state, platform,
 
 Deck accepts HTTP requests while managed and imported terminal connections recover in the background. A healthy service does not mean every OMP session is connected: each session reports its own connection state, and slow recovery does not block the dashboard.
 
+Managed child exits and failed RPC readers are supervised even while idle. Sessions whose managed-running intent is still enabled retry recovery; explicit shutdown cancels that intent. Imported Collab sessions also keep retrying after a startup relay outage. Live RPC messages update incrementally, with authoritative snapshots on recovery and native turn completion rather than full-fleet transcript polling.
+
 The extension fallback runs only in interactive terminal mode. RPC, JSON, and print-mode OMP processes do not publish fallback endpoints or appear as additional terminal sessions.
 
 Quit requests OMP's native shutdown; acceptance is not proof that the process has exited. OMP controls graceful-exit timing, which can differ between supported versions. Deck moves an unattached record to History rather than deleting it, and never injects terminal input or force-kills a terminal-owned session.
@@ -59,6 +61,8 @@ omp-deck setup
 ```
 
 `setup` installs and validates the bundled plugin through `omp plugin`, generates and starts the per-user background service, checks `/healthz`, and prints a one-time pairing code. Linux uses a systemd user service; macOS uses a LaunchAgent; Windows uses a least-privilege Task Scheduler logon task. Enter the code on the browser pairing screen. It is exchanged by POST and is never placed in a URL or browser storage.
+
+The registered extension lives outside the Python tool environment: `$XDG_DATA_HOME/omp-deck-plugin` (default `~/.local/share/omp-deck-plugin`) on Linux/macOS, or `%LOCALAPPDATA%\OMP Deck\plugin` on Windows. Setup retains the previous owned source until replacement succeeds. Linux service generation also pins the resolved OMP executable; rerun setup after moving or replacing that executable path.
 
 To configure the supported Tailscale Serve route during setup:
 
@@ -128,11 +132,15 @@ The session light is green for connected managed RPC, amber for connected termin
 
 Unsent drafts and selected images stay with their session when you switch conversations. They remain memory-only: reloading, logging out, or clearing local data discards them. Submitted messages are different: once the owning node saves the request, its private recovery receipt can survive a browser reload or Deck restart.
 
+Send waits for images already selected in the file picker to finish loading, preserves their selection order, and reports read failures without sending a partial attachment set. Switching sessions does not move those images to another draft. Clearing local drafts also clears the visible composer and cancels pending image reads.
+
 Use the image button to open the browser's native photo picker, or paste copied images into the message field. Tap a thumbnail to preview the whole image; its remove button stays beside it. Cancelling or reopening the picker preserves your draft. Images can be sent without text. Each message accepts up to four images, totaling **20 MiB** for managed RPC and extension 1.3.4 or later, or **10 MiB** for writable Collab. Deck submits the original files; OMP applies its own image processing for the selected model.
 
 Extensions older than 1.3.4 retain their **700 KiB** total limit, with an explanation in the composer. Restart OMP and resume the session when idle to load the installed extension. Installing the update or running `/reload-plugins` does not replace extension code inside a running process.
 
 Extension **1.3.5 or later** also makes supported inline images in terminal conversations previewable, using OMP's private image storage. After upgrading, restart and resume existing terminal sessions when idle so their retained history can be replayed with image references. Refreshing the dashboard alone cannot recover image references omitted by an older running extension.
+
+Extension **1.3.6** restores running and recent background-job visibility and rejects delayed commands after the terminal changes conversations. Existing terminal sessions need an idle restart and resume to load these changes.
 
 The composer stays below the conversation; its text field grows to at most 130px. Enter inserts a newline on phones; desktop Enter sends, and Shift+Enter inserts a newline. Sending keeps the text field focused and lets you write the next draft immediately. Delayed acceptance does not erase newer edits, and a delivery failure restores the unsent content without pulling focus from another control. History has a read-only notice instead of disabled composer controls.
 
@@ -142,7 +150,9 @@ On capable working sessions, choose **Steer** to send at the next native interru
 
 The Accepted indicator clears after three seconds, or immediately when you edit a draft, change attachments, or switch sessions. Earlier acknowledgements and recovered successes do not mark a newer draft as accepted. The success timer never clears a newer send's progress or failure warning.
 
-Recovery storage is bounded to 128 MiB and 1,000 request records per owning-node ledger, including base64 image data. Deck automatically reclaims accepted recovery content when space is needed, retaining its deduplication result. At the record-count limit, older completed records are evicted, ending deduplication for those request IDs. Unresolved recovery content is not discarded to admit new requests before its retention period expires; if it occupies the available capacity, Deck reports the problem instead of silently losing it.
+OMP can report a prompt failure after initial acceptance. Deck displays a session-level warning when the official RPC client reports such a failure. That client does not expose the successful native request ID, so Deck cannot reliably associate the later failure with an individual receipt or durably change that receipt's outcome. The warning survives browser reconnects while Deck remains running, but not a Deck service restart. Check the native conversation before retrying; Deck does not guess receipt identity from message text or internal SDK counters.
+
+Each owning-node ledger retains at most 1,000 active request records and 1,000 compact deduplication records, with a 4 MiB metadata limit and a separate 128 MiB recovery-content limit including base64 images. Accepted recovery content is reclaimed first when space is needed. Dismissed or expired requests retain their identity and outcome in the compact records until that bounded history evicts them; deduplication is not permanent. Unresolved recovery content is not discarded to admit new requests before its seven-day retention expires. Native submissions reserve completion capacity before dispatch and cannot be dismissed while still running; a crashed unfinished submission becomes uncertain rather than being sent again automatically.
 
 Dismissing a receipt does not cancel OMP or delete conversation history. If an uncertain request stays unresolved, check OMP first. Restoring its content, dismissing its receipt, and then sending creates a new request and can duplicate work if the original actually arrived.
 
@@ -364,11 +374,15 @@ Server state defaults to `~/.local/state/omp-deck` on Linux/macOS and `%LOCALAPP
 - `registry.json`: stable Deck session identities, custom display names and pins, and non-secret recovery metadata;
 - `auth.json`: installation verifier and hashed device credentials;
 - `cursors.json`: last-read message cursors;
-- `requests.json`: at most 1,000 request-deduplication records, with submitted message text and images retained for recovery until dismissed or seven days old, within a 24 MiB store limit. Expired recovery content is removed on the next ledger access; fingerprints and outcomes remain while their bounded deduplication records are retained. A full store refuses new requests before dispatch rather than silently losing recoverable content;
+- `requests.json`: schema-3 request identities and outcomes, bounded to 4 MiB, with up to 1,000 active records and 1,000 compact deduplication records;
+- `.requests.json.recoveries/`: private submitted text and image recovery files, bounded to 128 MiB in total and normally retained until dismissed or seven days old; accepted content may be reclaimed sooner;
+- `.requests.json.admissions/`: private process-owned submission locks; operating-system lock release distinguishes a live native operation from a crashed unfinished request;
 - `collab.json`: protected Collab credentials while imported;
 - `sockets/`: extension registration metadata plus Unix sockets on Linux/macOS or same-user named-pipe endpoints on Windows.
 
 Sensitive files are atomic and bounded. Linux/macOS enforce owner-only mode `0600`; Windows enforces a protected current-user ACL and uses named mutexes for cross-process locking. OMP transcripts and blobs remain under OMP's own directories. The browser keeps drafts, optimistic sends, object URLs, and rendered state in memory only; it does not persist transcripts, paths, identifiers, usage, Collab links, or credentials in Web Storage. Object URLs are revoked when their owning draft or session is removed.
+
+Back up the complete state root, including hidden recovery directories, with Deck stopped. Copying only `requests.json` does not preserve submitted text or images. Expired recovery content and validated crash remnants are reclaimed on subsequent ledger access; an operation still holding its submission lock retains its completion capacity. Do not manually remove live lock files.
 
 Live browser state uses authenticated SSE with bounded replay. Low-frequency snapshot recovery replaces state when a cursor is stale. The compatibility JSONL reader is isolated and bounded; it is not a discovery mechanism, live event source, or control protocol.
 
@@ -431,13 +445,14 @@ omp-deck service remove
 
 The first start of a release with Deck display names upgrades `registry.json` from schema 1 to schema 2. Older releases reject and quarantine schema 2, so reverting the package alone is not a safe rollback after deployment. With Deck stopped, preserve a private backup and convert the current registry to schema 1 by removing only `displayName`, `pinned`, and `presentationRevision` from each session and changing the envelope version to `1`; preserve current session identities, recovery metadata, and generations, and replace the file atomically with its original private permissions. This discards custom names and pins, not the sessions. Do not restore old authentication, trust, or request-ledger files to undo this feature: doing so can revive revoked access or lose newer request outcomes.
 
-Message recovery also upgrades `requests.json` to schema 2. Before reverting to a schema-1 release, stop Deck and archive the **current** ledger privately, including all post-upgrade records. Build the old-reader view from that current file: set `version` to `1`, remove only `createdAt`, `updatedAt`, and `recovery` from each record, and remove `acceptance` from non-null outcomes. Preserve record order, request IDs, scopes, fingerprints, pending/complete state, and all other outcome fields; replace atomically with the original private permissions. The archive retains the exact outcomes and recoverable message/image content and must be protected and deleted deliberately when no longer needed. Do not restore an older ledger or replace current records wholesale from the archive on a later upgrade: that can lose newer deduplication outcomes or revive evicted requests.
+The request ledger upgrades schemas 1 and 2 to schema 3, preserving current request identities and outcomes while moving recoverable content into private sidecar files. Schema-1 and schema-2 releases cannot read this format. A package-only downgrade, editing the version field, or restoring an older ledger is unsafe and can lose outcomes or permit duplicate work. Keep a private backup of the complete current state and use a rollback artifact that can read schema 3. There is no supported automatic downgrade of the new ledger.
 
 Upgrade with the same tool manager, then run `omp-deck setup`. Setup snapshots
 the active OMP plugin and service unit before replacement, validates the new
 service twice, and restores those components if any later setup stage fails.
 When `--tailscale` creates a new Serve route, a later failure removes that route
 without changing configuration that existed before setup.
+For the first upgrade from an older installation whose plugin still points inside the Python environment, retain its plugin bytes **before** the package manager replaces that environment. Setup run afterward cannot reconstruct already-overwritten code. Guarded release preparation retains the original environment and plugin before cutover; subsequent upgrades use the separate durable plugin store.
 The Python environment remains owned by `uv` or `pipx`; record the installed
 version before upgrading so that package-manager rollback remains explicit:
 
@@ -447,7 +462,7 @@ uv tool upgrade omp-deck
 # or: pipx upgrade omp-deck
 omp-deck setup
 
-# If setup reports rollback and the Python package must also be restored:
+# If setup reports rollback, restore a schema-compatible previous package:
 uv tool install --force 'git+https://github.com/marcelojmontanez/omp-deck.git@PREVIOUS_REVISION'
 # or: pipx install --force 'git+https://github.com/marcelojmontanez/omp-deck.git@PREVIOUS_REVISION'
 ```
@@ -499,9 +514,9 @@ For separate preparation and deployment:
 
 Preparation retains rollback artifacts but never restarts services. Deployment requires observed independent watchdog readiness, safe managed-session restart admission, exact installed identities, authenticated health checks, and a private 390px Chromium check. The browser may obtain coordinator access tickets but cannot send messages or other application mutations. An unchanged extension is not reinstalled. Updated extension bytes do not replace code inside existing terminal processes: those sessions still need an idle restart and resume.
 
-Failed verification stops the rollout and attempts to restore the affected service. A detached watchdog also attempts rollback when the operator disconnects before verification. An unreachable host, changed ownership/configuration, busy managed session, or failed rollback is reported rather than forcibly overridden. Already verified machines are not automatically rolled back; this is a guarded rolling release, not an atomic fleet transaction. Persistence/protocol-sensitive source changes are blocked until a reviewed compatibility migration is available.
+Failed verification stops the rollout and attempts to restore the affected service. A detached watchdog also attempts rollback when the operator disconnects before verification. An unreachable host, changed ownership/configuration, busy managed session, or failed rollback is reported rather than forcibly overridden. Already verified machines reject stale rollback attempts; this is a guarded rolling release, not an atomic fleet transaction. Candidate and rollback wheels must expose `omp_deck.storage_compatibility()` and mutually read each other's request-ledger format. Older rollback artifacts without that API or a schema-3 reader are rejected before remote staging. Other persistence/protocol-sensitive source changes remain blocked without a reviewed compatibility migration.
 
-`resume` reconciles actual target state before acting and gives a rolled-back target a fresh guarded attempt. If preparation ended before an immutable candidate was recorded, start a new `prepare` or `run`. Do not start a different release while a previous rollback remains unresolved.
+`resume` reconciles actual target state before acting and gives a rolled-back target a fresh guarded attempt. If preparation ended before an immutable candidate was recorded, first run `resume OLD_RELEASE_ID` to release its interrupted preparation claim, then start a new `prepare` or `run`. Recovery of a missing journal is permitted only for an empty transaction directory; unknown retained assets require operator review rather than automatic deletion. Do not start a different release while a previous rollback remains unresolved.
 
 Release journals and retained rollback packages/environments are owner-only and remain available for recovery; they are not browser storage. Do not delete an unresolved transaction or its rollback assets. Maintenance credentials are short-lived, stored only in private files, and revoked after success, rollback, or abandonment. Browser credential files and temporary verification output are removed automatically. Preserve the private operator state when moving the release checkout; it records the latest verified artifact for each target.
 

@@ -43,8 +43,7 @@ async function clearLocalData() {
   clearPendingRequestAttempts();
   clearSessionActionAttempts();
   if (typeof window.clearLauncherAttempts === 'function') window.clearLauncherAttempts();
-  usageLoadedAt = 0;
-  usageMachineId = null;
+  ompDeckUsage.invalidate();
   ompDeckImages.clear();
   if ('caches' in window) {
     try {
@@ -71,6 +70,7 @@ const {
   renderFleet,
   applyFleetSnapshot,
   applyFleetSession,
+  applyFleetPatch,
   removeFleetSession,
 } = createDeckRendering({
   state,
@@ -165,10 +165,10 @@ window.addEventListener('omp-deck-machines-changed', event => {
     if (
       state.selectedMachineId !== previousSelection
       || addedIds.includes(state.selectedMachineId)
+      || (event.detail?.renewedIds || []).includes(state.selectedMachineId)
     ) {
-      usageLoadedAt = 0;
+      ompDeckUsage.machineChanged();
       void loadLaunchableProjects();
-      void refreshUsage();
     }
     startEventStreams();
     renderFleet();
@@ -195,9 +195,8 @@ window.addEventListener('omp-deck-coordinator-status', event => {
 
 el['machine-select'].addEventListener('change', () => {
   state.selectedMachineId = el['machine-select'].value || null;
-  usageLoadedAt = 0;
+  ompDeckUsage.machineChanged();
   void loadLaunchableProjects();
-  void refreshUsage();
 });
 el['fleet-reload-button'].addEventListener('click', () => location.reload());
 
@@ -246,6 +245,7 @@ async function recoverLiveConnections() {
   if (generation !== liveRecoveryGeneration || !ompDeckApi.authenticated()) return;
   restartEventStreams();
   void refresh(null, {replace: true});
+  ompDeckUsage.foreground();
   if (state.selectedMachineId) recoverLaunchableProjects();
   ompDeckImages.recover();
   void composer.recover(selectedAgent());
@@ -392,6 +392,8 @@ el['scroll-newest'].addEventListener('click', () => {
 function resetApplication() {
   liveRecoveryGeneration += 1;
   stopLiveConnections();
+  ompDeckUsage.stop();
+  state.nodes.clear();
   state.reloadRequiredMachines.clear();
   el['fleet-reload'].hidden = true;
   clearInterval(state.recoveryTimer);
@@ -454,7 +456,7 @@ async function showApplication() {
   renderMachineControls();
   startEventStreams();
   void loadLaunchableProjects();
-  void refreshUsage();
+  ompDeckUsage.start();
   if (!state.recoveryTimer) state.recoveryTimer = setInterval(refresh, 5 * 60_000);
 }
 

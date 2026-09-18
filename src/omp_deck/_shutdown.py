@@ -64,12 +64,18 @@ def _close_runtimes(
             errors.append(f"{runtime.session_id}: session did not become idle")
             continue
         try:
-            if runtime.adapter is not None:
-                _call_with_timeout(
-                    runtime.adapter.close,
-                    _remaining(deadline),
-                    label=f"{runtime.session_id} transport close",
-                )
+            try:
+                if runtime.adapter is not None:
+                    _call_with_timeout(
+                        runtime.adapter.close,
+                        _remaining(deadline),
+                        label=f"{runtime.session_id} transport close",
+                    )
+            finally:
+                operation_lock.release()
+            wait_closed = getattr(runtime.adapter, "wait_closed", None)
+            if callable(wait_closed):
+                wait_closed(timeout=_remaining(deadline))
         except Exception as error:
             manager.model.set_transport(
                 runtime.session_id,
@@ -80,8 +86,6 @@ def _close_runtimes(
             )
             errors.append(f"{runtime.session_id}: {error}")
             continue
-        finally:
-            operation_lock.release()
         with manager._lock:
             if manager._runtimes.get(runtime.session_id) is runtime:
                 manager._runtimes.pop(runtime.session_id)
@@ -103,17 +107,19 @@ def _raise_errors(label: str, errors: list[str]) -> None:
 def close_rpc_manager(
     manager: Any,
     runtimes: Iterable[Any],
-    scheduler: Any,
+    schedulers: Iterable[Any],
     timeout: float,
     lock_for: Callable[[str], Any],
 ) -> None:
     if timeout < 0:
         raise ValueError("timeout must not be negative")
     deadline = time.monotonic() + timeout
-    try:
-        scheduler.close(timeout=0)
-    except RuntimeError:
-        pass
+    schedulers = tuple(schedulers)
+    for scheduler in schedulers:
+        try:
+            scheduler.close(timeout=0)
+        except RuntimeError:
+            pass
     errors = _close_runtimes(
         manager,
         runtimes,
@@ -122,10 +128,11 @@ def close_rpc_manager(
         failure_reason="close failed",
         success_reason="closed",
     )
-    try:
-        scheduler.close(timeout=_remaining(deadline))
-    except Exception as error:
-        errors.append(str(error))
+    for scheduler in schedulers:
+        try:
+            scheduler.close(timeout=_remaining(deadline))
+        except Exception as error:
+            errors.append(str(error))
     _raise_errors("RPC session", errors)
 
 

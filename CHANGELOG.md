@@ -30,8 +30,19 @@
 - Raise image attachments to four images totaling 20 MiB for managed RPC and extension 1.3.4, or 10 MiB for writable Collab. Already-running older extensions retain 700 KiB until an idle restart and resume. Allow more time for large image transfers and make full recovery-storage errors actionable.
 - When History is enabled, distinguish live sessions from saved conversations with matching names; number only duplicates of the same kind. Hide these labels when History is disabled.
 - Keep successful sends to a compact Accepted status without duplicate receipt cards or manual cleanup. Automatically reclaim accepted recovery storage as needed while retaining explicit recovery for unresolved sends.
+- Store request recovery content separately from compact deduplication metadata, with explicit capacity reservation, bounded dismissed-request history, and crash-safe submission ownership. The ledger now uses schema 3; older rollback packages must be replaced with schema-compatible artifacts before a guarded rollout.
+- Keep installed and retained extension sources outside mutable Python environments. Linux services retain the resolved OMP executable path; rerun setup if that path changes.
 
 ### Fixed
+
+- Preserve combined restored drafts, wait for selected images before sending, retain image-read failures across redraws, and clear the visible composer when local drafts are cleared.
+- Bound stalled Ask submissions, restore their controls after uncertainty, and preserve native Collab single-checkbox behavior and remaining pending requests.
+- Refresh usage on normal dashboard recovery; preserve structured task text, linked inline code, conversation selection, accessible unread labels, and image previews at cache capacity.
+- Keep wide conversation tables horizontally scrollable and keyboard-accessible instead of clipping their later columns.
+- Recover idle managed-process exits, failed RPC readers, and imported Collab sessions after startup outages without treating healthy snapshot contention as a disconnect. Preserve native branch and switch cancellation.
+- Fence delayed extension commands to their original conversation and restore live background-job reporting. Extension 1.3.6 requires an idle restart and resume of already-running terminal sessions.
+- Reject corrupt persisted authentication during health checks, preserve request outcomes across backward clock changes, and reject stale snapshots without blocking other sessions on cursor storage.
+- Resume interrupted release-environment swaps safely, reconcile the running coordinator during rollback, and reject stale rollback after verification or a reused process identity.
 
 - Clear successful-send feedback after three seconds or when starting another draft or switching sessions. Keep older acknowledgements and timers from overwriting newer send progress or failures.
 - Keep portrait and landscape attachment previews inside their cards, display the whole image, and keep remove buttons visible and reachable on phones.

@@ -279,6 +279,33 @@ def _result(state: str, installed: dict[str, str] | None = None, deadline: float
     return value
 
 
+def _live_identity(profile: dict[str, Any]) -> dict[str, str]:
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{profile['port']}/api/client-config",
+        headers={"Host": f"127.0.0.1:{profile['port']}"},
+    )
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=10) as response:
+            value = json.loads(response.read(64 * 1024))
+            status = response.status
+    except Exception as error:
+        raise CoordinatorError("running coordinator identity check failed") from error
+    build = value.get("build") if isinstance(value, dict) else None
+    if (
+        status != 200
+        or not isinstance(value, dict)
+        or value.get("mode") != "coordinator"
+        or not isinstance(build, dict)
+        or set(build) != {"version", "revision"}
+        or not isinstance(build["version"], str)
+        or not isinstance(build["revision"], str)
+        or _REV.fullmatch(build["revision"]) is None
+    ):
+        raise CoordinatorError("running coordinator identity is invalid")
+    return build
+
+
 def execute(action: str, request: dict[str, Any]) -> dict[str, Any]:
     profile, root, guard = _context(request)
     manifest, lock = guard / "coordinator-state.json", guard / "coordinator.lock"
@@ -294,15 +321,12 @@ def execute(action: str, request: dict[str, Any]) -> dict[str, Any]:
         state = _load(manifest)
         if action == "status":
             unit_hash = _hash(profile["unit"])
-            if unit_hash == state["newUnitSha256"]:
-                environment = Path(state["releaseRoot"])
-            elif unit_hash == state["oldUnitSha256"]:
-                environment = profile["tool_root"]
-            else:
+            if unit_hash not in {state["newUnitSha256"], state["oldUnitSha256"]}:
                 raise CoordinatorError("coordinator unit has unrelated changes")
             if not _active(profile):
                 raise CoordinatorError("coordinator service is not running")
-            installed = _identity(environment, profile)
+            _health(profile)
+            installed = _live_identity(profile)
             return _result(state["decision"], installed, state.get("deadline"))
         if action == "deploy":
             return _deploy(request, profile, root, state, manifest)
@@ -381,7 +405,10 @@ def _deploy(
     request: dict[str, Any], profile: dict[str, Any], root: Path, state: dict[str, Any], manifest: Path
 ) -> dict[str, Any]:
     if state["decision"] == "pending":
-        installed = _identity(Path(state["releaseRoot"]), profile)
+        if not _active(profile):
+            raise CoordinatorError("pending coordinator is not running")
+        _health(profile)
+        installed = _live_identity(profile)
         expected = {"version": state["candidate"]["wheelVersion"], "revision": state["candidate"]["revision"]}
         if installed != expected:
             raise CoordinatorError("pending coordinator identity mismatch")
@@ -418,7 +445,7 @@ def _deploy(
         except BaseException as rollback_error:
             raise CoordinatorError("deploy failed and coordinator rollback was incomplete") from rollback_error
         raise CoordinatorError("deploy failed and coordinator was rolled back") from error
-    installed = _identity(Path(state["releaseRoot"]), profile)
+    installed = _live_identity(profile)
     if installed != candidate_identity:
         _rollback(profile, state, manifest)
         raise CoordinatorError("running coordinator identity mismatch")
@@ -440,10 +467,10 @@ def _verify(profile: dict[str, Any], root: Path, state: dict[str, Any], manifest
     if _hash(profile["unit"]) != state["newUnitSha256"] or not _active(profile):
         raise CoordinatorError("candidate coordinator service identity changed")
     _health(profile)
-    installed = _identity(Path(state["releaseRoot"]), profile)
+    installed = _live_identity(profile)
     expected = {"version": state["candidate"]["wheelVersion"], "revision": state["candidate"]["revision"]}
     if installed != expected:
-        raise CoordinatorError("installed coordinator is not the candidate")
+        raise CoordinatorError("running coordinator is not the candidate")
     state["decision"] = "verified"
     state["deadline"] = None
     state["verifiedAt"] = time.time()
@@ -452,42 +479,6 @@ def _verify(profile: dict[str, Any], root: Path, state: dict[str, Any], manifest
 
 
 def _rollback(profile: dict[str, Any], state: dict[str, Any], manifest: Path) -> dict[str, Any]:
-    if state["decision"] == "rolledback":
-        return _result(
-            "rolledback", {"version": state["rollback"]["wheelVersion"], "revision": state["rollback"]["revision"]}
-        )
-    if state["decision"] == "verified":
-        raise CoordinatorError("verified coordinator release cannot be rolled back by its expired guard")
-    try:
-        _guard(state, profile)
-        current = _hash(profile["unit"])
-        if current not in {state["oldUnitSha256"], state["newUnitSha256"]}:
-            raise CoordinatorError("coordinator unit has unrelated changes")
-        backup = manifest.parent / "coordinator-unit.backup"
-        if _hash(backup, private=True) != state["oldUnitSha256"]:
-            raise CoordinatorError("coordinator unit backup changed")
-        auth_before = _hash(profile["state_root"] / "auth.json", private=True)
-        if current != state["oldUnitSha256"]:
-            _atomic(profile["unit"], _read(backup, private=True), state["unitMode"])
-            _systemctl(profile, "daemon-reload")
-            _systemctl(profile, "restart", profile["service_name"])
-        if not _active(profile):
-            raise CoordinatorError("rolled back coordinator did not start")
-        _health(profile)
-        if _hash(profile["state_root"] / "auth.json", private=True) != auth_before:
-            raise CoordinatorError("coordinator authentication changed during rollback")
-        installed = _identity(profile["tool_root"], profile)
-        expected = {"version": state["rollback"]["wheelVersion"], "revision": state["rollback"]["revision"]}
-        if installed != expected:
-            raise CoordinatorError("rollback coordinator identity mismatch")
-        _guard(state, profile)
-        state["decision"] = "rolledback"
-        state["deadline"] = None
-        state["rolledBackAt"] = time.time()
-        _save(manifest, state)
-        return _result("rolledback", installed)
-    except BaseException:
-        state["decision"] = "rollback_failed"
-        state["deadline"] = None
-        _save(manifest, state)
-        raise
+    from .coordinator_rollback import rollback
+
+    return rollback(profile, state, manifest)

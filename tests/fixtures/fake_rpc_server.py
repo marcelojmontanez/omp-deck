@@ -115,6 +115,19 @@ elif SCENARIO == "ui_during_command":
             response(request, {"text": "branched", "cancelled": False})
         else:
             response(request)
+elif SCENARIO == "live_reader_failure":
+    request = read_request()
+    if request["type"] != "set_subagent_subscription":
+        raise RuntimeError(f"unexpected subscription request: {request!r}")
+    response(request)
+    sys.stdout.write("not-json\n")
+    sys.stdout.flush()
+    while True:
+        try:
+            read_request()
+        except EOFError:
+            break
+        time.sleep(0.01)
 elif SCENARIO in {"contract", "bad_subagents"}:
     progress = {
         "index": 0,

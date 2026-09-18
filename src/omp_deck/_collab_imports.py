@@ -59,26 +59,28 @@ class CollabImportCoordinator:
                 raise TerminalCommandConflict("requestId was already used for another Collab import") from None
             if persisted is not None:
                 return self._result(persisted)
-            self.requests.reserve(scope, request_id, request_fingerprint)
-            try:
-                session = self.add(link, title=title)
-            except CollabImportError as error:
-                if not error.outcome_known:
-                    raise
-                result = {
+            with self.requests.admission(scope, request_id, request_fingerprint) as persisted:
+                if persisted is not None:
+                    return self._result(persisted)
+                try:
+                    session = self.add(link, title=title)
+                except CollabImportError as error:
+                    if not error.outcome_known:
+                        raise
+                    result = {
+                        "requestId": request_id,
+                        "status": "failed",
+                        "errorCode": "collab_unavailable",
+                    }
+                    self.requests.complete(scope, request_id, request_fingerprint, result)
+                    return result
+                durable = {
                     "requestId": request_id,
-                    "status": "failed",
-                    "errorCode": "collab_unavailable",
+                    "status": "accepted",
+                    "sessionId": session["id"],
                 }
-                self.requests.complete(scope, request_id, request_fingerprint, result)
-                return result
-            durable = {
-                "requestId": request_id,
-                "status": "accepted",
-                "sessionId": session["id"],
-            }
-            self.requests.complete(scope, request_id, request_fingerprint, durable)
-            return {**durable, "session": session}
+                self.requests.complete(scope, request_id, request_fingerprint, durable)
+                return {**durable, "session": session}
 
     def add(
         self,

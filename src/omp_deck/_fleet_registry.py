@@ -26,8 +26,11 @@ def registry_session(record: Mapping[str, Any], existing: Mapping[str, Any] | No
         "capabilities": platform_capabilities(adapter_kind),
         "attachmentLimits": platform_attachment_limits(adapter_kind),
         "messages": [],
+        "streamingMessage": None,
+        "deliveryError": None,
         "todos": [],
         "subagents": [],
+        "subagentError": None,
         "pendingUiRequest": None,
         "unread": False,
         "updatedAt": str(record["updatedAt"]),
@@ -43,6 +46,8 @@ def registry_session(record: Mapping[str, Any], existing: Mapping[str, Any] | No
         "_activeTools": {},
         "_toolActivityOverflow": False,
         "_extensionThinkingControl": False,
+        "_readRevision": 0,
+        "_readCursor": None,
     }
     if existing is not None:
         session.update(_retained_session_state(existing))
@@ -67,9 +72,14 @@ def _retained_session_state(existing: Mapping[str, Any]) -> dict[str, Any]:
         "state": existing.get("state", "disconnected"),
         "transport": copy.deepcopy(existing["transport"]),
         "messages": copy.deepcopy(existing.get("messages", [])),
+        "streamingMessage": copy.deepcopy(existing.get("streamingMessage")),
+        "deliveryError": copy.deepcopy(existing.get("deliveryError")),
+        "_readRevision": existing.get("_readRevision", 0),
+        "_readCursor": existing.get("_readCursor"),
         "attachmentLimits": copy.deepcopy(existing.get("attachmentLimits")),
         "todos": copy.deepcopy(existing.get("todos", [])),
         "subagents": copy.deepcopy(existing.get("subagents", [])),
+        "subagentError": existing.get("subagentError"),
         "pendingUiRequest": copy.deepcopy(existing.get("pendingUiRequest")),
         "unread": bool(existing.get("unread", False)),
         "workingOn": existing.get("workingOn"),
@@ -90,6 +100,11 @@ def _retained_live_state(existing: Mapping[str, Any]) -> dict[str, Any]:
         "_activeTools": copy.deepcopy(existing.get("_activeTools", {})),
         "_toolActivityOverflow": bool(existing.get("_toolActivityOverflow", False)),
         "_extensionThinkingControl": bool(existing.get("_extensionThinkingControl", False)),
+        "_rpcMessageCount": existing.get("_rpcMessageCount", 0),
+        "_rpcLastMessageKey": existing.get("_rpcLastMessageKey"),
+        "_rpcLastMessageId": existing.get("_rpcLastMessageId"),
+        "_rpcStreamingIndex": existing.get("_rpcStreamingIndex"),
+        "_rpcStreamingKey": existing.get("_rpcStreamingKey"),
     }
 
 

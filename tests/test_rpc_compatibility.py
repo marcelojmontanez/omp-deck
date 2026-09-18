@@ -14,7 +14,8 @@ from omp_rpc import (
     RpcTimeoutError,
 )
 
-from omp_deck.rpc_adapter import AdapterError, SessionAdapter
+from omp_deck._rpc_errors import AdapterDisconnectedError, AdapterError
+from omp_deck.rpc_adapter import SessionAdapter
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_rpc_server.py"
 
@@ -42,6 +43,9 @@ class RpcCompatibilityTests(unittest.TestCase):
             try:
                 adapter.start()
                 snapshot = adapter.snapshot()
+                deadline = time.monotonic() + 1
+                while not any(event.type == "subagents" for event in observed) and time.monotonic() < deadline:
+                    time.sleep(0.01)
             finally:
                 adapter.close()
             self.assertEqual([(item["id"], item["status"]) for item in snapshot.subagents], [("worker-1", "running")])
@@ -51,6 +55,11 @@ class RpcCompatibilityTests(unittest.TestCase):
             progress = next(event for event in observed if event.type == "subagent_progress")
             self.assertEqual((lifecycle.payload["id"], lifecycle.payload["status"]), ("worker-1", "started"))
             self.assertEqual(progress.payload["progress"]["id"], "worker-1")
+            normalized = next(event for event in observed if event.type == "subagents")
+            self.assertEqual(
+                [(item["id"], item["status"]) for item in normalized.payload["subagents"]],
+                [("worker-1", "running")],
+            )
             self.assertLess(lifecycle.sequence, progress.sequence)
             self.assertGreaterEqual(snapshot.sequence, progress.sequence)
             subscription = next(
@@ -106,6 +115,23 @@ class RpcCompatibilityTests(unittest.TestCase):
             with self.assertRaises(AdapterError) as caught:
                 adapter.snapshot()
             self.assertEqual(caught.exception.kind, "protocol")
+        finally:
+            adapter.close()
+
+    def test_fatal_sdk_reader_closure_is_observed_while_child_remains_alive(self):
+        adapter = SessionAdapter(lambda: self.client("live_reader_failure"))
+        try:
+            adapter.start()
+            deadline = time.monotonic() + 1
+            while True:
+                try:
+                    adapter.check_lifecycle(0.05)
+                except AdapterDisconnectedError as error:
+                    self.assertEqual(error.kind, "process_exit")
+                    self.assertIn("Failed to decode RPC output", str(error))
+                    break
+                if time.monotonic() >= deadline:
+                    self.fail("fatal SDK reader closure was not observed")
         finally:
             adapter.close()
 

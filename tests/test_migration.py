@@ -8,6 +8,7 @@ from omp_deck.migration import apply_migration, migration_plan
 from omp_deck.projects import resolve_project_path
 from omp_deck.read_cursors import CursorStore
 from omp_deck.registry_store import RegistryStore
+from omp_deck.request_ledger import RequestLedger
 from omp_deck.settings import Settings
 
 
@@ -126,6 +127,41 @@ class MigrationTests(unittest.TestCase):
 
         self.assertEqual(result["sessionsImported"], 0)
         self.assertTrue((self.state / ".omp-deck-owned").is_file())
+
+    def test_repeated_migration_preserves_current_recovery_and_admission_directories(self):
+        ledger = RequestLedger(self.state / "requests.json")
+        recovery = {
+            "kind": "message",
+            "sessionId": "session",
+            "action": "sendMessage",
+            "message": "retained draft",
+            "images": [],
+        }
+        with ledger.admission("rpc-command:session", "message", "a" * 64, recovery=recovery):
+            ledger.complete(
+                "rpc-command:session",
+                "message",
+                "a" * 64,
+                {"requestId": "message", "status": "accepted"},
+            )
+        apply_migration(self.settings)
+        apply_migration(self.settings)
+        self.assertEqual(ledger.deliveries("session")[0]["message"], "retained draft")
+        self.assertEqual(
+            ledger.lookup("rpc-command:session", "message", "a" * 64),
+            {"requestId": "message", "status": "accepted"},
+        )
+
+    def test_auxiliary_storage_adoption_rejects_unknown_private_files(self):
+        recovery_root = self.state / ".requests.json.recoveries"
+        recovery_root.mkdir(mode=0o700)
+        unrelated = recovery_root / "unrelated.txt"
+        unrelated.write_text("preserve me", encoding="utf-8")
+        unrelated.chmod(0o600)
+        with self.assertRaisesRegex(RuntimeError, "unknown entry"):
+            apply_migration(self.settings)
+        self.assertEqual(unrelated.read_text(encoding="utf-8"), "preserve me")
+        self.assertFalse((self.state / ".omp-deck-owned").exists())
 
     def test_unsafe_metadata_and_project_escape_are_ignored(self):
         outside = self.root / "outside"

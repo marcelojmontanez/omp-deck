@@ -4,6 +4,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from ._extension_jobs import normalize_async_jobs
 from ._fleet_projection import (
     MAX_MESSAGE_BYTES,
     MAX_MESSAGES,
@@ -101,8 +102,13 @@ def project_extension_event(session: dict[str, Any], session_id: str, kind: str,
         _apply_history(session, session_id, payload)
     elif kind == "tool":
         _apply_tool(session, payload)
+    elif kind == "async":
+        session["subagents"] = normalize_async_jobs(payload.get("snapshot"))
     elif kind == "lifecycle":
         lifecycle_state = payload.get("state")
+        lifecycle_snapshot = payload.get("snapshot")
+        if lifecycle_state == "agent_end" and isinstance(lifecycle_snapshot, Mapping):
+            session["subagents"] = normalize_async_jobs(lifecycle_snapshot.get("async"))
         if lifecycle_state == "agent_start":
             clear_activity(session)
             session["state"] = "working"

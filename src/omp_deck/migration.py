@@ -10,6 +10,7 @@ from .installation_paths import OWNERSHIP_MARKER, has_ownership_marker, installa
 from .projects import resolve_project_path
 from .read_cursors import CursorStore
 from .registry_store import RegistryStore
+from .request_ledger import RequestLedger
 
 _LEGACY_METADATA = re.compile(r"[0-9a-f-]{36}\.\d+\.[^.]+\.sock\.json")
 _MAX_METADATA_BYTES = 64 * 1024
@@ -186,6 +187,7 @@ def _validate_adoptable_state_root(settings) -> None:
         OWNERSHIP_MARKER,
     }
     count = 0
+    requests = RequestLedger(root / "requests.json")
     pending = [root]
     while pending:
         directory = pending.pop()
@@ -205,6 +207,13 @@ def _validate_adoptable_state_root(settings) -> None:
                         entry.name in allowed_files or (_RECOVERY_FILE.fullmatch(entry.name) and _owned_file_safe(path))
                     ):
                         continue
+                    elif entry.is_dir(follow_symlinks=False):
+                        auxiliary_count = requests.validate_auxiliary_directory(path)
+                        if auxiliary_count is None:
+                            raise RuntimeError("legacy state root contains unknown entries")
+                        count += auxiliary_count
+                        if count > 10_000:
+                            raise RuntimeError("legacy state root has too many entries")
                     else:
                         raise RuntimeError("legacy state root contains unknown entries")
                 elif entry.is_dir(follow_symlinks=False):

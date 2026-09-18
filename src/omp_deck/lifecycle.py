@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ._linux_service import service_unit
 from ._plugin_inventory import plugin_record
+from ._plugin_lifecycle import PLUGIN_NAME, plugin_storage_root
 from .installation_paths import (
     InstallationPaths,
     has_ownership_marker,
@@ -23,10 +24,6 @@ from .installation_paths import (
     validate_owned_root,
     validate_ownership_claim,
 )
-
-PLUGIN_VERSION = "1.3.5"
-PLUGIN_NAME = "omp-deck"
-PLUGIN_ROOT = Path(__file__).resolve().parent / "plugin"
 
 
 @dataclass(frozen=True)
@@ -170,10 +167,13 @@ def restore_service_state(snapshot, *, runner=None):
         return adapter.restore_service_state(snapshot, runner=runner or run)
     runner = runner or run
     paths = snapshot.installation or installation_paths()
-    runner(
+    stopped = runner(
         ["systemctl", "--user", "stop", "omp-deck.service"],
         check=False,
+        capture_output=True,
     )
+    if stopped.returncode:
+        raise RuntimeError("cannot stop the OMP Deck service for rollback")
     _restore_service_files(snapshot, paths)
     if snapshot.installation is not None:
         for root in reversed(snapshot.roots):
@@ -213,54 +213,6 @@ def _restore_service_files(snapshot, paths):
             path.unlink(missing_ok=True)
         else:
             write_atomic(path, content, mode)
-
-
-def plugin_installed(settings, *, runner=None):
-    return plugin_record(settings.omp_bin, PLUGIN_NAME, runner=runner or run) is not None
-
-
-def backup_plugin(settings, *, runner=None):
-    record = plugin_record(settings.omp_bin, PLUGIN_NAME, runner=runner or run)
-    try:
-        source = Path(record["path"]).resolve(strict=True)
-    except (KeyError, TypeError, ValueError, OSError):
-        return None
-    state_root = Path(settings.state_root)
-    prefix = f".{state_root.name}-setup-rollback-"
-    if source.name == "plugin" and source.parent.name.startswith(prefix):
-        return source
-    root = Path(tempfile.mkdtemp(prefix=prefix, dir=state_root.parent))
-    backup = root / "plugin"
-    try:
-        shutil.copytree(
-            source,
-            backup,
-            ignore=shutil.ignore_patterns("node_modules"),
-        )
-    except BaseException:
-        shutil.rmtree(root, ignore_errors=True)
-        raise
-    return backup
-
-
-def restore_plugin(settings, backup, *, runner=None):
-    runner = runner or run
-    if backup is None:
-        if plugin_installed(settings, runner=runner):
-            return remove_plugin(settings.omp_bin, runner=runner)
-        return None
-    return runner([settings.omp_bin, "plugin", "install", str(backup)])
-
-
-def discard_plugin_backup(backup):
-    if backup is None:
-        return
-    root = backup.parent
-    shutil.rmtree(backup, ignore_errors=True)
-    try:
-        root.rmdir()
-    except OSError:
-        pass
 
 
 def run(command, *, check=True, capture_output=False):
@@ -336,46 +288,6 @@ def preflight_service_install(settings, config_path):
     return paths
 
 
-def install_plugin(settings, *, runner=run):
-    if os.name == "nt":
-        from ._private_state import ensure_private_directory
-
-        ensure_private_directory(settings.socket_root)
-    if not (PLUGIN_ROOT / "package.json").is_file():
-        raise RuntimeError("bundled OMP Deck plugin is missing")
-    runner([settings.omp_bin, "plugin", "install", str(PLUGIN_ROOT)])
-    doctor = runner(
-        [settings.omp_bin, "plugin", "doctor", "--json"],
-        check=False,
-        capture_output=True,
-    )
-    try:
-        checks = json.loads(doctor.stdout)
-    except (TypeError, json.JSONDecodeError):
-        checks = None
-    plugin_check = (
-        next(
-            (item for item in checks if isinstance(item, dict) and item.get("name") == f"plugin:{PLUGIN_NAME}"),
-            None,
-        )
-        if isinstance(checks, list)
-        else None
-    )
-    if (
-        not isinstance(checks, list)
-        or not isinstance(plugin_check, dict)
-        or plugin_check.get("status") != "ok"
-        or not plugin_status(settings, runner=runner)
-    ):
-        raise RuntimeError("OMP Deck plugin validation failed")
-
-
-def remove_plugin(omp_bin="omp", *, runner=run):
-    if plugin_record(omp_bin, PLUGIN_NAME, runner=runner) is None:
-        return None
-    return runner([omp_bin, "plugin", "uninstall", PLUGIN_NAME])
-
-
 def install_service(settings, config_path, *, runner=run, start=True):
     adapter = _service_adapter()
     if adapter is not None:
@@ -387,7 +299,7 @@ def install_service(settings, config_path, *, runner=run, start=True):
         )
     preflight_service_install(settings, config_path)
     paths = prepare_installation(settings, config_path)
-    write_atomic(paths.unit_path, service_unit(paths.config_path), 0o644)
+    write_atomic(paths.unit_path, service_unit(paths.config_path, settings.omp_bin), 0o644)
     runner(["systemctl", "--user", "daemon-reload"])
     runner(["systemctl", "--user", "enable", "omp-deck.service"])
     if start:
@@ -438,14 +350,18 @@ def purge_installation(omp_bin="omp", *, runner=run):
     if paths.state_root != paths.config_root:
         validate_owned_root(paths.state_root, approved)
     validate_owned_root(paths.install_root, (paths.install_root,))
-    plugin_present = plugin_record(omp_bin, PLUGIN_NAME, runner=runner) is not None
+    plugin_root = plugin_storage_root()
+    if plugin_root.exists() or plugin_root.is_symlink():
+        validate_owned_root(plugin_root, (plugin_root,))
+    plugin = plugin_record(omp_bin, PLUGIN_NAME, runner=runner)
     paths = remove_service(runner=runner)
-    if plugin_present:
+    if plugin is not None:
         runner([omp_bin, "plugin", "uninstall", PLUGIN_NAME])
     remove_owned_root(paths.config_root, approved)
     if paths.state_root != paths.config_root:
         remove_owned_root(paths.state_root, approved)
     remove_owned_root(paths.install_root, (paths.install_root,))
+    remove_owned_root(plugin_root, (plugin_root,))
 
 
 def check_health(settings, *, timeout=5.0):
@@ -481,12 +397,3 @@ def check_health(settings, *, timeout=5.0):
         if remaining > 0:
             time.sleep(min(0.1, remaining))
     raise RuntimeError(f"OMP Deck health check failed: {last_error}") from last_error
-
-
-def plugin_status(settings, *, runner=run):
-    record = plugin_record(settings.omp_bin, PLUGIN_NAME, runner=runner)
-    return bool(
-        record
-        and record.get("version") == PLUGIN_VERSION
-        and (record.get("manifest") or {}).get("version") == PLUGIN_VERSION
-    )

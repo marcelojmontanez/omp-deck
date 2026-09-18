@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -12,11 +13,10 @@ from . import check_receipt
 from .node_artifacts import inspect_wheel
 from .storage import ReleaseError
 
-# Until a reviewed migration is implemented, changed persistence/wire contracts
-# are not presumed safe merely because HTTP health succeeds.
+# Storage compatibility is negotiated through each artifact's published API.
+# Remaining persistence and wire contracts stay byte-identical until they gain reviewed migrations.
 CONTRACT_FILES = (
     "omp_deck/_auth_state.py",
-    "omp_deck/request_ledger.py",
     "omp_deck/registry_store.py",
     "omp_deck/coordinator_store.py",
     "omp_deck/fleet_protocol.py",
@@ -38,7 +38,51 @@ def artifact(path: Path) -> dict:
     }
 
 
+def _storage_compatibility(wheel: Path) -> dict:
+    script = (
+        "import json,sys; "
+        "sys.path.insert(0,sys.argv[1]); "
+        "import omp_deck; "
+        "print(json.dumps(omp_deck.storage_compatibility(),sort_keys=True))"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", script, str(wheel)],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        value = json.loads(result.stdout)
+    except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ReleaseError("incompatible storage schema: artifact compatibility API unavailable") from error
+    requests = value.get("requests") if isinstance(value, dict) and set(value) == {"requests"} else None
+    readable = requests.get("read") if isinstance(requests, dict) else None
+    writable = requests.get("write") if isinstance(requests, dict) else None
+    if (
+        result.returncode
+        or not isinstance(requests, dict)
+        or set(requests) != {"read", "write"}
+        or not isinstance(readable, list)
+        or not readable
+        or any(not isinstance(item, int) or isinstance(item, bool) or item < 1 for item in readable)
+        or len(readable) != len(set(readable))
+        or not isinstance(writable, int)
+        or isinstance(writable, bool)
+        or writable < 1
+    ):
+        raise ReleaseError("incompatible storage schema: artifact compatibility API unavailable")
+    return {"requests": {"read": set(readable), "write": writable}}
+
+
 def compatible(candidate: Path, rollback: Path) -> None:
+    candidate_storage = _storage_compatibility(candidate)["requests"]
+    rollback_storage = _storage_compatibility(rollback)["requests"]
+    if (
+        candidate_storage["write"] not in rollback_storage["read"]
+        or rollback_storage["write"] not in candidate_storage["read"]
+    ):
+        raise ReleaseError("incompatible storage schema between candidate and rollback artifacts")
     with zipfile.ZipFile(candidate) as new, zipfile.ZipFile(rollback) as old:
         for name in CONTRACT_FILES:
             try:

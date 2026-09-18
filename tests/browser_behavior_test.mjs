@@ -211,31 +211,50 @@ test('keeps message content as plain text data without generating HTML', () => {
   assert.equal(projected.session.activity.some(item => /&lt;|&gt;|<span|<div/.test(item.detail)), false);
 });
 
-test('formats todo phases and statuses as deterministic plain text', () => {
+test('adds a normalized streaming message without replacing completed activity', () => {
+  const {projectSession} = loadProjection();
+  const messages = [{
+    id: 'complete',
+    role: 'assistant',
+    content: [{type: 'text', text: 'Completed reply'}],
+    createdAt: '2026-08-20T12:00:00Z',
+  }];
+  const first = projectSession(session({messages}));
+  const streaming = projectSession(session({
+    messages,
+    streamingMessage: {
+      id: 'streaming',
+      role: 'assistant',
+      content: [{type: 'text', text: 'Partial reply'}],
+      createdAt: '2026-08-20T12:01:00Z',
+    },
+  }), null, first);
+  const settled = projectSession(session({messages, streamingMessage: null}), null, streaming);
+
+  assert.deepEqual(Array.from(streaming.session.activity, item => item.detail), [
+    'Completed reply', 'Partial reply',
+  ]);
+  assert.deepEqual(Array.from(settled.session.activity, item => item.detail), ['Completed reply']);
+});
+
+test('keeps canonical todo objects through projection and structured rendering', () => {
   const { projectSession } = loadProjection();
-  const projected = projectSession(session({ todos: [
-    { phase: 'Plan', text: 'Read API', status: 'completed' },
-    { phase: 'Plan', title: 'Confirm scope', status: 'in_progress' },
+  const todos = [
+    { phase: 'Plan: API', text: 'Read API\nwithout reparsing', status: 'completed' },
+    { phase: 'Plan: API', title: 'Confirm <scope>', status: 'in_progress' },
     { group: 'Ship', content: 'Deploy safely', status: 'blocked' },
     { group: 'Ship', text: 'Announce', done: true },
-  ] }));
+  ];
+  const projected = projectSession(session({todos}));
+  assert.deepEqual(JSON.parse(JSON.stringify(projected.session.todos)), todos);
 
-  assert.equal(projected.session.todo,
-    '  Plan:\n' +
-    '    - [X] Read API\n' +
-    '    - [ ] Confirm scope (in progress)\n' +
-    '  Ship:\n' +
-    '    - [ ] Deploy safely (blocked)\n' +
-    '    - [X] Announce');
-  assert.equal(projected.session.todo.includes('<'), false);
-});
-test('renders task completion as a semantic CSP-safe progress element', () => {
-  const html = loadTodoUi().render(
-    '  Build:\n    - [X] First\n    - [ ] Second\n    - [ ] Third\n    - [ ] Fourth',
-    value => value,
-  );
-
-  assert.match(html, /<progress class="todo-progress" max="4" value="1"[^>]*>25%<\/progress>/);
+  const html = loadTodoUi().render(projected.session.todos, value => String(value)
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;'));
+  assert.match(html, /<h3>Plan: API<\/h3>/);
+  assert.match(html, /Read API\nwithout reparsing/);
+  assert.match(html, /Confirm &lt;scope&gt;/);
+  assert.match(html, /<progress class="todo-progress" max="4" value="2"[^>]*>50%<\/progress>/);
+  assert.equal(loadTodoUi().count(projected.session.todos), 4);
   assert.equal(html.includes('style='), false);
 });
 

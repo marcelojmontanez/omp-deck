@@ -45,6 +45,10 @@ function applyNodeEvent(machineId, raw) {
     removeFleetSession(message.sessionId, generation, machineId);
   } else if (message.payload?.session) {
     applyFleetSession(message.payload.session, generation, machineId);
+  } else if (message.payload?.sessionPatch && typeof message.sessionId === 'string') {
+    if (!applyFleetPatch(message.sessionId, message.payload.sessionPatch, generation, machineId)) {
+      scheduleEventRecovery(machineId);
+    }
   } else {
     scheduleEventRecovery(machineId);
   }

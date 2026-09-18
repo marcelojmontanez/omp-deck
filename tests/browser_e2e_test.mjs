@@ -12,6 +12,8 @@ import {verifySessionActions} from './session_action_cases.mjs';
 import {verifyComposerDeliveryModes} from './composer_delivery_mode_cases.mjs';
 import {verifyComposerFeedback} from './composer_feedback_cases.mjs';
 import {verifyMachineSelector} from './machine_selector_cases.mjs';
+import {verifyBrowserStateRegressions} from './browser_state_cases.mjs';
+import {verifyBrowserSurface} from './browser_surface_cases.mjs';
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const PYTHON = process.env.PYTHON || (
@@ -326,6 +328,8 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   await verifyComposerDeliveryModes(page);
   await verifyComposerFeedback(page);
   await verifyMachineSelector(page);
+  await verifyBrowserStateRegressions(page);
+  await verifyBrowserSurface(page);
 
   const forbiddenRecovery = await page.evaluate(async () => {
     const originalFetch = window.fetch;
@@ -1414,6 +1418,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     };
     try {
       composer.clearLocalData();
+      state.selectedId = 'attachment-limit-session';
       composer.select('attachment-limit-session');
       globalThis.FileReader = ControlledFileReader;
       URL.createObjectURL = () => `blob:limit-${++nextUrl}`;
@@ -1425,6 +1430,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
 
       choose(batch('first'));
       choose(batch('second'));
+      state.selectedId = 'other-attachment-session';
       composer.select('other-attachment-session');
       for (const reader of readers) {
         reader.result = 'data:image/png;base64,aW1hZ2U=';
@@ -1432,6 +1438,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       }
       await new Promise(resolve => setTimeout(resolve, 0));
       const otherRendered = document.getElementById('attachments').children.length;
+      state.selectedId = 'attachment-limit-session';
       composer.select('attachment-limit-session');
       const countReads = readers.length;
       const countRendered = document.getElementById('attachments').children.length;
@@ -1461,6 +1468,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     } finally {
       composer.clearLocalData();
       state.agents = originalAgents;
+      state.selectedId = originalSelection;
       composer.select(originalSelection);
       globalThis.FileReader = OriginalFileReader;
       URL.createObjectURL = originalCreateObjectURL;
@@ -1635,7 +1643,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     try {
       ompDeckApi.request = async (_path, options) => {
         body = JSON.parse(options.body);
-        return {ok: true, status: 202, json: async () => ({})};
+        return {ok: true, status: 202, json: async () => ({requestId: body.requestId, status: 'accepted'})};
       };
       await settlePendingRequest();
     } finally {
@@ -1689,7 +1697,12 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   const cspProgress = await page.evaluate(() => {
     const host = document.createElement('div');
     host.innerHTML = TodoUI.render(
-      '  Build:\n    - [X] First\n    - [ ] Second\n    - [ ] Third\n    - [ ] Fourth',
+      [
+        {phase: 'Build', text: 'First', status: 'completed'},
+        {phase: 'Build', text: 'Second', status: 'pending'},
+        {phase: 'Build', text: 'Third', status: 'pending'},
+        {phase: 'Build', text: 'Fourth', status: 'pending'},
+      ],
       escapeHtml,
     );
     document.body.append(host);
@@ -1771,7 +1784,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
         }
         ids.push(JSON.parse(options.body).requestId);
         if (ids.length === 1) throw new Error('response lost');
-        return {ok: true, status: 202, json: async () => ({})};
+        return {ok: true, status: 202, json: async () => ({requestId: ids.at(-1), status: 'accepted'})};
       };
       await settlePendingRequest();
       await settlePendingRequest();

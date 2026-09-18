@@ -71,13 +71,21 @@ def image_registration(*, legacy=False):
     return value
 
 
+def async_snapshot(*running, recent=()):
+    return {
+        "running": list(running),
+        "recent": list(recent),
+        "delivery": {"queued": 0, "delivering": False, "pendingJobIds": []},
+    }
+
+
 def thinking_snapshot(thinking="high", levels=("off", "low", "medium", "high", "xhigh")):
     return event(
         data={
             "idle": True,
             "pendingMessages": False,
             "model": {"provider": "openai", "id": "gpt"},
-            "async": [],
+            "async": async_snapshot(),
             "thinking": thinking,
             "thinkingLevels": list(levels),
         }
@@ -86,7 +94,14 @@ def thinking_snapshot(thinking="high", levels=("off", "low", "medium", "high", "
 
 def event(sequence=1, kind="snapshot", data=None):
     if data is None:
-        data = {"idle": True, "pendingMessages": False, "model": {"provider": "p", "id": "m"}, "async": [{"id": "job"}]}
+        data = {
+            "idle": True,
+            "pendingMessages": False,
+            "model": {"provider": "p", "id": "m"},
+            "async": async_snapshot(
+                {"id": "job", "type": "task", "status": "running", "label": "Worker", "startTime": 1}
+            ),
+        }
     return {"protocol": PROTOCOL, "type": "event", "sequence": sequence, "kind": kind, "data": data}
 
 
@@ -419,13 +434,59 @@ class ExtensionAdapterTests(unittest.TestCase):
         self.assertEqual(request["action"], "snapshot")
         peer.send(
             response(
-                request, result={"idle": False, "pendingMessages": True, "model": None, "async": [], "eventSequence": 1}
+                request,
+                result={
+                    "idle": False,
+                    "pendingMessages": True,
+                    "model": None,
+                    "async": async_snapshot(),
+                    "eventSequence": 1,
+                },
             )
         )
         thread.join(1)
         self.assertTrue(holder[0].pending_messages)
         adapter.close()
         peer.close()
+
+    def test_live_async_and_agent_end_snapshots_update_authoritative_cache(self):
+        peer = self.make_peer()
+        adapter = self.make_adapter(peer)
+        adapter.start()
+        running = {
+            "id": "task-1",
+            "type": "task",
+            "status": "running",
+            "label": "Worker",
+            "startTime": 10,
+            "agentId": "Worker",
+        }
+        completed = {**running, "status": "completed"}
+        peer.send(event(2, "async", {"snapshot": async_snapshot(running)}))
+        deadline = time.monotonic() + 1
+        while adapter.snapshot().sequence < 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(adapter.snapshot().async_jobs["running"][0]["status"], "running")
+
+        peer.send(
+            event(
+                3,
+                "lifecycle",
+                {
+                    "state": "agent_end",
+                    "snapshot": {
+                        "idle": True,
+                        "pendingMessages": False,
+                        "model": None,
+                        "async": async_snapshot(recent=(completed,)),
+                    },
+                },
+            )
+        )
+        deadline = time.monotonic() + 1
+        while adapter.snapshot().sequence < 3 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(adapter.snapshot().async_jobs["recent"][0]["status"], "completed")
 
     def test_malformed_event_degrades_connection(self):
         cases = [
@@ -592,9 +653,36 @@ class ExtensionAdapterTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             snapshot.model["id"] = "changed"
         with self.assertRaises(TypeError):
-            snapshot.async_jobs[0]["id"] = "changed"
+            snapshot.async_jobs["running"][0]["id"] = "changed"
         adapter.close()
         peer.close()
+
+    def test_deferred_close_releases_owner_before_joining_reader_callback(self):
+        callback_entered = threading.Event()
+        release_callback = threading.Event()
+
+        def disconnect(_reason):
+            callback_entered.set()
+            release_callback.wait()
+
+        peer = self.make_peer()
+        adapter = self.make_adapter(peer, on_disconnect=disconnect)
+        adapter.start()
+        peer.close()
+        self.assertTrue(callback_entered.wait(1))
+
+        try:
+            adapter.begin_close()
+            adapter.close()
+            started = time.monotonic()
+            with self.assertRaisesRegex(RuntimeError, "reader did not stop"):
+                adapter.wait_closed(timeout=0.01)
+            self.assertLess(time.monotonic() - started, 0.5)
+            self.assertTrue(adapter._reader.is_alive())
+        finally:
+            release_callback.set()
+            adapter.wait_closed()
+        self.assertFalse(adapter._reader.is_alive())
 
     def test_event_queue_is_bounded_and_close_joins_supervised_reader(self):
         peer = self.make_peer()

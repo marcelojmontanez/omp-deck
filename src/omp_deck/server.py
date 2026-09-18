@@ -13,7 +13,7 @@ from ._sse import send_stream
 from ._terminal_commands import TerminalCommandConflict
 from .attachments import MAX_IMAGE_REQUEST_BYTES, detect_image_mime, read_blob
 from .auth import COOKIE_NAME as COOKIE_NAME
-from .auth import AuthenticationFailed, AuthError, AuthManager
+from .auth import AuthenticationFailed, AuthError, AuthManager, validate_auth_state
 from .auth_policy import AuthPolicy
 from .fleet_model import FleetModel
 from .fleet_protocol import verify_ticket
@@ -331,6 +331,7 @@ class Handler(DeckHttpHandler):
         if request_path == "/healthz":
             try:
                 auth_manager()
+                validate_auth_state(SETTINGS.state_root)
                 cursors = cursor_store().healthy
             except Exception:
                 self.reply(503, {"ok": False, "configuration": True, "authentication": False})
@@ -379,7 +380,7 @@ class Handler(DeckHttpHandler):
             return
         if request_path == "/api/sessions":
             try:
-                rpc_manager().request_refresh_connected()
+                # Native lifecycle events own refresh; a browser read must not poll every transcript.
                 self.reply(200, _fleet_model.snapshot())
             except Exception:
                 self.reply(503, {"error": "session state unavailable"})

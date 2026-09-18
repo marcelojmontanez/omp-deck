@@ -41,7 +41,11 @@ export function degradedSnapshot(data: unknown): JsonObject {
     idle: snapshot.idle === true,
     pendingMessages: snapshot.pendingMessages === true,
     model: null,
-    async: [],
+    async: {
+      running: [],
+      recent: [],
+      delivery: { queued: 0, delivering: false, pendingJobIds: [] },
+    },
     thinking,
     thinkingLevels,
   };

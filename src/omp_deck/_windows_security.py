@@ -32,6 +32,7 @@ _FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
 _INFINITE = 0xFFFFFFFF
 _WAIT_OBJECT_0 = 0
 _WAIT_ABANDONED = 0x00000080
+_WAIT_TIMEOUT = 0x00000102
 
 
 class _SidAndAttributes(Structure):
@@ -338,18 +339,21 @@ def is_private_path(path: Path) -> bool:
 
 
 @contextmanager
-def named_mutex(path: Path):
+def named_mutex(path: Path, *, blocking: bool = True):
     normalized = os.path.normcase(os.path.abspath(path))
     name = "Local\\OMPDeck-" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     handle = _KERNEL32.CreateMutexW(None, False, name)
     if not handle:
         raise _winerror()
     try:
-        result = _KERNEL32.WaitForSingleObject(handle, _INFINITE)
+        result = _KERNEL32.WaitForSingleObject(handle, _INFINITE if blocking else 0)
+        if result == _WAIT_TIMEOUT:
+            yield False
+            return
         if result not in (_WAIT_OBJECT_0, _WAIT_ABANDONED):
             raise OSError(f"waiting for private state lock failed: {result}")
         try:
-            yield
+            yield True
         finally:
             if not _KERNEL32.ReleaseMutex(handle):
                 raise _winerror()

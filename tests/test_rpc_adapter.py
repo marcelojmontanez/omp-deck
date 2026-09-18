@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import dataclass
+from threading import Event, Thread
 
-from omp_rpc import ReadyEvent, RpcProcessExitError, RpcTimeoutError, UnknownNotification
+from omp_rpc import ReadyEvent, RpcProcessExitError, RpcProtocolError, RpcTimeoutError, UnknownNotification
 
+from omp_deck._rpc_errors import AdapterDisconnectedError, AdapterIncompatibleError, AdapterTimeoutError
+from omp_deck._rpc_subagents import subscribe_subagents
 from omp_deck.rpc_adapter import (
-    AdapterDisconnectedError,
-    AdapterIncompatibleError,
-    AdapterTimeoutError,
     SessionAdapter,
 )
 
@@ -58,6 +58,9 @@ class FakeClient:
         self.todos = (FakeTodo(id="phase", name="Now", tasks=()),)
         self.subagents = ({"id": "sub-1", "status": "running"},)
         self.failure: BaseException | None = None
+        self.subagent_snapshot_entered: Event | None = None
+        self.subagent_snapshot_release: Event | None = None
+        self.subagent_snapshot_failure: BaseException | None = None
 
     def _on(self, kind, listener):
         self.listeners[kind].append(listener)
@@ -93,6 +96,11 @@ class FakeClient:
     def stop(self):
         self.stopped = True
 
+    def collect_events(self, timeout=None):
+        if self.failure:
+            raise self.failure
+        raise RpcTimeoutError("no terminal event")
+
     def get_state(self):
         self.state_reads += 1
         if self.on_state_read is not None:
@@ -109,6 +117,12 @@ class FakeClient:
         if command_type == "set_subagent_subscription":
             return {"level": payload["level"]}
         if command_type == "get_subagents":
+            if self.subagent_snapshot_entered is not None:
+                self.subagent_snapshot_entered.set()
+            if self.subagent_snapshot_release is not None:
+                self.subagent_snapshot_release.wait(timeout=2)
+            if self.subagent_snapshot_failure is not None:
+                raise self.subagent_snapshot_failure
             return {"subagents": list(self.subagents)}
         raise AssertionError(f"unexpected RPC command: {command_type}")
 
@@ -175,6 +189,107 @@ class TestRpcAdapter(unittest.TestCase):
         self.assertEqual(len(observed), callback_count)
         with self.assertRaises(AdapterDisconnectedError):
             adapter.snapshot()
+
+    def test_subagent_callback_can_close_adapter_without_deadlocking(self):
+        client = FakeClient()
+        retired = Event()
+        observed = []
+        adapter_ref = {}
+
+        def observe(event):
+            observed.append(event.type)
+            if event.type == "subagents":
+                adapter_ref["adapter"].close()
+                retired.set()
+
+        adapter = SessionAdapter(lambda: client, on_event=observe)
+        adapter_ref["adapter"] = adapter
+        adapter.start()
+        client.emit(
+            "unknown",
+            UnknownNotification({"type": "subagent_progress", "payload": {"id": "child"}}),
+        )
+
+        self.assertTrue(retired.wait(timeout=1))
+        self.assertTrue(client.stopped)
+        self.assertEqual(observed[-2:], ["subagents", "transport"])
+
+    def test_subagent_refresh_callback_can_retire_its_subscription(self):
+        client = FakeClient()
+        retired = Event()
+        unsubscribe = {}
+
+        def emit(kind, _payload):
+            if kind == "subagents":
+                unsubscribe["callback"]()
+                retired.set()
+
+        unsubscribe["callback"] = subscribe_subagents(client, emit)
+        client.emit(
+            "unknown",
+            UnknownNotification({"type": "subagent_progress", "payload": {"id": "child"}}),
+        )
+
+        self.assertTrue(retired.wait(timeout=1))
+        self.assertFalse(client.listeners["unknown"])
+
+    def test_subagent_retirement_joins_capture_and_suppresses_late_worker_event(self):
+        client = FakeClient()
+        entered = Event()
+        release = Event()
+        client.subagent_snapshot_entered = entered
+        client.subagent_snapshot_release = release
+        old_events = []
+        unsubscribe = subscribe_subagents(client, lambda kind, payload: old_events.append((kind, payload)))
+        client.emit(
+            "unknown",
+            UnknownNotification({"type": "subagent_lifecycle", "payload": {"id": "old"}}),
+        )
+        self.assertTrue(entered.wait(timeout=1))
+
+        retired = Event()
+        closer = Thread(target=lambda: (unsubscribe(), retired.set()))
+        closer.start()
+        self.assertFalse(retired.wait(timeout=0.05))
+        release.set()
+        closer.join(timeout=1)
+
+        self.assertFalse(closer.is_alive())
+        self.assertEqual([kind for kind, _payload in old_events], ["subagent_lifecycle"])
+        new_events = []
+        unsubscribe_new = subscribe_subagents(client, lambda kind, payload: new_events.append((kind, payload)))
+        self.addCleanup(unsubscribe_new)
+        client.emit(
+            "unknown",
+            UnknownNotification({"type": "subagent_progress", "payload": {"id": "new"}}),
+        )
+        deadline = Event()
+        for _ in range(100):
+            if any(kind == "subagents" for kind, _payload in new_events):
+                break
+            deadline.wait(0.01)
+        self.assertTrue(any(kind == "subagents" for kind, _payload in new_events))
+
+    def test_subagent_capture_failure_is_an_explicit_event(self):
+        client = FakeClient()
+        client.subagent_snapshot_failure = RuntimeError("focused capture failed")
+        failed = Event()
+        observed = []
+
+        def emit(kind, payload):
+            observed.append((kind, payload))
+            if kind == "subagent_refresh_failed":
+                failed.set()
+
+        unsubscribe = subscribe_subagents(client, emit)
+        self.addCleanup(unsubscribe)
+        client.emit(
+            "unknown",
+            UnknownNotification({"type": "subagent_progress", "payload": {"id": "child"}}),
+        )
+
+        self.assertTrue(failed.wait(timeout=1))
+        self.assertEqual(observed[-1], ("subagent_refresh_failed", {"error": "focused capture failed"}))
 
     def test_snapshot_retries_when_event_crosses_capture_and_watermark_matches(self):
         adapter, client = started()
@@ -283,12 +398,31 @@ class TestRpcAdapter(unittest.TestCase):
         self.assertIsNone(adapter.pending_ui_request())
         self.assertEqual(adapter.drain_events()[-1].payload["id"], "notice")
 
-    def test_protocol_error_is_emitted_without_disconnecting_transport(self):
+    def test_duplicate_protocol_errors_preserve_supported_native_identity_without_disconnecting(self):
         adapter, client = started()
-        client.emit("protocol", ValueError("malformed notification"))
-        event = adapter.drain_events()[-1]
-        self.assertEqual(event.type, "protocol_error")
-        self.assertEqual(event.payload, {"error": "malformed notification"})
+        error = RpcProtocolError(
+            {
+                "type": "response",
+                "id": "req_17",
+                "command": "prompt",
+                "success": False,
+                "error": "preflight failed",
+                "code": "preflight",
+            }
+        )
+        client.emit("protocol", error)
+        client.emit("protocol", error)
+        events = adapter.drain_events()[-2:]
+
+        self.assertEqual(
+            [event.type for event in events],
+            ["native_delivery_failed", "native_delivery_failed"],
+        )
+        for event in events:
+            self.assertEqual(event.payload["nativeRequestId"], "req_17")
+            self.assertEqual(event.payload["command"], "prompt")
+            self.assertEqual(event.payload["errorCode"], "preflight")
+            self.assertIs(event.payload["correlationAvailable"], False)
         self.assertEqual(adapter.transport_status, "connected")
         self.assertIsNone(adapter.reason)
 

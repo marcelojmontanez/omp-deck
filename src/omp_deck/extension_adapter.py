@@ -10,6 +10,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from types import MappingProxyType
 from typing import Any
 
@@ -93,7 +94,6 @@ class ExtensionAdapter:
         self._state_lock = threading.Lock()
         self._events: deque[Mapping[str, Any]] = deque(maxlen=event_limit)
         self._pending: dict[str, _Pending] = {}
-        self._stale: deque[str] = deque(maxlen=response_limit)
         self._next_id = 0
         self._sequence = 0
         self._last_heartbeat = 0.0
@@ -101,6 +101,7 @@ class ExtensionAdapter:
         self._snapshot: ExtensionSnapshot | None = None
         self._thinking_levels: tuple[str, ...] = ()
         self._closed = True
+        self._defer_join = False
         self._reason: str | None = None
 
     @property
@@ -115,6 +116,7 @@ class ExtensionAdapter:
                 return self._registration
             self._closed = False
             self._reason = None
+            self._defer_join = False
         sock: Any | None = None
         try:
             sock = self._connector(self.socket_path)
@@ -155,13 +157,25 @@ class ExtensionAdapter:
             self._disconnect("startup failed")
             raise
 
-    def close(self) -> None:
+    def begin_close(self) -> None:
+        """Close transport now; defer reader joining to an ownership-safe boundary."""
+        with self._state_lock:
+            self._defer_join = True
         self._disconnect("closed")
+
+    def wait_closed(self, timeout: float = 2.0) -> None:
         reader = self._reader
         if reader is not None and reader is not threading.current_thread():
-            reader.join()
+            reader.join(max(0.0, timeout))
+            if reader.is_alive():
+                raise RuntimeError("extension reader did not stop")
 
-    shutdown = close
+    def close(self) -> None:
+        self._disconnect("closed")
+        with self._state_lock:
+            defer_join = self._defer_join
+        if not defer_join:
+            self.wait_closed()
 
     def snapshot(self) -> ExtensionSnapshot | None:
         with self._state_lock:
@@ -236,17 +250,10 @@ class ExtensionAdapter:
                 raise ExtensionProtocolError("future thinking response")
             self._thinking_levels = updated_levels
             if self._snapshot is not None:
-                old = self._snapshot
-                self._snapshot = ExtensionSnapshot(
-                    old.idle,
-                    old.pending_messages,
-                    old.model,
-                    old.async_jobs,
-                    old.sequence,
-                    old.transport_status,
-                    old.reason,
-                    thinking,
-                    updated_levels,
+                self._snapshot = replace(
+                    self._snapshot,
+                    thinking=thinking,
+                    thinking_levels=updated_levels,
                 )
         return thinking
 
@@ -297,7 +304,6 @@ class ExtensionAdapter:
         if not pending.ready.wait(self._registration_timeout):
             with self._state_lock:
                 self._pending.pop(request_id, None)
-                self._stale.append(request_id)
             raise ExtensionRequestTimeout("extension request timed out")
         if pending.disconnected or pending.response is None:
             raise ExtensionDisconnected(self._reason or "extension disconnected")
@@ -318,9 +324,6 @@ class ExtensionAdapter:
             if sock is None:
                 raise OSError("closed")
             sock.sendall(encoded)
-
-    def _send(self, frame: Mapping[str, Any]) -> None:
-        self._send_encoded(self._encoded_frame(frame))
 
     def _read_frame(self) -> dict[str, Any]:
         while True:
@@ -375,6 +378,23 @@ class ExtensionAdapter:
             with self._state_lock:
                 self._snapshot = snapshot
                 self._thinking_levels = snapshot.thinking_levels
+        elif event["kind"] == "async":
+            data = _object(event["data"], "async data")
+            _exact_keys(data, {"snapshot"}, set(), "async data")
+            with self._state_lock:
+                if self._snapshot is not None:
+                    self._snapshot = replace(
+                        self._snapshot,
+                        async_jobs=data["snapshot"],
+                        sequence=sequence,
+                    )
+        elif event["kind"] == "lifecycle":
+            data = _object(event["data"], "lifecycle data")
+            if data.get("state") == "agent_end" and "snapshot" in data:
+                snapshot = snapshot_from_data(data["snapshot"], sequence, self._registration, self._thinking_levels)
+                with self._state_lock:
+                    self._snapshot = snapshot
+                    self._thinking_levels = snapshot.thinking_levels
         elif event["kind"] in {"heartbeat", "thinking"}:
             data = _object(event["data"], f"{event['kind']} data")
             if "thinking" in data or "thinkingLevels" in data:
@@ -386,17 +406,11 @@ class ExtensionAdapter:
                 with self._state_lock:
                     self._thinking_levels = levels
                     if self._snapshot is not None:
-                        old = self._snapshot
-                        self._snapshot = ExtensionSnapshot(
-                            old.idle,
-                            old.pending_messages,
-                            old.model,
-                            old.async_jobs,
-                            sequence,
-                            old.transport_status,
-                            old.reason,
-                            thinking,
-                            levels,
+                        self._snapshot = replace(
+                            self._snapshot,
+                            sequence=sequence,
+                            thinking=thinking,
+                            thinking_levels=levels,
                         )
         with self._state_lock:
             self._events.append(event)
@@ -440,7 +454,6 @@ class ExtensionAdapter:
             pending = self._pending.pop(request_id, None)
             if pending is None:  # timeout, duplicate, or unsolicited response
                 return
-            self._stale.append(request_id)
             pending.response = response
             pending.ready.set()
 
@@ -451,7 +464,9 @@ class ExtensionAdapter:
                 return
             self._next_id += 1
             request_id = str(self._next_id)
-        self._send({"protocol": PROTOCOL, "type": "request", "id": request_id, "action": "pong"})
+        self._send_encoded(
+            self._encoded_frame({"protocol": PROTOCOL, "type": "request", "id": request_id, "action": "pong"})
+        )
 
     def _disconnect(self, reason: str) -> None:
         with self._state_lock:
@@ -462,17 +477,10 @@ class ExtensionAdapter:
             pending = tuple(self._pending.values())
             self._pending.clear()
             if self._snapshot is not None:
-                old = self._snapshot
-                self._snapshot = ExtensionSnapshot(
-                    old.idle,
-                    old.pending_messages,
-                    old.model,
-                    old.async_jobs,
-                    old.sequence,
-                    "degraded",
-                    reason,
-                    old.thinking,
-                    old.thinking_levels,
+                self._snapshot = replace(
+                    self._snapshot,
+                    transport_status="degraded",
+                    reason=reason,
                 )
         for item in pending:
             item.disconnected = True

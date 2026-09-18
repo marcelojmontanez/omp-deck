@@ -10,24 +10,26 @@ from pathlib import Path
 
 from . import build_identity
 from ._omp_version import installed_omp_version
+from ._plugin_lifecycle import (
+    PLUGIN_VERSION,
+    backup_plugin,
+    discard_plugin_backup,
+    install_plugin,
+    plugin_installed,
+    plugin_status,
+    remove_plugin,
+    restore_plugin,
+)
 from ._terminal_discovery import discover_extension_candidates
 from .auth import AuthManager, validate_auth_state
 from .lifecycle import (
-    PLUGIN_VERSION,
-    backup_plugin,
     capture_service_state,
     check_health,
-    discard_plugin_backup,
-    install_plugin,
     install_service,
-    plugin_installed,
-    plugin_status,
     preflight_service_install,
     purge_installation,
-    remove_plugin,
     remove_service,
     restart_service,
-    restore_plugin,
     restore_service_state,
     service_status,
 )
@@ -52,32 +54,19 @@ def _tailscale_status():
     return payload
 
 
-def _tailscale_proxies_to(payload, port):
-    expected = f"http://127.0.0.1:{port}"
-    web = payload.get("Web")
-    if not isinstance(web, dict):
-        return False
-    return any(
-        isinstance(site, dict)
-        and isinstance(site.get("Handlers"), dict)
-        and any(isinstance(handler, dict) and handler.get("Proxy") == expected for handler in site["Handlers"].values())
-        for site in web.values()
-    )
-
-
 def _tailscale_only_proxies_to(payload, port):
     expected = f"http://127.0.0.1:{port}"
+    tcp = payload.get("TCP")
     web = payload.get("Web")
-    if payload.get("TCP") or not isinstance(web, dict) or not web:
+    if not isinstance(tcp, dict) or len(tcp) != 1 or not isinstance(web, dict) or len(web) != 1:
         return False
-    handlers = []
-    for site in web.values():
-        if not isinstance(site, dict) or not isinstance(site.get("Handlers"), dict):
-            return False
-        handlers.extend(site["Handlers"].values())
-    return bool(handlers) and all(
-        isinstance(handler, dict) and handler.get("Proxy") == expected for handler in handlers
-    )
+    tcp_port, tcp_handler = next(iter(tcp.items()))
+    if not isinstance(tcp_port, str) or tcp_handler != {"HTTPS": True}:
+        return False
+    site_name, site = next(iter(web.items()))
+    if not isinstance(site_name, str) or site_name.rpartition(":")[2] != tcp_port:
+        return False
+    return site == {"Handlers": {"/": {"Proxy": expected}}}
 
 
 def _reset_tailscale():
@@ -113,7 +102,7 @@ def enable_tailscale(settings):
         detail = (result.stderr or result.stdout).strip()
         raise RuntimeError(f"tailscale serve --bg --yes {settings.port} failed" + (f": {detail}" if detail else ""))
     try:
-        if not _tailscale_proxies_to(_tailscale_status(), settings.port):
+        if not _tailscale_only_proxies_to(_tailscale_status(), settings.port):
             raise RuntimeError("Tailscale Serve did not expose the OMP Deck listener")
     except Exception as error:
         try:
@@ -169,7 +158,7 @@ def setup(*, tailscale=False):
         if plugin_preexisting and plugin_backup is None:
             raise RuntimeError("cannot snapshot the installed OMP Deck plugin")
         plugin_touched = True
-        install_plugin(settings)
+        install_plugin(settings, preserve=plugin_backup)
         check_health(settings)
         if tailscale:
             tailscale_touched = enable_tailscale(settings)
@@ -408,7 +397,10 @@ def main(argv=None):
 
     plugin = commands.add_parser("plugin", help="manage the OMP plugin")
     plugin_actions = plugin.add_subparsers(dest="plugin_action", required=True)
-    plugin_actions.add_parser("install")
+    plugin_install = plugin_actions.add_parser("install")
+    plugin_install.add_argument("--source", type=Path, help=argparse.SUPPRESS)
+    plugin_install.add_argument("--preserve-source", type=Path, help=argparse.SUPPRESS)
+    plugin_install.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
     plugin_actions.add_parser("remove")
 
     arguments = parser.parse_args(argv)
@@ -451,7 +443,13 @@ def main(argv=None):
         else:
             remove_service()
     elif arguments.plugin_action == "install":
-        install_plugin(load_settings())
+        source = install_plugin(
+            load_settings(),
+            preserve=arguments.preserve_source,
+            source=arguments.source,
+        )
+        if arguments.json:
+            print(json.dumps({"version": 1, "pluginSource": str(source)}, sort_keys=True))
     else:
         try:
             omp_bin = load_settings().omp_bin

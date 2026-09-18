@@ -9,16 +9,13 @@ from ._fleet_extension import project_extension_event
 from ._fleet_projection import (
     collab_projection,
     extension_projection,
-    has_visible_content,
     now,
-    pending_ui_projection,
-    plain_json,
     rpc_projection,
-    strict_clone,
-    todos_from_tool_result,
 )
 from ._fleet_registry import registry_session
-from ._session_activity import clear_activity, completion_state, update_tool_activity
+from ._fleet_rpc_events import project_rpc_event
+from ._fleet_unread import latest_assistant_id, project_unread
+from ._session_activity import clear_activity
 from .event_stream import EventJournal
 from .read_cursors import CursorStore
 from .rpc_adapter import AdapterEvent, AdapterSnapshot
@@ -37,8 +34,11 @@ _PUBLIC_KEYS = (
     "capabilities",
     "attachmentLimits",
     "messages",
+    "streamingMessage",
+    "deliveryError",
     "todos",
     "subagents",
+    "subagentError",
     "pendingUiRequest",
     "unread",
     "updatedAt",
@@ -105,18 +105,17 @@ class FleetModel:
         generation: int,
         snapshot: AdapterSnapshot,
     ) -> bool:
+        cursor = self._read_cursor(session_id)
         with self._lock:
             session = self._sessions.get(session_id)
             if session is None or not self._may_claim(session, instance_id, generation):
                 return False
-            if (
-                session["_resyncRequired"]
-                and self._owns(session, instance_id, generation)
-                and snapshot.sequence < session["_resyncWatermark"]
+            if self._owns(session, instance_id, generation) and snapshot.sequence < max(
+                session["_adapterSequence"], session["_resyncWatermark"]
             ):
                 return False
             self._apply_projection(session, rpc_projection(session, snapshot, session_id, instance_id, generation))
-            self._sync_unread_locked(session)
+            self._sync_unread_locked(session, cursor)
             self._changed_locked("session_snapshot", session_id, {"session": self._public_session(session)})
             return True
 
@@ -128,12 +127,15 @@ class FleetModel:
         generation: int,
         snapshot: Any,
     ) -> bool:
+        cursor = self._read_cursor(session_id)
         with self._lock:
             session = self._sessions.get(session_id)
             if session is None or not self._may_claim(session, instance_id, generation):
                 return False
+            if self._owns(session, instance_id, generation) and snapshot.sequence < session["_adapterSequence"]:
+                return False
             self._apply_projection(session, collab_projection(session, snapshot, session_id, instance_id, generation))
-            self._sync_unread_locked(session)
+            self._sync_unread_locked(session, cursor)
             self._changed_locked("session_snapshot", session_id, {"session": self._public_session(session)})
             return True
 
@@ -149,6 +151,10 @@ class FleetModel:
         with self._lock:
             session = self._sessions.get(session_id)
             if session is None or not self._may_claim(session, instance_id, generation):
+                return False
+            if self._owns(session, instance_id, generation) and snapshot.sequence < max(
+                session["_adapterSequence"], session["_resyncWatermark"]
+            ):
                 return False
             session.pop("_extensionHistorySync", None)
             self._apply_projection(
@@ -188,6 +194,8 @@ class FleetModel:
         if not isinstance(sequence, int) or isinstance(sequence, bool) or not isinstance(kind, str):
             return False
         payload = data if isinstance(data, Mapping) else {"value": data}
+        needs_cursor = kind in {"history", "degraded"} or (kind == "message" and payload.get("phase") == "end")
+        cursor = self._read_cursor(session_id) if needs_cursor else None
         with self._lock:
             session = self._sessions.get(session_id)
             if session is None or not self._owns(session, instance_id, generation):
@@ -208,14 +216,18 @@ class FleetModel:
                 return False
             session["_adapterSequence"] = sequence
             session["updatedAt"] = now()
+            messages = session["messages"]
             project_extension_event(session, session_id, kind, payload)
-            if kind in {"history", "degraded"} or (kind == "message" and payload.get("phase") == "end"):
-                self._sync_unread_locked(session)
+            if needs_cursor:
+                self._sync_unread_locked(session, cursor)
+            patch = {key: session[key] for key in _PUBLIC_KEYS if key not in {"id", "lifecycle", "messages"}}
+            if session["messages"] is not messages:
+                patch["messages"] = session["messages"]
             self._snapshot_generation += 1
             self.journal.publish(
                 snapshot_generation=self._snapshot_generation,
                 event_type=kind,
-                payload=strict_clone(plain_json(payload)),
+                payload={"sessionPatch": patch},
                 session_id=session_id,
                 instance_id=instance_id,
                 generation=generation,
@@ -255,55 +267,15 @@ class FleetModel:
                 return False
             session["_adapterSequence"] = event.sequence
             session["updatedAt"] = now()
-            if event.type == "transport":
-                status = event.payload.get("status", "disconnected")
-                session["transport"].update(status=status, reason=event.payload.get("reason"))
-                if status == "degraded":
-                    session["state"] = "degraded"
-                    self._clear_disconnected_activity(session)
-                elif status != "connected":
-                    session["state"] = "disconnected"
-                    self._clear_disconnected_activity(session)
-            elif event.type == "ui_request":
-                pending = pending_ui_projection(event.payload)
-                if pending is not None:
-                    session["pendingUiRequest"] = pending
-                    session["state"] = "needs_input"
-            elif event.type in {"ui_request_resolved", "ui_request_cancelled", "ui_request_timeout"}:
-                pending = session.get("pendingUiRequest")
-                if isinstance(pending, Mapping) and pending.get("id") == event.payload.get("id"):
-                    session["pendingUiRequest"] = None
-                    session["state"] = "working"
-            elif event.type == "agent_start":
-                clear_activity(session)
-                session["state"] = "working"
-            elif event.type in {"turn_start", "message_start", "message_update"}:
-                if session.get("pendingUiRequest") is None:
-                    session["state"] = "working"
-            elif event.type == "agent_end" and event.payload.get("is_terminal") is not False:
-                session["state"] = completion_state(event.payload.get("messages", ()))
-                clear_activity(session)
-                # The authoritative transcript refresh owns unread state, not turn settlement.
-            elif event.type in {"tool_execution_start", "tool_execution_update", "tool_execution_end"}:
-                phase = event.type.removeprefix("tool_execution_")
-                update_tool_activity(
-                    session,
-                    phase,
-                    event.payload.get("tool_call_id"),
-                    event.payload.get("tool_name"),
-                    event.payload.get("intent"),
-                )
-                if phase == "end":
-                    todos = todos_from_tool_result(event.payload.get("tool_name"), event.payload.get("result"))
-                    if todos is not None:
-                        session["todos"] = todos
-                if phase != "end" and session.get("pendingUiRequest") is None:
-                    session["state"] = "working"
+            changed = project_rpc_event(session, session_id, event)
+            if "messages" in changed:
+                project_unread(session, session.get("_readCursor"))
+                changed.add("unread")
             self._snapshot_generation += 1
             self.journal.publish(
                 snapshot_generation=self._snapshot_generation,
                 event_type=event.type,
-                payload=event.payload,
+                payload={"sessionPatch": {key: session[key] for key in changed}},
                 session_id=session_id,
                 instance_id=instance_id,
                 generation=generation,
@@ -331,6 +303,9 @@ class FleetModel:
                 session["_adapterSequence"] = 0
                 session["_resyncRequired"] = False
                 session["_resyncWatermark"] = 0
+                session["streamingMessage"] = None
+                session["_rpcStreamingIndex"] = None
+                session["_rpcStreamingKey"] = None
             session["_generation"] = generation
             session["transport"].update(
                 status=public_status,
@@ -350,47 +325,37 @@ class FleetModel:
     def mark_read(self, session_id: str) -> dict[str, Any]:
         with self._lock:
             session = self._sessions[session_id]
-            message_id = self._latest_assistant_id(session)
+            message_id = latest_assistant_id(session)
         if self.cursor_store is not None and message_id is not None:
             self.cursor_store.mark_read(session_id, message_id)
         with self._lock:
             session = self._sessions[session_id]
-            session["unread"] = self._latest_assistant_id(session) != message_id
+            session["_readRevision"] = session.get("_readRevision", 0) + 1
+            session["_readCursor"] = message_id
+            session["unread"] = latest_assistant_id(session) != message_id
             session["updatedAt"] = now()
             self._changed_locked("session_read", session_id, {})
             return self._public_session(session)
 
-    def _sync_unread_locked(self, session: Mapping[str, Any]) -> None:
+    def _read_cursor(self, session_id: str) -> tuple[int, str | None] | None:
         if self.cursor_store is None:
-            return
-        message_id = self._latest_assistant_id(session)
-        cursor = self.cursor_store.last_read(str(session["id"]))
-        if message_id is None:
-            session["unread"] = False
-            return
-        if cursor == message_id:
-            session["unread"] = False
-            return
-        messages = session["messages"]
-        cursor_index = next(
-            (index for index, message in enumerate(messages) if message.get("id") == cursor),
-            None,
-        )
-        latest_index = next(
-            index for index, message in reversed(tuple(enumerate(messages))) if message.get("id") == message_id
-        )
-        session["unread"] = cursor_index is None or latest_index > cursor_index
+            return None
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return None
+            revision = session.get("_readRevision", 0)
+        return revision, self.cursor_store.last_read(session_id)
 
-    @staticmethod
-    def _latest_assistant_id(session: Mapping[str, Any]) -> str | None:
-        for message in reversed(session["messages"]):
-            if (
-                message.get("role") == "assistant"
-                and isinstance(message.get("id"), str)
-                and has_visible_content(message)
-            ):
-                return message["id"]
-        return None
+    def _sync_unread_locked(self, session: dict[str, Any], cursor: tuple[int, str | None] | None) -> None:
+        if cursor is None:
+            return
+        revision, message_id = cursor
+        # A completed mark_read wins over an earlier storage read that was
+        # waiting for this lock. Filesystem I/O never runs inside this section.
+        if revision == session.get("_readRevision", 0):
+            session["_readCursor"] = message_id
+        project_unread(session, session.get("_readCursor"))
 
     def supports(self, session_id: str, capability: str) -> bool:
         with self._lock:
@@ -454,20 +419,48 @@ class FleetModel:
     @staticmethod
     def _clear_disconnected_activity(session: dict[str, Any]) -> None:
         session["pendingUiRequest"] = None
+        session["streamingMessage"] = None
+        session["_rpcStreamingIndex"] = None
+        session["_rpcStreamingKey"] = None
+        session["subagentError"] = None
         clear_activity(session)
         session["subagents"] = []
 
     @staticmethod
-    def _public_session(session: Mapping[str, Any]) -> dict[str, Any]:
-        public = {key: session[key] for key in _PUBLIC_KEYS if key != "lifecycle"}
-        public["lifecycle"] = (
+    def _lifecycle(session: Mapping[str, Any]) -> str:
+        return (
             "ongoing" if session["transport"]["instanceId"] is not None or session["_desiredRpcRunning"] else "history"
         )
+
+    @staticmethod
+    def _public_session(session: Mapping[str, Any]) -> dict[str, Any]:
+        public = {key: session[key] for key in _PUBLIC_KEYS if key != "lifecycle"}
+        public["lifecycle"] = FleetModel._lifecycle(session)
         return copy.deepcopy(public)
 
     def _changed_locked(self, event_type: str, session_id: str, payload: Mapping[str, Any]) -> None:
         self._snapshot_generation += 1
         session = self._sessions.get(session_id)
+        if session is not None and "session" not in payload and "sessionPatch" not in payload:
+            fields = {
+                "session_read": ("unread", "updatedAt"),
+                "history_error": ("historyError", "updatedAt"),
+            }.get(
+                event_type,
+                (
+                    "state",
+                    "transport",
+                    "pendingUiRequest",
+                    "workingOn",
+                    "subagents",
+                    "subagentError",
+                    "streamingMessage",
+                    "updatedAt",
+                ),
+            )
+            patch = {key: session[key] for key in fields}
+            patch["lifecycle"] = self._lifecycle(session)
+            payload = {**payload, "sessionPatch": patch}
         self.journal.publish(
             snapshot_generation=self._snapshot_generation,
             event_type=event_type,

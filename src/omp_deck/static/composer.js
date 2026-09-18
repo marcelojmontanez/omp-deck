@@ -20,8 +20,6 @@ function createComposer({
   const retryBatches = new Map();
   const revokedAttachmentUrls = new Set();
   const queueTokens = new Map();
-  const attachmentReaders = new Set();
-  const attachmentReservations = new Map();
   let sessionId = null;
   let dataGeneration = 0;
   const commands = createComposerCommands({
@@ -33,7 +31,7 @@ function createComposer({
     thinkingChoices,
     thinkingLevel,
     showToast,
-    hasAttachments: () => attachmentsFor(sessionId).length > 0,
+    hasAttachments: () => (attachments.get(sessionId) || []).length > 0,
   });
   const deliveryMode = createComposerDeliveryMode({elements, selectedAgent});
   const queueToken = id => queueTokens.get(id) || queueTokens.set(id, {}).get(id);
@@ -43,6 +41,7 @@ function createComposer({
     pendingFor,
     loadDraft,
     saveDraft,
+    draftChanged: id => commands.draftChanged(id),
     attachmentsFor,
     setAttachments: (id, items) => attachments.set(id, items),
     mergeAttachments: mergeComposerAttachments,
@@ -60,6 +59,18 @@ function createComposer({
     dataGeneration: () => dataGeneration,
     selectedSessionId: () => sessionId,
   });
+  const attachmentReads = createComposerAttachmentReads({
+    attachments,
+    attachmentsFor,
+    selectedAgent,
+    selectedSessionId: () => sessionId,
+    dataGeneration: () => dataGeneration,
+    revokeAttachment,
+    renderAttachments,
+    renderDetail,
+    inputChanged: () => recovery.inputChanged(),
+    showToast,
+  });
   function saveDraft(id, value) {
     if (!id) return;
     if (value) drafts.set(id, value);
@@ -70,8 +81,7 @@ function createComposer({
   }
   function clearLocalData() {
     dataGeneration += 1;
-    for (const reader of attachmentReaders) reader.abort();
-    attachmentReservations.clear();
+    attachmentReads.clear();
     for (const items of attachments.values()) items.forEach(revokeAttachment);
     for (const items of pendingMessages.values()) {
       items.flatMap(item => item.attachments).forEach(revokeAttachment);
@@ -84,11 +94,16 @@ function createComposer({
     pendingMessages.clear();
     outboundQueues.clear();
     retryBatches.clear();
+    queueTokens.clear();
     recovery.clear();
     deliveryMode.clear();
+    elements.message.value = '';
+    elements.attach.value = '';
+    revokedAttachmentUrls.clear();
     renderAttachments();
     commands.clear();
     touchRender();
+    renderDetail();
   }
   function attachmentsFor(id) {
     if (!id) return [];
@@ -110,7 +125,8 @@ function createComposer({
   }
 
   function renderAttachments() {
-    elements.attachments.innerHTML = attachmentsFor(sessionId).map((attachment, index) =>
+    const current = attachments.get(sessionId) || [];
+    elements.attachments.innerHTML = current.map((attachment, index) =>
       `<span class="attachment" role="group" aria-label="Attachment: ${escapeHtml(attachment.name)}">
         <button class="attachment-preview" type="button" data-view-image="${attachment.url}" aria-label="Enlarge attachment: ${escapeHtml(attachment.name)}"><img src="${attachment.url}" alt="${escapeHtml(attachment.name)}"></button>
         <button type="button" data-remove-attachment="${index}" aria-label="Remove attachment: ${escapeHtml(attachment.name)}">×</button>
@@ -128,88 +144,7 @@ function createComposer({
     commands.reset();
   }
 
-  function readAttachment(file) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      attachmentReaders.add(reader);
-      const finish = () => attachmentReaders.delete(reader);
-      reader.onload = () => {
-        finish();
-        resolve({
-          name: file.name || 'Attachment',
-          type: file.type,
-          size: file.size,
-          data: reader.result,
-          url: URL.createObjectURL(file),
-        });
-      };
-      reader.onerror = () => {
-        finish();
-        reject(reader.error);
-      };
-      reader.onabort = () => {
-        finish();
-        resolve(null);
-      };
-      reader.readAsDataURL(file);
-    });
-  }
 
-  async function addAttachments(files) {
-    const generation = dataGeneration;
-    const targetSessionId = sessionId;
-    const target = state.agents.find(agent => agent.id === targetSessionId);
-    const limits = target?.attachmentLimits;
-    if (!target?.capabilities?.attachments || !limits || target.lifecycle !== 'ongoing') {
-      showToast('Image attachments are unavailable for this session.', 'error');
-      return;
-    }
-    const current = attachmentsFor(sessionId);
-    const incoming = [...files];
-    if (incoming.some(file => !file.type.startsWith('image/'))) {
-      showToast('This transport accepts image attachments only.', 'error');
-      return;
-    }
-    const reserved = attachmentReservations.get(targetSessionId) || {count: 0, bytes: 0};
-    if (current.length + reserved.count + incoming.length > limits.maxImages) {
-      showToast(`Attach at most ${limits.maxImages} images.`, 'error');
-      return;
-    }
-    const incomingBytes = incoming.reduce((bytes, item) => bytes + item.size, 0);
-    const currentBytes = current.reduce((bytes, item) => bytes + item.size, 0);
-    if (currentBytes + reserved.bytes + incomingBytes > limits.maxTotalBytes) {
-      showToast(`Images must total ${formatImageLimit(limits.maxTotalBytes)} or less.`, 'error');
-      return;
-    }
-    recovery.inputChanged();
-    if (!attachmentReservations.has(targetSessionId)) {
-      attachmentReservations.set(targetSessionId, reserved);
-    }
-    reserved.count += incoming.length;
-    reserved.bytes += incomingBytes;
-    let loaded;
-    try {
-      loaded = (await Promise.all(incoming.map(readAttachment))).filter(Boolean);
-    } finally {
-      reserved.count -= incoming.length;
-      reserved.bytes -= incomingBytes;
-      if (
-        attachmentReservations.get(targetSessionId) === reserved
-        && reserved.count === 0
-      ) {
-        attachmentReservations.delete(targetSessionId);
-      }
-    }
-    if (
-      generation !== dataGeneration
-      || attachments.get(targetSessionId) !== current
-    ) {
-      loaded.forEach(revokeAttachment);
-      return;
-    }
-    current.push(...loaded);
-    if (sessionId === targetSessionId) renderAttachments();
-  }
   async function deliver(job) {
     const {
       id, message, outgoingAttachments, pending, generation, token,
@@ -282,6 +217,7 @@ function createComposer({
     const messages = active.map(job => job.message);
     const restoredDraft = [...messages, currentDraft].filter(Boolean).join('\n');
     saveDraft(id, restoredDraft);
+    commands.draftChanged(id);
     const restoredAttachments = mergeComposerAttachments(
       ...active.map(job => job.outgoingAttachments),
       currentAttachments,
@@ -321,14 +257,26 @@ function createComposer({
     }
   }
 
+
   async function submit(event) {
     event.preventDefault();
-    const agent = selectedAgent();
+    let agent = selectedAgent();
     const id = agent?.id;
     if (!agent || elements.send.disabled) return;
+    const commandRevision = commands.revision(agent);
+    const action = deliveryMode.capture(agent);
+    if (attachmentReads.pending(id)) {
+      if (!(await attachmentReads.prepare(id))) return;
+      agent = selectedAgent();
+      if (agent?.id !== id || elements.send.disabled) return;
+      if (!commands.unchanged(agent, commandRevision)) {
+        showToast('Draft changed while images were preparing. Review it and send again.', 'error');
+        return;
+      }
+    }
+    attachmentReads.clearStatus(id);
     const outgoingAttachments = [...attachmentsFor(id)];
     const commandDraft = elements.message.value;
-    const commandRevision = commands.revision(agent);
     const command = commands.exactChoice(commandDraft, agent);
     if (command) {
       if (outgoingAttachments.length) {
@@ -353,14 +301,17 @@ function createComposer({
     }
     const message = commandDraft.trim();
     if (!message && !outgoingAttachments.length) return;
-    const action = deliveryMode.capture(agent);
     elements.message.focus({preventScroll: true});
     const retry = retryBatches.get(id);
     const retryAttachments = retry
       ? mergeComposerAttachments(...retry.jobs.map(job => job.outgoingAttachments))
       : [];
+    const retryDraft = retry
+      ? retry.jobs.map(job => job.message).filter(Boolean).join('\n')
+      : '';
     const matchesRetry = retry
       && retry.revision === commandRevision
+      && retryDraft === commandDraft
       && retryAttachments.length === outgoingAttachments.length
       && retryAttachments.every(
         (attachment, index) => attachment.url === outgoingAttachments[index]?.url
@@ -426,7 +377,7 @@ function createComposer({
     deliveryMode.sync(selectedAgent());
   });
   elements.attach.addEventListener('change', async event => {
-    const pending = addAttachments(event.target.files);
+    const pending = attachmentReads.add(event.target.files);
     event.target.value = '';
     await pending;
   });
@@ -452,7 +403,7 @@ function createComposer({
       .filter(Boolean);
     if (!images.length) return;
     event.preventDefault();
-    await addAttachments(images);
+    await attachmentReads.add(images);
   });
   elements.message.addEventListener('keydown', event => {
     if (commands.handleKeydown(event) || elements.send.disabled) return;
@@ -476,6 +427,7 @@ function createComposer({
     pendingMessages.delete(id);
     outboundQueues.delete(id);
     queueTokens.delete(id);
+    attachmentReads.remove(id);
     retryBatches.delete(id);
   }
 
@@ -492,6 +444,7 @@ function createComposer({
     restoreDelivery: recovery.restoreDelivery,
     dismissDelivery: recovery.dismissDelivery,
     syncDeliveryMode: deliveryMode.sync,
+    attachmentStatus: attachmentReads.status,
     remove,
     prune,
     select,

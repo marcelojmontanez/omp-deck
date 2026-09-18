@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -122,6 +123,9 @@ def load_settings(path=None):
     show_history = values.get("show_history", False)
     if type(show_history) is not bool:
         raise RuntimeError("show_history must be a boolean")
+    configured_omp = values.get("omp_bin", shutil.which("omp") or default_omp_path())
+    if sys.platform == "linux":
+        configured_omp = os.environ.get("OMP_DECK_OMP_BIN", configured_omp)
     return Settings(
         host=host,
         port=port,
@@ -130,7 +134,7 @@ def load_settings(path=None):
         state_root=expanded(values.get("state_root", state_root)),
         project_root=expanded(values.get("project_root", home / "dev")),
         project_discovery_depth=project_discovery_depth,
-        omp_bin=executable(values.get("omp_bin", shutil.which("omp") or default_omp_path())),
+        omp_bin=executable(configured_omp),
         allowed_hosts=allowed_hosts(values, host),
         auth_mode=auth_mode,
         tailscale_user=tailscale_user,

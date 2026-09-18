@@ -12,7 +12,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from cryptography.exceptions import InvalidTag
 
-from .rpc_adapter import AdapterDisconnectedError, AdapterError, AdapterIncompatibleError
+from ._rpc_errors import AdapterDisconnectedError, AdapterError, AdapterIncompatibleError
 
 _CONNECT_OPTIONS = {
     "open_timeout": 10.0,
@@ -66,6 +66,43 @@ class _Reply:
     value: tuple[str, int] | BaseException | None = None
 
 
+class _StartupReadiness:
+    """Coordinates startup completion with a bounded idle window per progress step."""
+
+    def __init__(self, lock: Any) -> None:
+        self._condition = threading.Condition(lock)
+        self._ready = threading.Event()
+        self._progress = 0
+
+    def reset(self) -> None:
+        with self._condition:
+            self._ready.clear()
+            self._progress = 0
+
+    def progressed(self) -> None:
+        with self._condition:
+            self._progress += 1
+            self._condition.notify_all()
+
+    def finish(self) -> None:
+        with self._condition:
+            self._ready.set()
+            self._condition.notify_all()
+
+    def wait(self, idle_timeout: float) -> bool:
+        with self._condition:
+            observed = self._progress
+            while not self._ready.is_set():
+                changed = self._condition.wait_for(
+                    lambda observed=observed: self._ready.is_set() or self._progress != observed,
+                    idle_timeout,
+                )
+                if not changed:
+                    return False
+                observed = self._progress
+            return True
+
+
 def _guest_url(websocket_url: str) -> str:
     parsed = urlsplit(websocket_url)
     query = dict(parse_qsl(parsed.query))
@@ -74,8 +111,10 @@ def _guest_url(websocket_url: str) -> str:
 
 
 def _safe_reason(error: BaseException) -> str:
-    if isinstance(error, (InvalidTag, ValueError)):
+    if isinstance(error, InvalidTag):
         return "invalid encrypted collaboration frame"
+    if isinstance(error, ValueError):
+        return "invalid collaboration frame"
     return "collaboration transport disconnected"
 
 
@@ -84,8 +123,10 @@ def _classify_fatal(error: BaseException) -> AdapterError | None:
         return error
     if isinstance(error, AdapterDisconnectedError) and error.kind == "relay":
         return error
-    if isinstance(error, (InvalidTag, ValueError)):
+    if isinstance(error, InvalidTag):
         return AdapterIncompatibleError("invalid encrypted collaboration frame", kind="crypto")
+    if isinstance(error, ValueError):
+        return AdapterIncompatibleError("invalid collaboration frame", kind="protocol")
     code = getattr(error, "code", None) or getattr(getattr(error, "rcvd", None), "code", None)
     if code in _FATAL_CLOSE_CODES:
         return AdapterDisconnectedError("relay rejected collaboration connection", kind="relay")

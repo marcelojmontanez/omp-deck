@@ -103,10 +103,10 @@ export async function verifyDeliveryRecovery(page, expectedSessionId) {
     ));
     await page.type('#message', newerDraft);
     await page.evaluate(() => window.deliveryRecoveryFixture.releaseRetry());
-    await page.waitForFunction((id, expected) => (
-      !document.querySelector(`[data-delivery-id="${id}"]`)
+    await page.waitForFunction(expected => (
+      !document.querySelector('#activity .event.pending')
       && document.getElementById('message').value === expected
-    ), {}, requestId, newerDraft);
+    ), {}, newerDraft);
     await page.waitForFunction(expected => selectedAgent().session.activity.filter(event => (
       event.kind === 'user' && event.detail === expected
     )).length === 1, {}, message);

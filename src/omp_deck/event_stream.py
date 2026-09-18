@@ -26,25 +26,15 @@ class FleetEvent:
     generation: int | None
     sequence: int | None
     type: str
-    _payload_json: str
+    encoded: bytes
     timestamp: str
 
     @property
     def payload(self) -> dict[str, Any]:
-        return json.loads(self._payload_json)
+        return json.loads(self.encoded)["payload"]
 
     def public(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "snapshotGeneration": self.snapshot_generation,
-            "sessionId": self.session_id,
-            "instanceId": self.instance_id,
-            "generation": self.generation,
-            "sequence": self.sequence,
-            "type": self.type,
-            "payload": self.payload,
-            "timestamp": self.timestamp,
-        }
+        return json.loads(self.encoded)
 
 
 class EventJournal:
@@ -101,12 +91,24 @@ class EventJournal:
             raise ValueError("event_type is required")
         if not isinstance(payload, Mapping):
             raise TypeError("event payload must be an object")
-        payload_json = json.dumps(dict(payload), separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-        parsed_payload = json.loads(payload_json)
-        if not isinstance(parsed_payload, dict):
-            raise TypeError("event payload must be an object")
-        payload_json = json.dumps(parsed_payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
         with self._condition:
+            timestamp = datetime.now(UTC).isoformat()
+            encoded = json.dumps(
+                {
+                    "id": self._next_id,
+                    "snapshotGeneration": snapshot_generation,
+                    "sessionId": session_id,
+                    "instanceId": instance_id,
+                    "generation": generation,
+                    "sequence": sequence,
+                    "type": event_type,
+                    "payload": dict(payload),
+                    "timestamp": timestamp,
+                },
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
             event = FleetEvent(
                 id=self._next_id,
                 snapshot_generation=snapshot_generation,
@@ -115,12 +117,10 @@ class EventJournal:
                 generation=generation,
                 sequence=sequence,
                 type=event_type,
-                _payload_json=payload_json,
-                timestamp=datetime.now(UTC).isoformat(),
+                encoded=encoded,
+                timestamp=timestamp,
             )
-            encoded_size = len(
-                json.dumps(event.public(), separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
-            )
+            encoded_size = len(encoded)
             self._next_id += 1
             self._events.append((event, encoded_size))
             self._bytes += encoded_size

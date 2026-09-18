@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from omp_deck import _plugin_lifecycle as plugin_lifecycle
 from omp_deck import lifecycle
 from omp_deck.installation_paths import installation_paths, manifest_content, mark_owned
 
@@ -60,6 +61,7 @@ class LifecycleTests(unittest.TestCase):
             unit = paths.unit_path.read_text()
             self.assertIn(f'Environment="OMP_DECK_CONFIG={config}"', unit)
             self.assertIn(f'Environment="HOME={home}"', unit)
+            self.assertIn('Environment="OMP_DECK_OMP_BIN=/usr/bin/omp"', unit)
             self.assertIn(f'Environment="XDG_CONFIG_HOME={home / "config"}"', unit)
             self.assertIn(f'Environment="XDG_STATE_HOME={home / "state"}"', unit)
             self.assertIn(f'Environment="PI_CODING_AGENT_DIR={home / "omp-agent"}"', unit)
@@ -80,6 +82,12 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(state.stat().st_mode & 0o777, 0o700)
             self.assertEqual(paths.config_root.stat().st_mode & 0o777, 0o700)
             self.assertEqual(paths.config_path.stat().st_mode & 0o777, 0o600)
+
+    def test_service_unit_pins_shell_resolved_omp_path(self):
+        with patch("omp_deck._linux_service.shutil.which", return_value="/custom/bin/omp"):
+            unit = lifecycle.service_unit("/tmp/config.json", "omp")
+
+        self.assertIn('Environment="OMP_DECK_OMP_BIN=/custom/bin/omp"', unit)
 
     def test_running_service_is_restarted_after_install(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -198,6 +206,8 @@ class LifecycleTests(unittest.TestCase):
                 paths = installation_paths()
                 for root in (paths.install_root, paths.config_root, paths.state_root):
                     mark_owned(root)
+                plugin_root = plugin_lifecycle.plugin_storage_root()
+                mark_owned(plugin_root)
                 paths.manifest_path.write_text(manifest_content(paths))
                 paths.unit_path.parent.mkdir(parents=True, exist_ok=True)
                 paths.unit_path.write_text("owned unit")
@@ -211,6 +221,7 @@ class LifecycleTests(unittest.TestCase):
                 lifecycle.purge_installation("/usr/bin/omp", runner=runner)
 
             self.assertFalse(paths.state_root.exists())
+            self.assertFalse(plugin_root.exists())
             self.assertNotIn(
                 ["/usr/bin/omp", "plugin", "uninstall", "omp-deck"],
                 [call[0] for call in runner.calls],
@@ -241,11 +252,31 @@ class LifecycleTests(unittest.TestCase):
             )
 
     def test_plugin_install_ignores_unrelated_doctor_warnings_and_uses_official_manager(self):
-        bundled = json.loads((lifecycle.PLUGIN_ROOT / "package.json").read_text(encoding="utf-8"))
-        runner = FakeRunner(
-            [
-                SimpleNamespace(returncode=0, stdout=""),
-                SimpleNamespace(
+        bundled = json.loads((plugin_lifecycle.PLUGIN_ROOT / "package.json").read_text(encoding="utf-8"))
+        calls = []
+        installed = {"path": None}
+
+        def runner(command, *, check=True, capture_output=False):
+            calls.append((command, check, capture_output))
+            if command[-3:] == ["plugin", "list", "--json"]:
+                records = (
+                    []
+                    if installed["path"] is None
+                    else [
+                        {
+                            "name": "omp-deck",
+                            "path": installed["path"],
+                            "version": bundled["version"],
+                            "manifest": {"version": bundled["version"]},
+                        }
+                    ]
+                )
+                return SimpleNamespace(returncode=0, stdout=json.dumps({"npm": records}))
+            if command[1:3] == ["plugin", "install"]:
+                installed["path"] = command[3]
+                return SimpleNamespace(returncode=0, stdout="")
+            if command[-3:] == ["plugin", "doctor", "--json"]:
+                return SimpleNamespace(
                     returncode=0,
                     stdout=json.dumps(
                         [
@@ -253,51 +284,43 @@ class LifecycleTests(unittest.TestCase):
                             {"name": "plugin:omp-deck", "status": "ok"},
                         ]
                     ),
-                ),
-                SimpleNamespace(
-                    returncode=0,
-                    stdout=json.dumps(
-                        {
-                            "npm": [
-                                {
-                                    "name": "omp-deck",
-                                    "version": bundled["version"],
-                                    "manifest": {"version": bundled["version"]},
-                                }
-                            ]
-                        }
-                    ),
-                ),
-                SimpleNamespace(
-                    returncode=0,
-                    stdout=json.dumps({"npm": [{"name": "omp-deck"}]}),
-                ),
-                SimpleNamespace(returncode=0, stdout=""),
-            ]
-        )
+                )
+            if command[1:4] == ["plugin", "uninstall", "omp-deck"]:
+                installed["path"] = None
+                return SimpleNamespace(returncode=0, stdout="")
+            raise AssertionError(command)
+
         settings = self.settings(Path("/tmp/state"))
 
-        lifecycle.install_plugin(settings, runner=runner)
-        lifecycle.remove_plugin(settings.omp_bin, runner=runner)
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with patch.dict(os.environ, self.environment(home), clear=False):
+                source = plugin_lifecycle.install_plugin(settings, runner=runner)
+                plugin_lifecycle.remove_plugin(settings.omp_bin, runner=runner)
+            self.assertFalse(source.parent.exists())
 
         self.assertEqual(
-            runner.calls[0][0],
-            ["/usr/bin/omp", "plugin", "install", str(lifecycle.PLUGIN_ROOT)],
+            calls[0][0],
+            ["/usr/bin/omp", "plugin", "list", "--json"],
         )
         self.assertEqual(
-            runner.calls[1][0],
+            calls[1][0],
+            ["/usr/bin/omp", "plugin", "install", str(source)],
+        )
+        self.assertEqual(
+            calls[2][0],
             ["/usr/bin/omp", "plugin", "doctor", "--json"],
         )
         self.assertEqual(
-            runner.calls[2][0],
+            calls[3][0],
             ["/usr/bin/omp", "plugin", "list", "--json"],
         )
         self.assertEqual(
-            runner.calls[3][0],
+            calls[4][0],
             ["/usr/bin/omp", "plugin", "list", "--json"],
         )
         self.assertEqual(
-            runner.calls[4][0],
+            calls[5][0],
             ["/usr/bin/omp", "plugin", "uninstall", "omp-deck"],
         )
 
@@ -409,6 +432,35 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(observations[0][1], "new config\n")
             self.assertTrue(all(content == "old config\n" for _, content in observations[1:]))
 
+    def test_service_rollback_preserves_files_when_stop_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            config = home / "config/omp-deck/config.json"
+            state = home / "state/omp-deck"
+            settings = self.settings(state)
+            with patch.dict(os.environ, self.environment(home), clear=False):
+                snapshot = lifecycle.capture_service_state(
+                    settings=settings,
+                    config_path=config,
+                    runner=FakeRunner(
+                        [
+                            SimpleNamespace(returncode=1, stdout="disabled"),
+                            SimpleNamespace(returncode=1, stdout="inactive"),
+                        ]
+                    ),
+                )
+                paths = lifecycle.install_service(settings, config, runner=FakeRunner(), start=False)
+                sentinel = state / "state.json"
+                sentinel.write_text("preserved", encoding="utf-8")
+                runner = FakeRunner([SimpleNamespace(returncode=1, stdout="stop failed")])
+
+                with self.assertRaisesRegex(RuntimeError, "cannot stop"):
+                    lifecycle.restore_service_state(snapshot, runner=runner)
+
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserved")
+            self.assertTrue(paths.unit_path.exists())
+            self.assertTrue(paths.manifest_path.exists())
+
     def test_health_check_retries_startup_race_until_service_is_ready(self):
         class Response:
             status = 200
@@ -507,21 +559,12 @@ class LifecycleTests(unittest.TestCase):
             (plugin / "omp-deck.ts").write_text("export default function old() {}\n")
             settings = self.settings(root / "state" / "omp-deck")
             config = root / "config" / "omp-deck" / "config.json"
+            inventory = json.dumps({"npm": [{"name": "omp-deck", "path": str(plugin)}]})
             runner = FakeRunner(
                 [
-                    SimpleNamespace(
-                        returncode=0,
-                        stdout=json.dumps(
-                            {
-                                "npm": [
-                                    {
-                                        "name": "omp-deck",
-                                        "path": str(plugin),
-                                    }
-                                ]
-                            }
-                        ),
-                    )
+                    SimpleNamespace(returncode=0, stdout=inventory),
+                    SimpleNamespace(returncode=0, stdout=inventory),
+                    SimpleNamespace(returncode=0, stdout=""),
                 ]
             )
 
@@ -537,43 +580,110 @@ class LifecycleTests(unittest.TestCase):
                     runner=FakeRunner(),
                     start=False,
                 )
-                backup = lifecycle.backup_plugin(settings, runner=runner)
-                lifecycle.restore_plugin(settings, backup, runner=runner)
+                backup = plugin_lifecycle.backup_plugin(settings, runner=runner)
+                plugin_lifecycle.restore_plugin(settings, backup, runner=runner)
                 lifecycle.restore_service_state(snapshot, runner=FakeRunner())
+                storage_root = plugin_lifecycle.plugin_storage_root()
 
             self.assertTrue(backup.exists())
-            self.assertEqual(backup.parent.parent, settings.state_root.parent)
+            self.assertEqual(backup.parent, storage_root)
             self.assertEqual((backup / "omp-deck.ts").read_text(), "export default function old() {}\n")
             self.assertEqual(
                 runner.calls[-1][0],
                 ["/usr/bin/omp", "plugin", "install", str(backup)],
             )
 
-    def test_plugin_backup_reuses_existing_rollback_source(self):
+    def test_plugin_backup_migrates_existing_local_link_to_durable_storage(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
-            state_root = root / "state" / "omp-deck"
-            backup = state_root.parent / ".omp-deck-setup-rollback-existing" / "plugin"
-            backup.mkdir(parents=True)
-            source = backup / "omp-deck.ts"
+            plugin = root / "mutable-tool-environment/plugin"
+            plugin.mkdir(parents=True)
+            (plugin / "package.json").write_text('{"name":"omp-deck","version":"0.0.9"}')
+            source = plugin / "omp-deck.ts"
             source.write_text("preserved\n")
             settings = SimpleNamespace(
                 omp_bin="/usr/bin/omp",
-                state_root=state_root,
+                state_root=root / "state/omp-deck",
             )
             runner = FakeRunner(
                 [
                     SimpleNamespace(
                         returncode=0,
-                        stdout=json.dumps({"npm": [{"name": "omp-deck", "path": str(backup)}]}),
+                        stdout=json.dumps({"npm": [{"name": "omp-deck", "path": str(plugin)}]}),
                     )
                 ]
             )
 
-            result = lifecycle.backup_plugin(settings, runner=runner)
+            with patch.dict(os.environ, self.environment(root), clear=False):
+                result = plugin_lifecycle.backup_plugin(settings, runner=runner)
+                storage_root = plugin_lifecycle.plugin_storage_root()
+            source.write_text("replaced by package upgrade\n")
 
-            self.assertEqual(result, backup)
-            self.assertEqual(source.read_text(), "preserved\n")
+            self.assertEqual(result.parent, storage_root)
+            self.assertEqual((result / "omp-deck.ts").read_text(), "preserved\n")
+
+    @unittest.skipIf(os.name == "nt", "official local plugin inventory uses a symlink")
+    def test_failed_upgrade_restores_old_durable_plugin_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_package = root / "old-package"
+            new_package = root / "new-package"
+            for package, version, body in (
+                (old_package, "0.0.9", "old bytes\n"),
+                (new_package, plugin_lifecycle.PLUGIN_VERSION, "new bytes\n"),
+            ):
+                package.mkdir()
+                (package / "package.json").write_text(
+                    json.dumps({"name": "omp-deck", "version": version}),
+                    encoding="utf-8",
+                )
+                (package / "omp-deck.ts").write_text(body, encoding="utf-8")
+            settings = self.settings(root / "state/omp-deck")
+            installed_link = root / "omp-plugins/node_modules/omp-deck"
+            installed_link.parent.mkdir(parents=True)
+
+            def runner(command, *, check=True, capture_output=False):
+                if command[-3:] == ["plugin", "list", "--json"]:
+                    records = (
+                        []
+                        if not installed_link.exists()
+                        else [
+                            {
+                                "name": "omp-deck",
+                                "path": str(installed_link),
+                                "version": plugin_lifecycle.PLUGIN_VERSION,
+                                "manifest": {"version": plugin_lifecycle.PLUGIN_VERSION},
+                            }
+                        ]
+                    )
+                    return SimpleNamespace(returncode=0, stdout=json.dumps({"npm": records}))
+                if command[1:3] == ["plugin", "install"]:
+                    installed_link.unlink(missing_ok=True)
+                    installed_link.symlink_to(command[3], target_is_directory=True)
+                    return SimpleNamespace(returncode=0, stdout="")
+                if command[-3:] == ["plugin", "doctor", "--json"]:
+                    return SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps([{"name": "plugin:omp-deck", "status": "ok"}]),
+                    )
+                raise AssertionError(command)
+
+            with patch.dict(os.environ, self.environment(root), clear=False):
+                old_source = plugin_lifecycle.copy_plugin(old_package, prefix="plugin-")
+                installed_link.symlink_to(old_source, target_is_directory=True)
+                backup = plugin_lifecycle.backup_plugin(settings, runner=runner)
+                with patch("omp_deck._plugin_lifecycle.PLUGIN_ROOT", new_package):
+                    with self.assertRaisesRegex(RuntimeError, "owned durable installation"):
+                        plugin_lifecycle.install_plugin(settings, runner=runner, preserve=installed_link)
+                    self.assertEqual(installed_link.resolve(), old_source.resolve())
+                    new_source = plugin_lifecycle.install_plugin(settings, runner=runner, preserve=backup)
+                self.assertEqual(installed_link.resolve(), new_source.resolve())
+
+                plugin_lifecycle.restore_plugin(settings, backup, runner=runner)
+
+            self.assertEqual(installed_link.resolve(), old_source.resolve())
+            self.assertEqual((installed_link / "omp-deck.ts").read_text(), "old bytes\n")
+            self.assertFalse(new_source.exists())
 
 
 if __name__ == "__main__":

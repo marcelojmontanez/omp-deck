@@ -17,6 +17,7 @@ function createComposerRecovery({
   pendingFor,
   loadDraft,
   saveDraft,
+  draftChanged,
   attachmentsFor,
   setAttachments,
   mergeAttachments,
@@ -268,6 +269,7 @@ function createComposerRecovery({
     const current = loadDraft(agent.id);
     if (current !== message) {
       saveDraft(agent.id, [current, message].filter(Boolean).join('\n'));
+      draftChanged(agent.id);
     }
     setAttachments(agent.id, mergeAttachments(recoveredAttachments, attachmentsFor(agent.id)));
     if (!current && ['uncertain', 'submitting'].includes(record?.state || item.state)) {

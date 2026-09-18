@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import stat
 from contextlib import contextmanager
@@ -20,6 +21,7 @@ else:
     import fcntl
 
 _TEMPORARY_ATTEMPTS = 16
+_TEMPORARY_CLEANUP_BATCH = 4_096
 _DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 _FILE_READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
 
@@ -119,11 +121,14 @@ class PrivateStateFile:
         self._locked = False
 
     @contextmanager
-    def locked(self):
+    def locked(self, *, blocking: bool = True):
         ensure_private_directory(self.root, repair=self.repair_root)
         if os.name == "nt":
             self._prepare_windows_lock()
-            with named_mutex(self.lock_path):
+            with named_mutex(self.lock_path, blocking=blocking) as acquired:
+                if not acquired:
+                    yield None
+                    return
                 self._locked = True
                 try:
                     yield self
@@ -148,7 +153,11 @@ class PrivateStateFile:
                 if not stat.S_ISREG(info.st_mode) or not _posix_owned(info):
                     raise OSError("private state lock is unsafe")
                 os.fchmod(descriptor, 0o600)
-                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+                except BlockingIOError:
+                    yield None
+                    return
                 self._directory_fd = directory_fd
                 self._locked = True
                 try:
@@ -216,6 +225,70 @@ class PrivateStateFile:
         finally:
             os.close(descriptor)
 
+    def size(self, max_bytes: int) -> int | None:
+        self._require_lock()
+        if os.name == "nt":
+            try:
+                info = self.path.lstat()
+            except FileNotFoundError:
+                return None
+            if _unsupported_path(info) or not stat.S_ISREG(info.st_mode):
+                raise OSError("private state path is not a safe regular file")
+            if not owned_by_current_user(self.path) or not is_private_path(self.path):
+                raise OSError("private state file is unsafe")
+            if info.st_size > max_bytes:
+                raise OSError("private state file is too large")
+            return info.st_size
+        try:
+            descriptor = os.open(self.path.name, _FILE_READ_FLAGS, dir_fd=self._directory_fd)
+        except FileNotFoundError:
+            return None
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or not _posix_owned(info) or stat.S_IMODE(info.st_mode) != 0o600:
+                raise OSError("private state file is unsafe")
+            if info.st_size > max_bytes:
+                raise OSError("private state file is too large")
+            return info.st_size
+        finally:
+            os.close(descriptor)
+
+    def cleanup_temporaries(self) -> int:
+        """Remove only atomic remnants for this target while its lock is held."""
+        self._require_lock()
+        pattern = re.compile(rf"\.{re.escape(self.path.name)}\.[0-9a-f]{{32}}\.tmp")
+        removed = 0
+        entries = os.scandir(self.root if os.name == "nt" else self._directory_fd)
+        matched = 0
+        with entries:
+            for entry in entries:
+                name = entry.name
+                if pattern.fullmatch(name) is None:
+                    continue
+                if matched >= _TEMPORARY_CLEANUP_BATCH:
+                    break
+                matched += 1
+                if os.name == "nt":
+                    candidate = self.root / name
+                    info = candidate.lstat()
+                    if (
+                        _unsupported_path(info)
+                        or not stat.S_ISREG(info.st_mode)
+                        or not owned_by_current_user(candidate)
+                        or not is_private_path(candidate)
+                    ):
+                        raise OSError("atomic temporary file is unsafe")
+                    candidate.unlink()
+                else:
+                    info = os.stat(name, dir_fd=self._directory_fd, follow_symlinks=False)
+                    if not stat.S_ISREG(info.st_mode) or not _posix_owned(info) or stat.S_IMODE(info.st_mode) != 0o600:
+                        raise OSError("atomic temporary file is unsafe")
+                    os.unlink(name, dir_fd=self._directory_fd)
+                removed += 1
+        if removed and os.name != "nt":
+            os.fsync(self._directory_fd)
+        return removed
+
     def replace(self, payload: bytes, *, overwrite: bool = True) -> None:
         self._require_lock()
         if os.name != "nt":
@@ -259,8 +332,19 @@ class PrivateStateFile:
         self._require_lock()
         try:
             if os.name == "nt":
+                info = self.path.lstat()
+                if (
+                    _unsupported_path(info)
+                    or not stat.S_ISREG(info.st_mode)
+                    or not owned_by_current_user(self.path)
+                    or not is_private_path(self.path)
+                ):
+                    raise OSError("private state file is unsafe")
                 self.path.unlink()
             else:
+                info = os.stat(self.path.name, dir_fd=self._directory_fd, follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode) or not _posix_owned(info) or stat.S_IMODE(info.st_mode) != 0o600:
+                    raise OSError("private state file is unsafe")
                 os.unlink(self.path.name, dir_fd=self._directory_fd)
                 os.fsync(self._directory_fd)
         except FileNotFoundError:

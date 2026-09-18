@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ._attachment_limits import extension_attachment_limits, platform_attachment_limits
+from ._extension_jobs import normalize_async_jobs
 from ._platform_capabilities import platform_capabilities
 from ._session_activity import completion_state
 from ._thinking import normalized_thinking, thinking_levels_for_model
@@ -108,34 +109,46 @@ def has_visible_content(message: Mapping[str, Any]) -> bool:
     )
 
 
-def normalize_messages(values: Sequence[Mapping[str, Any]], session_id: str) -> list[dict[str, Any]]:
+def normalize_messages(
+    values: Sequence[Mapping[str, Any]], session_id: str, *, offset: int = 0
+) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
-    retained_bytes = 0
     start = max(0, len(values) - MAX_MESSAGES)
-    for index, raw in enumerate(values[start:], start=start):
-        canonical_raw = plain_json(raw)
-        canonical = json.dumps(
-            canonical_raw, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+    for index, raw in enumerate(values[start:], start=start + offset):
+        message_id = raw.get("id")
+        if not isinstance(message_id, str) or not message_id:
+            canonical = json.dumps(
+                plain_json(raw), sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+            )
+            message_id = hashlib.sha256(f"{session_id}\0{index}\0{canonical}".encode()).hexdigest()
+        normalized.append(
+            {
+                "id": message_id,
+                "role": str(raw.get("role", "unknown")),
+                "content": _message_content(raw),
+                "createdAt": _timestamp(raw.get("timestamp")),
+            }
         )
-        raw_id = raw.get("id")
-        message_id = (
-            raw_id
-            if isinstance(raw_id, str) and raw_id
-            else hashlib.sha256(f"{session_id}\0{index}\0{canonical}".encode()).hexdigest()
-        )
-        message = {
-            "id": message_id,
-            "role": str(raw.get("role", "unknown")),
-            "content": _message_content(raw),
-            "createdAt": _timestamp(raw.get("timestamp")),
-        }
-        encoded_size = len(json.dumps(message, ensure_ascii=False, allow_nan=False).encode("utf-8"))
-        normalized.append(message)
-        retained_bytes += encoded_size
-        while normalized and retained_bytes > MAX_MESSAGE_BYTES:
-            removed = normalized.pop(0)
-            retained_bytes -= len(json.dumps(removed, ensure_ascii=False, allow_nan=False).encode("utf-8"))
-    return normalized
+    return bounded_messages(normalized)
+
+
+def bounded_messages(messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    retained_bytes = 0
+    start = len(messages)
+    for index in range(len(messages) - 1, max(-1, len(messages) - MAX_MESSAGES - 1), -1):
+        size = len(json.dumps(messages[index], ensure_ascii=False, allow_nan=False).encode("utf-8"))
+        if retained_bytes + size > MAX_MESSAGE_BYTES:
+            break
+        retained_bytes += size
+        start = index
+    return list(messages[start:])
+
+
+def message_identity(message: Mapping[str, Any]) -> tuple[Any, ...] | None:
+    if isinstance(message.get("id"), str) and message["id"]:
+        return ("id", message["id"])
+    timestamp = message.get("timestamp")
+    return (message.get("role"), timestamp) if isinstance(timestamp, (str, int, float)) else None
 
 
 def bounded_collection(values: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -251,7 +264,7 @@ def _collab_pending(request: Mapping[str, Any] | None) -> dict[str, Any] | None:
         "id": f"{request_id}:0",
         "prompt": request.get("title") or kind,
         "options": options,
-        "multi": toggle_selection,
+        "multi": False,
         "toggleSelection": toggle_selection,
         "recommended": initial if isinstance(initial, int) and not isinstance(initial, bool) else None,
         "checkedIndices": list(request.get("checkedIndices", [])) if toggle_selection else [],
@@ -291,6 +304,16 @@ def rpc_projection(
             else completion_state(snapshot.messages)
         )
     )
+    messages = normalize_messages(snapshot.messages, session_id)
+    stream_key = session.get("_rpcStreamingKey")
+    retain_stream = (
+        snapshot.transport_status == "connected"
+        and state.get("is_streaming")
+        and session.get("_generation") == generation
+        and session["transport"]["instanceId"] == instance_id
+        and not session.get("_resyncRequired")
+        and not (stream_key is not None and any(message_identity(item) == stream_key for item in snapshot.messages))
+    )
     return {
         "ompSessionId": state.get("session_id") or session.get("ompSessionId"),
         "title": state.get("session_name") or session["title"],
@@ -304,14 +327,21 @@ def rpc_projection(
         },
         "capabilities": capabilities,
         "attachmentLimits": platform_attachment_limits("rpc"),
-        "messages": normalize_messages(snapshot.messages, session_id),
+        "messages": messages,
+        "streamingMessage": session.get("streamingMessage") if retain_stream else None,
         "todos": normalize_todos(snapshot.todos),
         "subagents": bounded_collection(snapshot.subagents),
+        "subagentError": None,
         "pendingUiRequest": pending,
         "workingOn": None if not state.get("is_streaming") else session.get("workingOn"),
         "model": _model_identity(state),
         "thinking": normalized_thinking(state.get("thinking_level")),
         "thinkingLevels": list(thinking_levels),
+        "_rpcMessageCount": len(snapshot.messages),
+        "_rpcLastMessageKey": message_identity(snapshot.messages[-1]) if snapshot.messages else None,
+        "_rpcLastMessageId": messages[-1]["id"] if messages else None,
+        "_rpcStreamingIndex": session.get("_rpcStreamingIndex") if retain_stream else None,
+        "_rpcStreamingKey": stream_key if retain_stream else None,
         "_generation": generation,
         "_adapterSequence": snapshot.sequence,
         "_resyncRequired": False,
@@ -399,12 +429,7 @@ def extension_projection(
     capabilities["attachments"] = (
         registration.capabilities.get("attachments") is True and snapshot.transport_status == "connected"
     )
-    async_jobs = snapshot.async_jobs
-    if isinstance(async_jobs, Mapping):
-        async_jobs = async_jobs.get("jobs", [])
-    if not isinstance(async_jobs, Sequence) or isinstance(async_jobs, (str, bytes)):
-        async_jobs = []
-    subagents = [item for item in async_jobs if isinstance(item, Mapping)]
+    subagents = normalize_async_jobs(snapshot.async_jobs)
     pending = None if snapshot.idle else session.get("pendingUiRequest")
     public_state = (
         "disconnected"

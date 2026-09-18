@@ -101,23 +101,23 @@ class TerminalCommandCoordinator:
             active = runtime(session_id)
             prepared = self._prepare(active, action, payload)
             recovery = self._message_recovery(session_id, action, payload)
-            persisted = self.requests.reserve(
+            with self.requests.admission(
                 scope,
                 request_id,
                 request_fingerprint,
                 recovery=recovery,
-            )
-            if persisted is not None:
-                return persisted
-            try:
-                result = self._execute(active, request_id, action, payload, prepared)
-            except Exception:
-                if recovery is not None:
-                    self.requests.mark_uncertain(scope, request_id, request_fingerprint)
-                raise
-            self.requests.complete(scope, request_id, request_fingerprint, result)
-            self._remember(key, request_fingerprint, result)
-            return dict(result)
+            ) as persisted:
+                if persisted is not None:
+                    return persisted
+                try:
+                    result = self._execute(active, request_id, action, payload, prepared)
+                except Exception:
+                    if recovery is not None:
+                        self.requests.mark_uncertain(scope, request_id, request_fingerprint)
+                    raise
+                self.requests.complete(scope, request_id, request_fingerprint, result)
+                self._remember(key, request_fingerprint, result)
+                return dict(result)
 
     def deliveries(self, session_id: str) -> list[dict[str, Any]]:
         return self.requests.deliveries(session_id)
@@ -184,11 +184,7 @@ class TerminalCommandCoordinator:
             raise ValueError("invalid Collab request id") from None
         value = payload.get("value") if action == "respondToUi" else None
         if value is not None and not isinstance(value, str):
-            value = json.dumps(
-                value,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
+            raise ValueError("Collab UI response value must be a string")
         return request_id, value
 
     def _execute(self, active, request_id, action, payload, prepared):

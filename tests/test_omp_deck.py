@@ -41,6 +41,21 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(configured.host, "127.0.0.1")
             self.assertTrue(configured.show_history)
 
+    def test_service_omp_environment_pins_the_resolved_executable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config.json"
+            config.write_text('{"omp_bin":"omp"}', encoding="utf-8")
+            config.chmod(0o600)
+
+            with (
+                patch.dict("os.environ", {"OMP_DECK_OMP_BIN": str(root / "bin/omp")}),
+                patch("omp_deck.settings.sys.platform", "linux"),
+            ):
+                configured = load_settings(config)
+
+            self.assertEqual(configured.omp_bin, str(root / "bin/omp"))
+
     def test_invalid_port_and_allowed_hosts_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "config.json"
@@ -99,6 +114,28 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(result, 0)
         remove.assert_called_once_with()
         load_settings_mock.assert_not_called()
+
+    def test_plugin_install_machine_report_excludes_native_diagnostics(self):
+        script = """
+from pathlib import Path
+from unittest.mock import patch
+from omp_deck import cli
+from omp_deck._plugin_lifecycle import run
+def install(*args, **kwargs):
+    run([cli.sys.executable, "-c", "print('native plugin diagnostic')"])
+    return Path("plugin-new")
+with patch.object(cli, "load_settings"), patch.object(cli, "install_plugin", side_effect=install):
+    raise SystemExit(cli.main(["plugin", "install", "--json"]))
+"""
+        result = subprocess.run(
+            [cli.sys.executable, "-c", script],
+            cwd=Path(cli.__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(json.loads(result.stdout), {"version": 1, "pluginSource": "plugin-new"})
+        self.assertIn("native plugin diagnostic", result.stderr)
 
     def test_pair_refuses_tailscale_auth_mode_without_creating_state(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -235,7 +272,7 @@ class CommandTests(unittest.TestCase):
             patch.object(cli, "backup_plugin", return_value=None),
             patch.object(cli, "discard_plugin_backup", side_effect=lambda value: calls.append("discard")),
             patch.object(cli, "AuthManager", return_value=manager),
-            patch.object(cli, "install_plugin", side_effect=lambda value: calls.append("plugin")),
+            patch.object(cli, "install_plugin", side_effect=lambda value, **_kwargs: calls.append("plugin")),
             patch.object(
                 cli,
                 "install_service",
@@ -486,12 +523,52 @@ class CommandTests(unittest.TestCase):
             text=True,
         )
 
+    def test_tailscale_cleanup_accepts_only_the_owned_https_serve_schema(self):
+        configured = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "TCP": {"443": {"HTTPS": True}},
+                    "Web": {"deck.example.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8787"}}}},
+                }
+            ),
+            stderr="",
+        )
+        reset = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with patch.object(cli.subprocess, "run", side_effect=[configured, reset]) as run:
+            cli.disable_tailscale(SimpleNamespace(port=8787))
+
+        self.assertEqual(run.call_args_list[-1].args[0], ["tailscale", "serve", "reset"])
+
+    def test_tailscale_cleanup_refuses_unrelated_tcp_listener(self):
+        configured = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "TCP": {
+                        "443": {"HTTPS": True},
+                        "2222": {"TCPForward": "127.0.0.1:22"},
+                    },
+                    "Web": {"deck.example.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8787"}}}},
+                }
+            ),
+            stderr="",
+        )
+        with patch.object(cli.subprocess, "run", return_value=configured) as run:
+            with self.assertRaisesRegex(RuntimeError, "unrecognized"):
+                cli.disable_tailscale(SimpleNamespace(port=8787))
+
+        self.assertEqual(run.call_count, 1)
+
     def test_tailscale_setup_verifies_the_exact_proxy(self):
         empty = SimpleNamespace(returncode=0, stdout="{}", stderr="")
         configured = SimpleNamespace(
             returncode=0,
             stdout=json.dumps(
-                {"Web": {"deck.example.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8787"}}}}}
+                {
+                    "TCP": {"443": {"HTTPS": True}},
+                    "Web": {"deck.example.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8787"}}}},
+                }
             ),
             stderr="",
         )
@@ -510,7 +587,10 @@ class CommandTests(unittest.TestCase):
         mismatched = SimpleNamespace(
             returncode=0,
             stdout=json.dumps(
-                {"Web": {"deck.example.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:9999"}}}}}
+                {
+                    "TCP": {"443": {"HTTPS": True}},
+                    "Web": {"deck.example.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:9999"}}}},
+                }
             ),
             stderr="",
         )

@@ -9,6 +9,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
+from . import node_plugin
 from .node_artifacts import inspect_wheel
 from .node_common import (
     HEX40,
@@ -21,7 +22,6 @@ from .node_common import (
     lock,
     pid,
     profile,
-    quiescent,
     read_file,
     registry,
     require_dir,
@@ -101,23 +101,16 @@ def _save(root, m):
     atomic_json(root / "guard/manifest.json", m)
 
 
-def _installed(p):
+def _environment_identity(p, environment):
     code = "import json,omp_deck;print(json.dumps(omp_deck.build_identity()))"
-    value = json.loads(run(p, [p.tool_python, "-c", code], timeout=30).stdout)
+    value = json.loads(run(p, [environment / "bin/python", "-c", code], timeout=30).stdout)
     if not isinstance(value, dict) or set(value) != {"version", "revision"}:
         raise ReleaseError("installed build identity is invalid")
     return value
 
 
-def _plugin_path(p):
-    data = json.loads(run(p, [p.omp, "plugin", "list", "--json"], timeout=30).stdout)
-    matches = [item for item in data.get("npm", []) if isinstance(item, dict) and item.get("name") == "omp-deck"]
-    if len(matches) != 1:
-        raise ReleaseError("expected exactly one omp-deck plugin")
-    actual = Path(matches[0].get("path", "")).resolve(strict=True)
-    if actual != p.plugin_expected.resolve(strict=True):
-        raise ReleaseError("plugin path differs from authorized path")
-    return actual
+def _installed(p):
+    return _environment_identity(p, p.tool_root)
 
 
 def _guard_files(p, m):
@@ -181,16 +174,6 @@ def _install(p, a, constraints):
         raise ReleaseError("uv launcher identity changed")
 
 
-def _install_plugin(p, expected, env, backup=None):
-    if tree_digest(_plugin_path(p)) == expected:
-        return False
-    cmd = [p.omp, "plugin", "install", backup] if backup else [p.tool_python, "-m", "omp_deck", "plugin", "install"]
-    run(p, cmd, env=env, timeout=180)
-    if tree_digest(_plugin_path(p)) != expected:
-        raise ReleaseError("plugin identity mismatch after installation")
-    return True
-
-
 def prepare(request):
     p, root, tx = _context(request)
     guard = root / "guard"
@@ -208,10 +191,11 @@ def prepare(request):
         for executable in (p.uv, p.base_python, p.omp, p.tool_python):
             if not executable.is_file() or not os.access(executable, os.X_OK):
                 raise ReleaseError("required executable unavailable")
+        plugin_source = node_plugin.plugin_path(p)
         if (
             not running(p)
             or _installed(p) != {"version": rollback["wheelVersion"], "revision": rollback["revision"]}
-            or tree_digest(_plugin_path(p)) != rollback["pluginSha256"]
+            or tree_digest(plugin_source) != rollback["pluginSha256"]
         ):
             raise ReleaseError("installed rollback identity mismatch")
         read_file(p.auth, 1024 * 1024, private=True)
@@ -220,7 +204,7 @@ def prepare(request):
         snapshots.mkdir(mode=0o700)
         shutil.copytree(p.tool_root, snapshots / "uv-tool-environment", symlinks=True)
         shutil.copytree(
-            _plugin_path(p), snapshots / "plugin", symlinks=False, ignore=shutil.ignore_patterns("node_modules")
+            plugin_source, snapshots / "plugin", symlinks=False, ignore=shutil.ignore_patterns("node_modules")
         )
         frozen = run(p, [p.uv, "pip", "freeze", "--python", p.tool_python], timeout=60).stdout
         constraints = (
@@ -264,6 +248,7 @@ def prepare(request):
                 "registryStable": stable,
                 "registryGeneration": reg.get("generation"),
                 "pluginBackup": str(snapshots / "plugin"),
+                "pluginSource": str(plugin_source),
                 "environmentBackup": str(snapshots / "uv-tool-environment"),
                 "serviceEnvironment": environment,
                 "serviceEnabled": enabled,
@@ -323,7 +308,14 @@ def deploy(request):
                 _save(root, m)
                 stop(p, cutover["pid"])
             _install(p, m["candidate"], m["constraints"])
-            _install_plugin(p, m["candidate"]["pluginSha256"], m["originals"]["serviceEnvironment"])
+            plugin_source = node_plugin.install_plugin(
+                p,
+                m["candidate"]["pluginSha256"],
+                m["originals"]["serviceEnvironment"],
+                m["originals"]["pluginSource"],
+            )
+            m["candidatePluginSource"] = str(plugin_source)
+            _save(root, m)
             if m["candidate"]["pluginSha256"] != m["rollback"]["pluginSha256"]:
                 m["pluginActivation"] = "restart-required"
             _guard_files(p, m)
@@ -347,54 +339,9 @@ def deploy(request):
 
 
 def _rollback_locked(p, root, m, cookie, reason):
-    if m["state"] == "rolledback":
-        return
-    if not m.get("touched"):
-        m.update(state="rolledback", deadline=None, lastError=reason)
-        _save(root, m)
-        return
-    _guard_files(p, m)
-    _verify_staged(m)
-    auth_before = digest(p.auth)
-    if running(p):
-        with _admit(p, cookie) as current:
-            if current["registryStable"] != m["cutover"]["registryStable"]:
-                raise ReleaseError("registry identities changed; refusing rollback")
-            stop(p, current["pid"])
-    elif not quiescent(p):
-        raise ReleaseError("service ownership uncertain; refusing rollback")
-    backup = Path(m["originals"]["environmentBackup"])
-    if not backup.is_dir() or backup.is_symlink():
-        raise ReleaseError("retained rollback environment unavailable")
-    failed = p.tool_root.with_name(f".{p.tool_root.name}.failed-{m['transaction']}")
-    if failed.exists() or failed.is_symlink():
-        raise ReleaseError("rollback swap destination already exists")
-    moved = p.tool_root.exists() and not p.tool_root.is_symlink()
-    if moved:
-        os.replace(p.tool_root, failed)
-    try:
-        shutil.copytree(backup, p.tool_root, symlinks=True)
-        expected = {"version": m["rollback"]["wheelVersion"], "revision": m["rollback"]["revision"]}
-        if _installed(p) != expected:
-            raise ReleaseError("retained rollback environment identity mismatch")
-    except BaseException:
-        shutil.rmtree(p.tool_root, ignore_errors=True)
-        if moved:
-            os.replace(failed, p.tool_root)
-        raise
-    if moved:
-        shutil.rmtree(failed)
-    _install_plugin(
-        p, m["rollback"]["pluginSha256"], m["originals"]["serviceEnvironment"], m["originals"]["pluginBackup"]
-    )
-    start(p)
-    health(p, base_url=m.get("loopbackHTTP"))
-    if service_enabled(p) != m["originals"]["serviceEnabled"]:
-        raise ReleaseError("service enabled policy changed during rollback")
-    if digest(p.auth) != auth_before or registry(p)[1] != m["cutover"]["registryStable"]:
-        raise ReleaseError("durable identity changed during rollback")
-    m.update(state="rolledback", deadline=None, lastError=reason, pluginActivation="unchanged")
-    _save(root, m)
+    from .node_rollback import rollback_locked
+
+    rollback_locked(p, root, m, cookie, reason)
 
 
 def rollback(request):
@@ -404,9 +351,10 @@ def rollback(request):
         try:
             _rollback_locked(p, root, m, request.get("cookie_file"), "explicit guarded rollback")
         except BaseException as e:
-            m["state"] = "rollback_failed"
-            m["lastError"] = f"rollback failed: {type(e).__name__}"
-            _save(root, m)
+            if m["state"] not in {"verified", "rolledback"}:
+                m["state"] = "rollback_failed"
+                m["lastError"] = f"rollback failed: {type(e).__name__}"
+                _save(root, m)
             raise
     return status(request)
 
@@ -438,7 +386,7 @@ def verify(request):
         _guard_files(p, m)
         if (
             _installed(p) != {"version": m["candidate"]["wheelVersion"], "revision": m["candidate"]["revision"]}
-            or tree_digest(_plugin_path(p)) != m["candidate"]["pluginSha256"]
+            or tree_digest(node_plugin.plugin_path(p, m["candidatePluginSource"])) != m["candidate"]["pluginSha256"]
         ):
             raise ReleaseError("candidate identity changed")
         m.update(state="verified", deadline=None, lastError=None)

@@ -1,30 +1,29 @@
 window.TodoUI = (() => {
-  const TASK = /^\s{4}- \[([X ])\] (.+?)(?: \((in progress|blocked)\))?\s*$/i;
-  const PHASE = /^\s{2}([^:\n]+):\s*$/;
-
-  function parse(text) {
-    const phases = [];
-    let phase = null;
-    for (const line of String(text || '').split('\n')) {
-      const phaseMatch = line.match(PHASE);
-      if (phaseMatch) {
-        phase = {name: phaseMatch[1].trim(), tasks: []};
-        phases.push(phase);
-        continue;
-      }
-      const taskMatch = line.match(TASK);
-      if (!taskMatch || !phase) continue;
-      phase.tasks.push({
-        done: taskMatch[1].toUpperCase() === 'X',
-        text: taskMatch[2].trim(),
-        status: taskMatch[3] || '',
+  function groups(todos) {
+    const phases = new Map();
+    if (!Array.isArray(todos)) return [];
+    for (const todo of todos) {
+      if (!todo || typeof todo !== 'object') continue;
+      const phase = String(todo.phase ?? todo.group ?? 'Tasks');
+      if (!phases.has(phase)) phases.set(phase, []);
+      const status = todo.status === 'in_progress' ? 'in progress' : String(todo.status ?? '');
+      phases.get(phase).push({
+        done: todo.done === true || ['done', 'completed'].includes(todo.status),
+        text: String(todo.text ?? todo.title ?? todo.content ?? 'Task'),
+        status,
       });
     }
-    return phases.filter(item => item.tasks.length);
+    return [...phases].map(([name, tasks]) => ({name, tasks}));
   }
 
-  function render(text, escapeHtml) {
-    const phases = parse(text);
+  function count(todos) {
+    return Array.isArray(todos)
+      ? todos.reduce((total, todo) => total + (todo && typeof todo === 'object' ? 1 : 0), 0)
+      : 0;
+  }
+
+  function render(todos, escapeHtml) {
+    const phases = groups(todos);
     if (!phases.length) {
       return `<section class="todo-panel" id="todo-panel" aria-label="Session tasks">
         <div class="todo-panel-head"><span class="todo-panel-icon">✓</span><strong>Tasks</strong></div>
@@ -52,5 +51,5 @@ window.TodoUI = (() => {
     </section>`;
   }
 
-  return {parse, render};
+  return {count, render};
 })();

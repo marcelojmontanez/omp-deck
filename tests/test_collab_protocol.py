@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import dataclasses
+import json
+import os
 import unittest
 
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from omp_deck.collab_protocol import (
     COLLAB_PROTO,
@@ -20,6 +23,13 @@ from omp_deck.collab_protocol import (
     validate_guest_frame,
     validate_host_frame,
 )
+
+
+def producer_seal(key, frame):
+    """Encode an official-host fixture independently of Deck validation."""
+    plaintext = json.dumps(frame, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
+    iv = os.urandom(12)
+    return iv + AESGCM(key).encrypt(iv, plaintext, None)
 
 
 class LinkTests(unittest.TestCase):
@@ -165,8 +175,15 @@ class EncodingTests(unittest.TestCase):
                 "agents": [agent],
                 "entryCount": 0,
             },
-            {"t": "snapshot-chunk", "entries": [{"type": "future", "payload": {"x": 1}}], "final": True},
-            {"t": "entry", "entry": {"type": "future", "payload": []}},
+            {
+                "t": "snapshot-chunk",
+                "entries": [{"type": "future", "id": "f", "parentId": None, "timestamp": "now", "payload": {"x": 1}}],
+                "final": True,
+            },
+            {
+                "t": "entry",
+                "entry": {"type": "future", "id": "f", "parentId": None, "timestamp": "now", "payload": []},
+            },
             {"t": "event", "event": {"type": "future", "payload": None}},
             {"t": "state", "state": state},
             {"t": "bus", "channel": "task:subagent:lifecycle", "data": {"id": "a"}},
@@ -198,6 +215,28 @@ class EncodingTests(unittest.TestCase):
             {"t": "agents", "agents": [{**agent, "createdAt": True}]},
             {"t": "ui-request", "request": {"kind": "select", "title": "x", "options": [{"label": 1}], "reqId": 1}},
             {"t": "event", "event": {"type": "notice", "level": "debug", "message": "x"}},
+            {"t": "entry", "entry": {"type": "model_change", "model": "openai/gpt-5"}},
+            {
+                "t": "entry",
+                "entry": {
+                    "type": "model_change",
+                    "id": "model",
+                    "parentId": None,
+                    "timestamp": "now",
+                    "model": "openai/gpt-5",
+                    "resolvedModelIsFallback": "false",
+                },
+            },
+            {
+                "t": "entry",
+                "entry": {
+                    "type": "thinking_level_change",
+                    "id": "thinking",
+                    "parentId": None,
+                    "timestamp": "now",
+                    "configured": 1,
+                },
+            },
         )
         for frame in malformed:
             with self.assertRaises(ValueError):
@@ -274,7 +313,7 @@ class EncodingTests(unittest.TestCase):
             },
             "state": state,
             "agents": [],
-            "entryCount": 1,
+            "entryCount": 4,
         }
         tool_result = {
             "role": "toolResult",
@@ -300,7 +339,41 @@ class EncodingTests(unittest.TestCase):
                     "parentId": None,
                     "timestamp": "now",
                     "message": tool_result,
-                }
+                },
+                {
+                    "type": "model_change",
+                    "id": "model",
+                    "parentId": "entry",
+                    "timestamp": "now",
+                    "model": "openai/gpt-5",
+                    "role": "default",
+                    "resolvedModelIsFallback": False,
+                },
+                {
+                    "type": "thinking_level_change",
+                    "id": "thinking",
+                    "parentId": "model",
+                    "timestamp": "now",
+                    "thinkingLevel": "high",
+                    "configured": None,
+                },
+                {
+                    "type": "compaction",
+                    "id": "compaction",
+                    "parentId": "thinking",
+                    "timestamp": "now",
+                    "summary": "summary",
+                    "shortSummary": "short",
+                    "firstKeptEntryId": "model",
+                    "tokensBefore": 100,
+                    "tokensAfter": 25,
+                    "method": "summary",
+                    "providerReplayThroughEntryId": "thinking",
+                    "details": {"artifact": 1},
+                    "preserveData": {"hook": True},
+                    "fromExtension": False,
+                    "warning": "low progress",
+                },
             ],
             "final": True,
         }
@@ -370,11 +443,9 @@ class EncodingTests(unittest.TestCase):
                 },
             },
         )
-        self.assertEqual(open_frame(bytes(range(32)), seal_frame(bytes(range(32)), welcome), direction="host"), welcome)
-        self.assertEqual(
-            open_frame(bytes(range(32)), seal_frame(bytes(range(32)), snapshot), direction="host"),
-            snapshot,
-        )
+        key = bytes(range(32))
+        self.assertEqual(open_frame(key, producer_seal(key, welcome), direction="host"), welcome)
+        self.assertEqual(open_frame(key, producer_seal(key, snapshot), direction="host"), snapshot)
         self.assertIs(validate_host_frame(welcome), welcome)
         self.assertIs(validate_host_frame(snapshot), snapshot)
         self.assertEqual(validate_host_frame({"t": "state", "state": state}), {"t": "state", "state": state})

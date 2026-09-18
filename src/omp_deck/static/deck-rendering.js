@@ -47,6 +47,17 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     return canOpen(agent) ? agent : null;
   }
 
+  let detailRenderDeferred = false;
+  function hasConversationSelection() {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed) return false;
+    return el.activity.contains(selection.anchorNode) || el.activity.contains(selection.focusNode);
+  }
+  document.addEventListener('selectionchange', () => {
+    if (!detailRenderDeferred || hasConversationSelection()) return;
+    renderDetail();
+  });
+
   function touchRender() {
     state.renderRevision += 1;
   }
@@ -137,6 +148,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
         ...metadata,
         duplicate,
         agent.pinned ? 'Pinned' : '',
+        agent.inboxState === 'unread' ? 'Unread response' : '',
         lifecycleNote,
       ].filter(Boolean).join(', ');
       return `<button class="agent-card ${escapeHtml(agentLifecycle)}${agent.pinned ? ' pinned' : ''}" data-id="${escapeHtml(agent.id)}" type="button" aria-label="${escapeHtml(accessible)}">
@@ -161,6 +173,13 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
 
   function renderDetail({selectionChanged = false} = {}) {
     const agent = selectedAgent();
+    if (!selectionChanged
+        && state.renderedSessionId === agent?.id
+        && hasConversationSelection()) {
+      detailRenderDeferred = true;
+      return;
+    }
+    detailRenderDeferred = false;
     const session = agent?.session || {};
     const renderKey = `${session.updatedMs || ''}:${agent?.inboxState || ''}:${agent?.historyError || ''}:${state.showArchive}:${navigator.onLine}`;
     if (!selectionChanged
@@ -249,6 +268,18 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
       const safeReason = String(agent.historyError).slice(0, 240);
       notices.push(`<span class="bridge-warning history-warning" role="status">${escapeHtml(`Conversation history could not synchronize. ${safeReason}. Restart this OMP when idle and resume the session to load an updated extension.`)}</span>`);
     }
+    if (agent?.deliveryError) {
+      const errorCode = typeof agent.deliveryError.errorCode === 'string'
+        ? agent.deliveryError.errorCode.trim().slice(0, 80)
+        : '';
+      const message = 'Native prompt failed after acceptance. '
+        + 'Exact delivery cannot be identified by the native API.'
+        + (errorCode ? ` Error: ${errorCode}.` : '');
+      notices.push(`<span class="bridge-warning delivery-warning" role="status">${escapeHtml(message)}</span>`);
+    }
+    if (agent?.subagentError) {
+      notices.push(`<span class="bridge-warning" role="status">${escapeHtml(agent.subagentError)}</span>`);
+    }
     el.detail.querySelector('.detail-notices').innerHTML = notices.join('');
     const metadata = [
       ['Name', agent?.label],
@@ -264,11 +295,10 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     document.getElementById('session-metadata').innerHTML = agent
       ? metadata.filter(([, value]) => value).map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join('')
       : '';
-    let taskControl = '';
-    if (session.todo) {
-      const taskCount = TodoUI.parse(session.todo).reduce((count, phase) => count + phase.tasks.length, 0);
-      taskControl = `<button class="task-toggle ${state.showTodo ? 'active' : ''}" type="button" data-toggle-todo aria-label="${taskCount} tasks" aria-expanded="${state.showTodo}" aria-controls="todo-panel"><span class="task-toggle-icon">☑</span><span>${taskCount}</span></button>`;
-    }
+    const taskCount = TodoUI.count(session.todos);
+    const taskControl = taskCount
+      ? `<button class="task-toggle ${state.showTodo ? 'active' : ''}" type="button" data-toggle-todo aria-label="${taskCount} tasks" aria-expanded="${state.showTodo}" aria-controls="todo-panel"><span class="task-toggle-icon">☑</span><span>${taskCount}</span></button>`
+      : '';
     el['task-control'].innerHTML = taskControl;
     el['detail-chips'].innerHTML = chips.join('');
     if (focusedControl) el.detail.querySelector(focusedControl)?.focus({preventScroll: true});
@@ -281,8 +311,8 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
       ? (session.archiveActivity || []).filter(event => ['user', 'assistant', 'error'].includes(event.kind))
       : [];
     const events = [...currentEvents].reverse();
-    const todoPanel = state.showTodo && session.todo
-      ? TodoUI.render(session.todo, escapeHtml)
+    const todoPanel = state.showTodo && session.todos?.length
+      ? TodoUI.render(session.todos, escapeHtml)
       : '';
     const archive = (session.archiveActivity || []).length
       ? `<div class="archive-separator"><button type="button" data-toggle-archive aria-expanded="${state.showArchive}">${state.showArchive ? 'Hide earlier history' : 'Show earlier history'}</button></div>${state.showArchive ? archivedEvents.reverse().map(event => `<article class="event archived ${escapeHtml(event.kind)}"><div class="event-head"><span class="event-title">${escapeHtml(event.title)}</span><time class="event-time">${escapeHtml(clockTime(event.time))}</time></div>${eventAttachments(event)}${renderEventDetail(event)}</article>`).join('') : ''}`
@@ -334,8 +364,11 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     el.message.disabled = !isLiveSession;
     el.attach.disabled = !canAttach;
     el.attach.title = canAttach ? `Up to ${agent.attachmentLimits.maxImages} images, ${formatImageLimit(agent.attachmentLimits.maxTotalBytes)} total` : 'Image uploads are unavailable in this session.';
-    el['attachment-status'].textContent = canAttach ? agent.attachmentLimits.reason || el.attach.title : el.attach.title;
-    el['attachment-status'].hidden = !canCompose || (canAttach && !agent.attachmentLimits.reason);
+    const attachmentStatus = getComposer().attachmentStatus(agent?.id);
+    el['attachment-status'].textContent = attachmentStatus
+      || (canAttach ? agent.attachmentLimits.reason || el.attach.title : el.attach.title);
+    el['attachment-status'].hidden = !canCompose
+      || (!attachmentStatus && canAttach && !agent.attachmentLimits.reason);
     el.send.disabled = !canMessage;
     getComposer().syncDeliveryMode(agent);
   }
@@ -402,83 +435,16 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     renderMachineControls();
     renderSummary();
     renderList();
-    const selection = window.getSelection();
-    if (!selection || selection.isCollapsed) renderDetail();
+    renderDetail();
     if (state.selectedId) markRead(selectedAgent());
   }
 
-  function noteSnapshotGeneration(machineId, generation) {
-    if (!Number.isSafeInteger(generation)) return;
-    const node = nodeState(machineId);
-    node.snapshotGeneration = generation;
-  }
-
-  function applyFleetSnapshot(
-    payload,
-    requestedGeneration = null,
-    machineId = 'local',
-    requestedRevision = null,
-  ) {
-    if (!ompDeckApi.authenticated()) return;
-    const node = nodeState(machineId);
-    if (
-      Number.isSafeInteger(requestedGeneration)
-      && node.snapshotGeneration !== requestedGeneration
-    ) return;
-    if (
-      Number.isSafeInteger(requestedRevision)
-      && node.presentationRevision !== requestedRevision
-    ) return;
-    const machine = ompDeckApi.machine(machineId);
-    if (!machine) return;
-    noteSnapshotGeneration(machineId, payload.snapshotGeneration);
-    node.hasSnapshot = true;
-    const projected = (payload.sessions || []).map(session => projectSession(session, machine));
-    const projectedIds = new Set(projected.map(agent => agent.id));
-    for (const agent of state.agents) {
-      if (agent.machineId === machineId && !projectedIds.has(agent.id)) {
-        ompDeckImages.releaseOwner(agent.id);
-      }
-    }
-    state.agents = [
-      ...state.agents.filter(agent => agent.machineId !== machineId),
-      ...projected,
-    ];
-    touchRender();
-    renderFleet();
-  }
-
-  function applyFleetSession(session, snapshotGeneration, machineId = 'local') {
-    const machine = ompDeckApi.machine(machineId);
-    if (!machine) return;
-    if (!ompDeckApi.authenticated()) return;
-    noteSnapshotGeneration(machineId, snapshotGeneration);
-    if (!Number.isSafeInteger(snapshotGeneration)) nodeState(machineId).presentationRevision += 1;
-    const projected = projectSession(session, machine);
-    const index = state.agents.findIndex(agent => agent.id === projected.id);
-    if (index < 0) state.agents.push(projected);
-    else state.agents[index] = projected;
-    touchRender();
-    renderFleet();
-  }
-
-  function removeFleetSession(sessionId, snapshotGeneration, machineId = 'local') {
-    noteSnapshotGeneration(machineId, snapshotGeneration);
-    if (!Number.isSafeInteger(snapshotGeneration)) nodeState(machineId).presentationRevision += 1;
-    const id = ompDeckApi.sessionKey(machineId, sessionId);
-    ompDeckImages.releaseOwner(id);
-    getComposer().remove(id);
-    state.agents = state.agents.filter(agent => agent.id !== id);
-    if (state.selectedId === id) {
-      state.selectedId = null;
-      const url = new URL(location.href);
-      url.searchParams.delete('session');
-      history.replaceState({view: 'menu'}, '', url);
-      showMenu();
-    }
-    touchRender();
-    renderFleet();
-  }
+  const {
+    applyFleetSnapshot,
+    applyFleetSession,
+    applyFleetPatch,
+    removeFleetSession,
+  } = createFleetMutations({state, touchRender, renderFleet, showMenu, getComposer});
 
 
   return Object.freeze({
@@ -494,6 +460,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     renderFleet,
     applyFleetSnapshot,
     applyFleetSession,
+    applyFleetPatch,
     removeFleetSession,
   });
 }

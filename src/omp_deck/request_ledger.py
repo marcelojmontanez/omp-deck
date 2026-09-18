@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
-import re
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
@@ -12,16 +12,25 @@ from pathlib import Path
 from typing import Any
 
 from ._private_state import PrivateStateFile
-from .attachments import MAX_IMAGES, validated_image_content
+from ._request_admission import RequestAdmissions
+from ._request_ledger_schema import (
+    LEGACY_SCHEMA_VERSION,
+    SCHEMA_VERSION,
+    TOKEN,
+    RequestLedgerError,
+    capacity_projection,
+    validate_identity,
+    validate_legacy_store,
+    validate_outcome,
+    validate_recovery,
+    validate_store,
+)
+from ._request_recovery import RecoveryPayloadStore, public_delivery
 
-_SCHEMA_VERSION = 2
 _MAX_FILE_BYTES = 128 * 1024 * 1024
+_MAX_RECOVERY_FILE_BYTES = 128 * 1024 * 1024
+_MAX_METADATA_BYTES = 4 * 1024 * 1024
 _RECOVERY_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000
-_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
-
-
-class RequestLedgerError(RuntimeError):
-    pass
 
 
 class RequestConflictError(RequestLedgerError, ValueError):
@@ -46,23 +55,53 @@ class RequestLedger:
         self._clock = clock
         self._thread_lock = threading.RLock()
         self._storage = PrivateStateFile(self.path)
+        self._payloads = RecoveryPayloadStore(self.path, _MAX_RECOVERY_FILE_BYTES)
+        self._admissions = RequestAdmissions(self.path)
+        self._admissions_swept = False
 
-    def lookup(self, scope: str, request_id: str, fingerprint: str) -> dict[str, Any] | None:
-        self._validate_identity(scope, request_id, fingerprint)
+    @contextmanager
+    def admission(self, scope: str, request_id: str, fingerprint: str, *, recovery=None):
+        """Pin completion capacity for the entire native operation, not its HTTP client."""
+        validate_identity(scope, request_id, fingerprint)
+        token = self._payload_id(scope, request_id, fingerprint)
         with self._locked():
-            data = self._read()
-            record = self._find(data, scope, request_id)
-            if record is None:
-                return None
-            if record["fingerprint"] != fingerprint:
-                raise RequestConflictError("requestId was already used for another operation")
-            if record["state"] == "pending":
-                return {
+            lease = self._admissions.claim(token)
+        try:
+            if lease is None:
+                yield self.lookup(scope, request_id, fingerprint) or {
                     "requestId": request_id,
                     "status": "uncertain",
                     "errorCode": "outcome_unknown",
                 }
-            return copy.deepcopy(record["outcome"])
+            else:
+                yield self.reserve(scope, request_id, fingerprint, recovery=recovery)
+        finally:
+            if lease is not None:
+                with self._locked():
+                    self._admissions.release(token, lease)
+
+    def validate_auxiliary_directory(self, path: Path) -> int | None:
+        for store in (self._payloads, self._admissions):
+            if path == store.root:
+                return store.validate_directory()
+        return None
+
+    def _live(self, record: Mapping[str, Any]) -> bool:
+        return record.get("outcome") is None and self._admissions.active(
+            self._payload_id(record["scope"], record["requestId"], record["fingerprint"])
+        )
+
+    def lookup(self, scope: str, request_id: str, fingerprint: str) -> dict[str, Any] | None:
+        validate_identity(scope, request_id, fingerprint)
+        with self._locked():
+            data = self._read()
+            if self._prune(data, self._now_ms()):
+                self._write(data)
+            record = self._find(data, scope, request_id)
+            if record is None:
+                return None
+            self._check_fingerprint(record, fingerprint)
+            return self._durable_result(record)
 
     def reserve(
         self,
@@ -72,38 +111,30 @@ class RequestLedger:
         *,
         recovery: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        self._validate_identity(scope, request_id, fingerprint)
-        recovery_record = self._validate_recovery(dict(recovery)) if recovery is not None else None
+        validate_identity(scope, request_id, fingerprint)
+        recovery_record = validate_recovery(dict(recovery)) if recovery is not None else None
         with self._locked():
             data = self._read()
-            now_ms = self._now_ms()
-            self._prune_recoveries(data, now_ms)
+            changed = self._prune(data, self._now_ms())
             record = self._find(data, scope, request_id)
             if record is not None:
-                if record["fingerprint"] != fingerprint:
-                    raise RequestConflictError("requestId was already used for another operation")
-                if record["state"] == "pending":
-                    return {
-                        "requestId": request_id,
-                        "status": "uncertain",
-                        "errorCode": "outcome_unknown",
-                    }
-                return copy.deepcopy(record["outcome"])
-            if len(data["records"]) >= self.max_records:
-                completed = next(
-                    (
-                        i
-                        for i, item in enumerate(data["records"])
-                        if item["state"] == "complete"
-                        and (item["recovery"] is None or self._is_accepted_recovery(item))
-                    ),
-                    None,
-                )
-                if completed is None:
-                    raise RequestLedgerError("request ledger capacity is occupied by pending or unresolved operations")
-                data["records"].pop(completed)
+                self._check_fingerprint(record, fingerprint)
+                if changed:
+                    self._write(data)
+                return self._durable_result(record)
+            self._make_active_slot(data)
+            now_ms = self._now_ms()
+            recovery_metadata = None
+            payload_id = None
             if recovery_record is not None:
-                recovery_record["state"] = "submitting"
+                payload_id = self._payload_id(scope, request_id, fingerprint)
+                self._payloads.put(payload_id, recovery_record)
+                recovery_metadata = {
+                    "payload": payload_id,
+                    "sessionId": recovery_record["sessionId"],
+                    "action": recovery_record["action"],
+                    "state": "submitting",
+                }
             data["records"].append(
                 {
                     "scope": scope,
@@ -113,7 +144,7 @@ class RequestLedger:
                     "outcome": None,
                     "createdAt": now_ms,
                     "updatedAt": now_ms,
-                    "recovery": recovery_record,
+                    "recovery": recovery_metadata,
                 }
             )
             self._write(data)
@@ -126,60 +157,54 @@ class RequestLedger:
         fingerprint: str,
         outcome: Mapping[str, Any],
     ) -> None:
-        self._validate_identity(scope, request_id, fingerprint)
-        durable = self._validate_outcome(dict(outcome), request_id)
+        validate_identity(scope, request_id, fingerprint)
+        durable = validate_outcome(dict(outcome), request_id)
         with self._locked():
             data = self._read()
             record = self._find(data, scope, request_id)
             if record is None:
                 raise RequestLedgerError("request was not reserved")
-            if record["fingerprint"] != fingerprint:
-                raise RequestConflictError("requestId was already used for another operation")
-            if record["state"] == "complete":
-                if record["outcome"] != durable:
-                    raise RequestLedgerError("request already has another outcome")
-                return
-            record["state"] = "complete"
+            self._check_fingerprint(record, fingerprint)
+            current = record.get("outcome")
+            if current is not None:
+                if current == durable:
+                    return
+                raise RequestLedgerError("request already has another outcome")
             record["outcome"] = durable
-            record["updatedAt"] = self._now_ms()
-            recovery = record["recovery"]
-            if recovery is not None:
-                recovery["state"] = durable["status"]
-                if durable.get("errorCode") is not None:
-                    recovery["errorCode"] = durable["errorCode"]
-            data["records"].remove(record)
-            data["records"].append(record)
+            record["updatedAt"] = self._advanced_timestamp(record)
+            if "state" in record:
+                recovery = record["recovery"]
+                if recovery is None:
+                    self._retire(data, record)
+                else:
+                    record["state"] = "complete"
+                    recovery["state"] = durable["status"]
+                    if durable.get("errorCode") is None or durable["status"] == "accepted":
+                        recovery.pop("errorCode", None)
+                    else:
+                        recovery["errorCode"] = durable["errorCode"]
+                    data["records"].remove(record)
+                    data["records"].append(record)
             self._write(data)
 
     def mark_uncertain(self, scope: str, request_id: str, fingerprint: str) -> None:
-        self._validate_identity(scope, request_id, fingerprint)
+        validate_identity(scope, request_id, fingerprint)
         with self._locked():
             data = self._read()
             record = self._find(data, scope, request_id)
             if record is None:
                 raise RequestLedgerError("request was not reserved")
-            if record["fingerprint"] != fingerprint:
-                raise RequestConflictError("requestId was already used for another operation")
-            if record["state"] != "pending":
+            self._check_fingerprint(record, fingerprint)
+            if record.get("outcome") is not None or "recovery" not in record:
                 return
-            record["updatedAt"] = self._now_ms()
+            record["updatedAt"] = self._advanced_timestamp(record)
             if record["recovery"] is not None:
                 record["recovery"]["state"] = "uncertain"
                 record["recovery"]["errorCode"] = "outcome_unknown"
             self._write(data)
 
     def dismiss_delivery(self, session_id: str, request_id: str) -> bool:
-        if (
-            not isinstance(session_id, str)
-            or not session_id
-            or len(session_id) > 128
-            or _TOKEN.fullmatch(session_id) is None
-            or not isinstance(request_id, str)
-            or not request_id
-            or len(request_id) > 128
-            or _TOKEN.fullmatch(request_id) is None
-        ):
-            raise RequestLedgerError("invalid delivery identity")
+        self._validate_delivery_identity(session_id, request_id)
         with self._locked():
             data = self._read()
             record = next(
@@ -194,8 +219,10 @@ class RequestLedger:
             )
             if record is None:
                 return False
-            record["recovery"] = None
-            record["updatedAt"] = self._now_ms()
+            if self._live(record):
+                raise RequestConflictError("delivery is still being submitted")
+            record["updatedAt"] = self._advanced_timestamp(record)
+            self._retire(data, record)
             self._write(data)
             return True
 
@@ -204,296 +231,239 @@ class RequestLedger:
             raise RequestLedgerError("invalid request session")
         with self._locked():
             data = self._read()
-            if self._prune_recoveries(data, self._now_ms()):
+            if self._prune(data, self._now_ms()):
                 self._write(data)
-            return [
-                self._public_delivery(record)
-                for record in data["records"]
-                if record["recovery"] is not None and record["recovery"]["sessionId"] == session_id
-            ]
+            result = []
+            for record in data["records"]:
+                metadata = record["recovery"]
+                if metadata is None or metadata["sessionId"] != session_id:
+                    continue
+                recovery = self._payloads.read(metadata["payload"], metadata)
+                delivery = public_delivery(record, recovery, _RECOVERY_RETENTION_MS)
+                if record["outcome"] is None and not self._live(record):
+                    delivery.update(state="uncertain", errorCode="outcome_unknown")
+                result.append(delivery)
+            return result
 
     @staticmethod
     def _find(data: Mapping[str, Any], scope: str, request_id: str) -> dict[str, Any] | None:
-        return next(
-            (record for record in data["records"] if record["scope"] == scope and record["requestId"] == request_id),
-            None,
-        )
+        for collection in (data["records"], data["tombstones"]):
+            record = next(
+                (item for item in collection if item["scope"] == scope and item["requestId"] == request_id),
+                None,
+            )
+            if record is not None:
+                return record
+        return None
 
     @staticmethod
-    def _validate_identity(scope: Any, request_id: Any, fingerprint: Any) -> None:
-        if (
-            not isinstance(scope, str)
-            or len(scope) > 300
-            or _TOKEN.fullmatch(scope) is None
-            or not isinstance(request_id, str)
-            or len(request_id) > 128
-            or _TOKEN.fullmatch(request_id) is None
-            or not isinstance(fingerprint, str)
-            or re.fullmatch(r"[a-f0-9]{64}", fingerprint) is None
-        ):
-            raise RequestLedgerError("invalid request identity")
+    def _check_fingerprint(record: Mapping[str, Any], fingerprint: str) -> None:
+        if record["fingerprint"] != fingerprint:
+            raise RequestConflictError("requestId was already used for another operation")
 
     @staticmethod
-    def _validate_outcome(outcome: dict[str, Any], request_id: str) -> dict[str, Any]:
-        allowed = {"requestId", "status", "errorCode", "result", "sessionId", "created", "acceptance"}
-        if set(outcome) - allowed or outcome.get("requestId") != request_id:
-            raise RequestLedgerError("invalid request outcome")
-        status_value = outcome.get("status")
-        if status_value not in {"accepted", "failed", "stale", "cancelled"}:
-            raise RequestLedgerError("invalid request outcome")
-        acceptance = outcome.get("acceptance")
-        if acceptance is not None and (status_value != "accepted" or acceptance != "accepted"):
-            raise RequestLedgerError("invalid request acceptance")
-        error_code = outcome.get("errorCode")
-        if error_code is not None and (
-            not isinstance(error_code, str)
-            or not error_code
-            or len(error_code) > 128
-            or _TOKEN.fullmatch(error_code) is None
-        ):
-            raise RequestLedgerError("invalid request outcome")
-        if "result" in outcome and outcome["result"] is not None and outcome["result"] != "stale":
-            raise RequestLedgerError("invalid durable request result")
-        session_id = outcome.get("sessionId")
-        if session_id is not None and (
-            not isinstance(session_id, str) or len(session_id) > 128 or _TOKEN.fullmatch(session_id) is None
-        ):
-            raise RequestLedgerError("invalid request session")
-        if "created" in outcome and not isinstance(outcome["created"], bool):
-            raise RequestLedgerError("invalid request outcome")
-        return copy.deepcopy(outcome)
+    def _durable_result(record: Mapping[str, Any]) -> dict[str, Any]:
+        outcome = record.get("outcome")
+        if outcome is not None:
+            return copy.deepcopy(outcome)
+        return {
+            "requestId": record["requestId"],
+            "status": "uncertain",
+            "errorCode": "outcome_unknown",
+        }
 
     @staticmethod
-    def _validate_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
-        required = {"kind", "sessionId", "action", "message", "images"}
-        if set(recovery) != required or recovery.get("kind") != "message":
-            raise RequestLedgerError("invalid request recovery")
-        session_id = recovery.get("sessionId")
+    def _validate_delivery_identity(session_id: Any, request_id: Any) -> None:
         if (
             not isinstance(session_id, str)
+            or not session_id
             or len(session_id) > 128
-            or _TOKEN.fullmatch(session_id) is None
-            or recovery.get("action") not in {"sendMessage", "followUp"}
+            or TOKEN.fullmatch(session_id) is None
+            or not isinstance(request_id, str)
+            or not request_id
+            or len(request_id) > 128
+            or TOKEN.fullmatch(request_id) is None
         ):
-            raise RequestLedgerError("invalid request recovery")
-        message = recovery.get("message")
-        images = recovery.get("images")
-        if not isinstance(message, str) or len(message) > 4_000:
-            raise RequestLedgerError("invalid request recovery")
-        if not isinstance(images, list) or len(images) > MAX_IMAGES or (not message and not images):
-            raise RequestLedgerError("invalid request recovery")
-        try:
-            validated_image_content(images)
-        except ValueError:
-            raise RequestLedgerError("invalid request recovery") from None
-        return copy.deepcopy(recovery)
+            raise RequestLedgerError("invalid delivery identity")
 
     def _now_ms(self) -> int:
-        return int(self._clock() * 1_000)
+        return max(0, int(self._clock() * 1_000))
 
-    @staticmethod
-    def _public_delivery(record: Mapping[str, Any]) -> dict[str, Any]:
-        recovery = record["recovery"]
-        result = {
+    def _advanced_timestamp(self, record: Mapping[str, Any]) -> int:
+        return max(record["createdAt"], record["updatedAt"], self._now_ms())
+
+    def _prune(self, data: dict[str, Any], now_ms: int) -> bool:
+        expired = [
+            record
+            for record in data["records"]
+            if now_ms >= record["createdAt"] + _RECOVERY_RETENTION_MS and not self._live(record)
+        ]
+        for record in expired:
+            record["updatedAt"] = max(record["updatedAt"], record["createdAt"], now_ms)
+            self._retire(data, record)
+        return bool(expired)
+
+    def _make_active_slot(self, data: dict[str, Any]) -> None:
+        if len(data["records"]) < self.max_records:
+            return
+        candidate = next(
+            (
+                record
+                for record in data["records"]
+                if record["state"] == "complete" and record["outcome"]["status"] == "accepted"
+            ),
+            None,
+        )
+        if candidate is None:
+            raise RequestLedgerError("request ledger capacity is occupied by pending or unresolved operations")
+        self._retire(data, candidate)
+
+    def _retire(self, data: dict[str, Any], record: dict[str, Any]) -> None:
+        tombstone = {
+            "scope": record["scope"],
             "requestId": record["requestId"],
-            "sessionId": recovery["sessionId"],
-            "action": recovery["action"],
-            "state": recovery["state"],
-            "message": recovery["message"],
-            "attachments": [
-                {
-                    "name": f"Recovered image {index + 1}",
-                    "type": image["mimeType"],
-                    "data": f"data:{image['mimeType']};base64,{image['data']}",
-                }
-                for index, image in enumerate(recovery["images"])
-            ],
+            "fingerprint": record["fingerprint"],
+            "outcome": copy.deepcopy(record.get("outcome")),
             "createdAt": record["createdAt"],
             "updatedAt": record["updatedAt"],
-            "expiresAt": record["createdAt"] + _RECOVERY_RETENTION_MS,
         }
-        if "errorCode" in recovery:
-            result["errorCode"] = recovery["errorCode"]
-        return result
+        data["records"].remove(record)
+        data["tombstones"].append(tombstone)
+        if len(data["tombstones"]) > self.max_records:
+            data["tombstones"].pop(0)
 
     @staticmethod
-    def _prune_recoveries(data: dict[str, Any], now_ms: int) -> bool:
-        changed = False
-        for record in data["records"]:
-            if record["recovery"] is not None and now_ms >= record["createdAt"] + _RECOVERY_RETENTION_MS:
-                record["recovery"] = None
-                changed = True
-        return changed
+    def _payload_id(scope: str, request_id: str, fingerprint: str) -> str:
+        identity = f"{scope}\0{request_id}\0{fingerprint}".encode()
+        return hashlib.sha256(identity).hexdigest()
 
     @staticmethod
-    def _is_accepted_recovery(record: Mapping[str, Any]) -> bool:
-        recovery = record["recovery"]
-        outcome = record["outcome"]
-        return (
-            record["state"] == "complete"
-            and isinstance(recovery, Mapping)
-            and recovery.get("state") == "accepted"
-            and isinstance(outcome, Mapping)
-            and outcome.get("status") == "accepted"
-        )
-
-    @classmethod
-    def _reclaim_accepted_recoveries(cls, data: dict[str, Any], bytes_needed: int) -> bool:
-        reclaimed = 0
-        for record in data["records"]:
-            if not cls._is_accepted_recovery(record):
-                continue
-            recovery = record["recovery"]
-            reclaimed += len(
-                json.dumps(
-                    recovery,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ) - len(b"null")
-            record["recovery"] = None
-            if reclaimed >= bytes_needed:
-                break
-        return reclaimed > 0
+    def _recovery_ids(data: Mapping[str, Any]) -> set[str]:
+        return {record["recovery"]["payload"] for record in data["records"] if record["recovery"] is not None}
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
         with self._thread_lock:
             with self._storage.locked():
+                self._storage.cleanup_temporaries()
+                if not self._admissions_swept:
+                    self._admissions.sweep()
+                    self._admissions_swept = True
                 yield
 
     @staticmethod
     def _empty() -> dict[str, Any]:
-        return {"version": _SCHEMA_VERSION, "records": []}
+        return {"version": SCHEMA_VERSION, "records": [], "tombstones": []}
 
     def _read(self) -> dict[str, Any]:
-        raw = self._storage.read(_MAX_FILE_BYTES)
+        raw = self._storage.read(max(_MAX_FILE_BYTES, _MAX_METADATA_BYTES))
         if raw is None:
-            return self._empty()
-        if len(raw) > _MAX_FILE_BYTES:
+            data = self._empty()
+            self._payloads.sweep(set())
+            return data
+        if len(raw) > max(_MAX_FILE_BYTES, _MAX_METADATA_BYTES):
             raise RequestLedgerError("request ledger is too large")
         try:
             data = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
             raise RequestLedgerError("request ledger is corrupt") from error
         if isinstance(data, dict) and data.get("version") == 1:
-            now_ms = self._now_ms()
-            records = data.get("records")
-            if not isinstance(records, list):
-                raise RequestLedgerError("invalid request ledger")
-            data = {
-                "version": _SCHEMA_VERSION,
-                "records": [
-                    {
-                        **record,
-                        "createdAt": now_ms,
-                        "updatedAt": now_ms,
-                        "recovery": None,
-                    }
-                    if isinstance(record, dict)
-                    else record
-                    for record in records
-                ],
-            }
-        self._validate_store(data)
+            data = self._upgrade_v1(data)
+        if isinstance(data, dict) and data.get("version") == LEGACY_SCHEMA_VERSION:
+            data = self._migrate_legacy(data)
+            self._write(data)
+            return data
+        if len(raw) > _MAX_METADATA_BYTES:
+            raise RequestLedgerError("request ledger metadata is too large")
+        validate_store(data, self.max_records)
+        self._payloads.sweep(self._recovery_ids(data))
         return data
 
-    def _validate_store(self, data: Any) -> None:
-        if not isinstance(data, dict) or set(data) != {"version", "records"}:
+    def _upgrade_v1(self, data: Mapping[str, Any]) -> dict[str, Any]:
+        records = data.get("records")
+        if not isinstance(records, list):
             raise RequestLedgerError("invalid request ledger")
-        if data["version"] != _SCHEMA_VERSION:
-            raise RequestLedgerError("unsupported request ledger version")
-        records = data["records"]
-        if not isinstance(records, list) or len(records) > self.max_records:
-            raise RequestLedgerError("invalid request ledger")
-        seen: set[tuple[str, str]] = set()
-        for record in records:
-            if not isinstance(record, dict) or set(record) != {
-                "scope",
-                "requestId",
-                "fingerprint",
-                "state",
-                "outcome",
-                "createdAt",
-                "updatedAt",
-                "recovery",
-            }:
-                raise RequestLedgerError("invalid request ledger")
-            self._validate_identity(record["scope"], record["requestId"], record["fingerprint"])
-            key = (record["scope"], record["requestId"])
-            if (
-                key in seen
-                or record["state"] not in {"pending", "complete"}
-                or not isinstance(record["createdAt"], int)
-                or isinstance(record["createdAt"], bool)
-                or not isinstance(record["updatedAt"], int)
-                or isinstance(record["updatedAt"], bool)
-                or record["createdAt"] < 0
-                or record["updatedAt"] < record["createdAt"]
-            ):
-                raise RequestLedgerError("invalid request ledger")
-            seen.add(key)
-            if record["state"] == "pending":
-                if record["outcome"] is not None:
-                    raise RequestLedgerError("invalid request ledger")
-            elif not isinstance(record["outcome"], dict):
-                raise RequestLedgerError("invalid request ledger")
-            else:
-                self._validate_outcome(record["outcome"], record["requestId"])
-            recovery = record["recovery"]
+        now_ms = self._now_ms()
+        return {
+            "version": LEGACY_SCHEMA_VERSION,
+            "records": [
+                {**record, "createdAt": now_ms, "updatedAt": now_ms, "recovery": None}
+                if isinstance(record, dict)
+                else record
+                for record in records
+            ],
+        }
+
+    def _migrate_legacy(self, data: dict[str, Any]) -> dict[str, Any]:
+        validate_legacy_store(data, self.max_records)
+        migrated = self._empty()
+        for legacy in data["records"]:
+            recovery = legacy["recovery"]
             if recovery is None:
+                migrated["tombstones"].append(
+                    {
+                        "scope": legacy["scope"],
+                        "requestId": legacy["requestId"],
+                        "fingerprint": legacy["fingerprint"],
+                        "outcome": copy.deepcopy(legacy["outcome"]),
+                        "createdAt": legacy["createdAt"],
+                        "updatedAt": legacy["updatedAt"],
+                    }
+                )
                 continue
-            if not isinstance(recovery, dict):
-                raise RequestLedgerError("invalid request ledger")
-            allowed = {
-                "kind",
-                "sessionId",
-                "action",
-                "message",
-                "images",
-                "state",
-                "errorCode",
+            base = {key: recovery[key] for key in ("kind", "sessionId", "action", "message", "images")}
+            payload_id = self._payload_id(legacy["scope"], legacy["requestId"], legacy["fingerprint"])
+            self._payloads.put(payload_id, base)
+            metadata = {
+                "payload": payload_id,
+                "sessionId": base["sessionId"],
+                "action": base["action"],
+                "state": recovery["state"],
             }
-            if set(recovery) - allowed or "state" not in recovery:
-                raise RequestLedgerError("invalid request ledger")
-            base = {
-                key: recovery[key] for key in ("kind", "sessionId", "action", "message", "images") if key in recovery
-            }
-            self._validate_recovery(base)
-            if recovery["state"] not in {
-                "submitting",
-                "uncertain",
-                "accepted",
-                "failed",
-                "cancelled",
-                "stale",
-            }:
-                raise RequestLedgerError("invalid request ledger")
-            error_code = recovery.get("errorCode")
-            if error_code is not None and (
-                recovery["state"] not in {"uncertain", "failed", "cancelled", "stale"}
-                or not isinstance(error_code, str)
-                or not error_code
-                or len(error_code) > 128
-                or _TOKEN.fullmatch(error_code) is None
-            ):
-                raise RequestLedgerError("invalid request ledger")
+            if "errorCode" in recovery:
+                metadata["errorCode"] = recovery["errorCode"]
+            migrated["records"].append(
+                {
+                    "scope": legacy["scope"],
+                    "requestId": legacy["requestId"],
+                    "fingerprint": legacy["fingerprint"],
+                    "state": legacy["state"],
+                    "outcome": copy.deepcopy(legacy["outcome"]),
+                    "createdAt": legacy["createdAt"],
+                    "updatedAt": legacy["updatedAt"],
+                    "recovery": metadata,
+                }
+            )
+        validate_store(migrated, self.max_records)
+        return migrated
 
     def _write(self, data: dict[str, Any]) -> None:
-        self._validate_store(data)
-        payload = json.dumps(
-            data,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        if len(payload) > _MAX_FILE_BYTES and self._reclaim_accepted_recoveries(data, len(payload) - _MAX_FILE_BYTES):
-            payload = json.dumps(
-                data,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        if len(payload) > _MAX_FILE_BYTES:
-            raise RequestLedgerError(
-                "delivery recovery capacity is full; unresolved delivery receipts require attention"
+        validate_store(data, self.max_records)
+        retained = self._recovery_ids(data)
+        sizes = self._payloads.measure(retained)
+        while sum(sizes[payload_id] for payload_id in retained) > _MAX_FILE_BYTES:
+            candidate = next(
+                (
+                    record
+                    for record in data["records"]
+                    if record["state"] == "complete" and record["outcome"]["status"] == "accepted"
+                ),
+                None,
             )
+            if candidate is None:
+                raise RequestLedgerError(
+                    "delivery recovery capacity is full; unresolved delivery receipts require attention"
+                )
+            self._retire(data, candidate)
+            retained = self._recovery_ids(data)
+        validate_store(data, self.max_records)
+        payload = self._encode(data)
+        capacity_payload = self._encode(capacity_projection(data))
+        if len(payload) > _MAX_METADATA_BYTES or len(capacity_payload) > _MAX_METADATA_BYTES:
+            raise RequestLedgerError("request ledger metadata capacity is full")
         self._storage.replace(payload)
+        self._payloads.sweep(retained)
+
+    @staticmethod
+    def _encode(data: Mapping[str, Any]) -> bytes:
+        return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")

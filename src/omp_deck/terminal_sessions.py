@@ -13,7 +13,6 @@ from . import _terminal_commands
 from ._collab_imports import CollabImportCoordinator
 from ._collab_recovery import CollabRecoverySupervisor
 from ._extension_activation import ExtensionEventActivation
-from ._shutdown import close_terminal_manager
 from ._terminal_discovery import discover_extension_candidates, removed_extension_connection
 from ._terminal_discovery import terminal_id as _terminal_id
 from ._terminal_runtime import (
@@ -23,6 +22,8 @@ from ._terminal_runtime import (
     _Runtime,
     _RuntimeStore,
     _upsert_extension_record,
+    close_terminal_runtimes,
+    remove_terminal_session,
     retire_extension,
 )
 from .collab_adapter import CollabAdapter
@@ -111,14 +112,7 @@ class TerminalSessionManager:
             self._watcher = None
             runtimes = self._runtimes.values()
         workers = self._collab_recovery.stop()
-        close_terminal_manager(
-            self,
-            runtimes,
-            watcher,
-            workers,
-            timeout,
-            self._commands.lock,
-        )
+        close_terminal_runtimes(self, runtimes, watcher, workers, timeout, self._commands.lock)
 
     def add_collab_request(
         self,
@@ -171,42 +165,7 @@ class TerminalSessionManager:
         return errors
 
     def remove(self, session_id: str) -> bool:
-        with self._commands.lock(session_id):
-            try:
-                record = _registry_record(self.registry, session_id)
-            except KeyError:
-                return False
-            if record["adapterKind"] not in {"collab", "extension"}:
-                return False
-            runtime = self._runtimes.get(session_id)
-            ignored_connection = (
-                runtime.instance_id
-                if runtime is not None and runtime.kind == "extension"
-                else record.get("recoveryMetadata", {}).get("connectionId")
-            )
-            if runtime is not None:
-                runtime.adapter.close()
-            if record["adapterKind"] == "extension" and isinstance(ignored_connection, str):
-                self.registry.update(
-                    session_id,
-                    recovery_metadata={
-                        "connectionId": ignored_connection,
-                        "removed": True,
-                    },
-                )
-            else:
-                if record["adapterKind"] == "collab":
-                    self.credentials.remove(session_id)
-                if not self.registry.remove(session_id):
-                    return False
-            if runtime is not None:
-                self._runtimes.remove_if_current(runtime)
-            with self._lock:
-                if isinstance(ignored_connection, str):
-                    self._ignored_extensions[session_id] = ignored_connection
-                self._commands.forget(session_id)
-            self.model.remove(session_id)
-            return True
+        return remove_terminal_session(self, session_id)
 
     def refresh_connected(self) -> None:
         runtimes = self._runtimes.values()
@@ -375,15 +334,19 @@ class TerminalSessionManager:
 
     def _connect_extension(self, session_id: str, socket_path: Path, metadata: Mapping[str, Any]) -> None:
         with self._commands.lock(session_id):
-            self._connect_extension_locked(session_id, socket_path, metadata)
+            previous = self._connect_extension_locked(session_id, socket_path, metadata)
+        if previous is not None:
+            previous.adapter.close()
 
-    def _connect_extension_locked(self, session_id: str, socket_path: Path, metadata: Mapping[str, Any]) -> None:
+    def _connect_extension_locked(
+        self, session_id: str, socket_path: Path, metadata: Mapping[str, Any]
+    ) -> _Runtime | None:
         connection_id = metadata.get("connectionId")
         if not isinstance(connection_id, str):
-            return
+            return None
         with self._lock:
             if self._stop.is_set() or self._ignored_extensions.get(session_id) == connection_id:
-                return
+                return None
         runtime: _Runtime | None = None
         previous: _Runtime | None = None
         prior_runtime = self._runtimes.get(session_id)
@@ -466,9 +429,10 @@ class TerminalSessionManager:
             with self._lock:
                 if self._ignored_extensions.get(session_id) != connection_id:
                     self._ignored_extensions.pop(session_id, None)
-            if previous is not None:
-                previous.adapter.close()
+            return previous
         except Exception as error:
+            if runtime is not None and self._runtimes.remove_if_current(runtime) and previous is not None:
+                self._runtimes.install(previous)
             try:
                 adapter.close()
             except Exception as close_error:
@@ -481,16 +445,12 @@ class TerminalSessionManager:
                         reason=f"Extension cleanup failed: {close_error}",
                     )
                 raise RuntimeError(f"{error}; Extension cleanup failed: {close_error}") from error
-            if runtime is not None and self._runtimes.remove_if_current(runtime) and previous is not None:
-                self._runtimes.install(previous)
             raise
 
     def _drop_runtime(self, runtime: _Runtime, reason: str) -> None:
         with self._commands.lock(runtime.session_id):
-            if not self._runtimes.is_current(runtime):
+            if not self._runtimes.remove_if_current(runtime):
                 return
-            runtime.adapter.close()
-            self._runtimes.remove_if_current(runtime)
             self.model.set_transport(
                 runtime.session_id,
                 instance_id=None,
@@ -498,3 +458,4 @@ class TerminalSessionManager:
                 status="disconnected",
                 reason=reason,
             )
+        runtime.adapter.close()

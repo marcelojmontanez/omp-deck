@@ -18,6 +18,7 @@ from unittest.mock import patch
 from omp_deck._collab_imports import CollabImportError
 from omp_deck._extension_endpoint import unix_endpoint_name
 from omp_deck._extension_protocol import ExtensionDisconnected
+from omp_deck._rpc_errors import AdapterError
 from omp_deck._terminal_commands import TerminalCommandConflict
 from omp_deck._terminal_discovery import discover_extension_candidates
 from omp_deck.collab_adapter import CollabAdapter, CollabSnapshot
@@ -27,13 +28,21 @@ from omp_deck.extension_adapter import ExtensionAdapter as RealExtensionAdapter
 from omp_deck.extension_adapter import ExtensionRegistration, ExtensionSnapshot
 from omp_deck.fleet_model import FleetModel
 from omp_deck.registry_store import RegistryStore
-from omp_deck.rpc_adapter import AdapterError, AdapterEvent
+from omp_deck.rpc_adapter import AdapterEvent
 from omp_deck.settings import Settings
 from omp_deck.terminal_sessions import TerminalSessionManager, _terminal_id
 
 KEY = bytes(range(32))
 TOKEN = bytes(range(16))
 ROOM = "abcdefghij"
+
+
+def async_jobs(*running, recent=()):
+    return {
+        "running": list(running),
+        "recent": list(recent),
+        "delivery": {"queued": 0, "delivering": False, "pendingJobIds": []},
+    }
 
 
 def collab_link(write=True):
@@ -47,7 +56,7 @@ def host(frame):
 
 def extension_event(sequence, kind="snapshot", data=None):
     if data is None:
-        data = {"idle": True, "pendingMessages": False, "model": None, "async": []}
+        data = {"idle": True, "pendingMessages": False, "model": None, "async": async_jobs()}
     return {"protocol": "omp-deck-fallback-v1", "type": "event", "sequence": sequence, "kind": kind, "data": data}
 
 
@@ -177,7 +186,16 @@ class FakeExtensionAdapter:
             idle=True,
             pending_messages=False,
             model=MappingProxyType({"provider": "openai", "id": "gpt"}),
-            async_jobs=({"id": "agent-1", "status": "running"},),
+            async_jobs=async_jobs(
+                {
+                    "id": "agent-1",
+                    "type": "task",
+                    "status": "running",
+                    "label": "Worker",
+                    "startTime": 1,
+                    "agentId": "Worker",
+                }
+            ),
             sequence=1,
             transport_status="connected",
             reason=None,
@@ -228,6 +246,13 @@ class FakeExtensionAdapter:
             self._refresh_snapshot = replace(self._refresh_snapshot, thinking=level)
         return level
 
+    def begin_close(self):
+        self.calls.append(("begin_close",))
+
+    def wait_closed(self, timeout=2.0):
+        if not self.closed:
+            raise RuntimeError("extension reader did not stop")
+
     def close(self):
         self.calls.append(("close",))
         if type(self).fail_close:
@@ -244,6 +269,37 @@ class FakeExtensionAdapter:
         self.closed = True
         if self.disconnect_callback is not None:
             self.disconnect_callback(reason)
+
+
+class RetiringExtensionAdapter(FakeExtensionAdapter):
+    instances = []
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.retirement_started = threading.Event()
+        self.reader = None
+
+    def close(self):
+        self.calls.append(("close",))
+        if self.closed:
+            return
+        self.closed = True
+
+        def retire():
+            self.retirement_started.set()
+            if self.disconnect_callback is not None:
+                self.disconnect_callback("extension disconnected")
+
+        self.reader = threading.Thread(target=retire, name="test-extension-reader", daemon=True)
+        self.reader.start()
+        self.assert_retired()
+
+    def assert_retired(self):
+        if not self.retirement_started.wait(0.5):
+            raise RuntimeError("reader did not begin retirement")
+        self.reader.join(0.5)
+        if self.reader.is_alive():
+            raise RuntimeError("reader did not retire")
 
 
 class TerminalSessionManagerTests(unittest.TestCase):
@@ -375,7 +431,19 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.assertEqual(public["ompSessionId"], "omp-extension")
         self.assertEqual(public["title"], "Extension title")
         self.assertEqual(public["transport"]["status"], "connected")
-        self.assertEqual(public["subagents"], [{"id": "agent-1", "status": "running"}])
+        self.assertEqual(
+            public["subagents"],
+            [
+                {
+                    "id": "agent-1",
+                    "type": "task",
+                    "status": "running",
+                    "label": "Worker",
+                    "startTime": 1,
+                    "agentId": "Worker",
+                }
+            ],
+        )
         self.assertTrue(public["capabilities"]["followUp"])
         self.assertIn(("sync_history",), first.calls)
         record = manager.registry.load()[0]
@@ -391,6 +459,49 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.assertTrue(first.closed)
         self.assertEqual(self.model.get(session_id)["id"], session_id)
         self.assertEqual(manager.registry.load()[0]["title"], "Renamed")
+
+    def test_extension_live_async_events_replace_running_with_completed_tasks(self):
+        manager = self.manager()
+        session_id, _, adapter = self.connect_extension(manager)
+        running = {
+            "id": "agent-2",
+            "type": "task",
+            "status": "running",
+            "label": "Second worker",
+            "startTime": 2,
+            "agentId": "SecondWorker",
+        }
+        adapter.callback(
+            {
+                "sequence": 2,
+                "kind": "async",
+                "data": {"snapshot": async_jobs(running)},
+            }
+        )
+        self.assertEqual(
+            [(item["id"], item["status"]) for item in self.model.get(session_id)["subagents"]],
+            [("agent-2", "running")],
+        )
+
+        adapter.callback(
+            {
+                "sequence": 3,
+                "kind": "lifecycle",
+                "data": {
+                    "state": "agent_end",
+                    "snapshot": {
+                        "idle": True,
+                        "pendingMessages": False,
+                        "model": None,
+                        "async": async_jobs(recent=({**running, "status": "completed"},)),
+                    },
+                },
+            }
+        )
+        self.assertEqual(
+            [(item["id"], item["status"]) for item in self.model.get(session_id)["subagents"]],
+            [("agent-2", "completed")],
+        )
 
     def test_history_disconnect_reconnects_once_as_verified_control_only_session(self):
         manager = self.manager()
@@ -441,7 +552,7 @@ class TerminalSessionManagerTests(unittest.TestCase):
             }
         )
         adapter.callback({"sequence": 3, "kind": "lifecycle", "data": {"state": "agent_end"}})
-        adapter._snapshot = ExtensionSnapshot(True, False, None, (), 3, "connected", None)
+        adapter._snapshot = ExtensionSnapshot(True, False, None, async_jobs(), 3, "connected", None)
         manager.refresh_connected()
 
         failed = self.model.get(session_id)
@@ -901,7 +1012,7 @@ class TerminalSessionManagerTests(unittest.TestCase):
         with patch("omp_deck.terminal_sessions.ExtensionAdapter", FakeExtensionAdapter):
             manager._reconcile_extensions({"omp-extension": (path2, metadata)})
         current = FakeExtensionAdapter.instances[-1]
-        current._snapshot = ExtensionSnapshot(True, False, None, (), 2, "degraded", "heartbeat expired")
+        current._snapshot = ExtensionSnapshot(True, False, None, async_jobs(), 2, "degraded", "heartbeat expired")
         with patch("omp_deck.terminal_sessions.ExtensionAdapter", FakeExtensionAdapter):
             manager._reconcile_extensions({"omp-extension": (path2, metadata)})
         self.assertTrue(current.closed)
@@ -919,6 +1030,23 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.assertEqual(session["state"], "disconnected")
         self.assertEqual(session["transport"]["reason"], "extension disconnected")
         self.assertEqual(manager.registry.load()[0]["id"], session_id)
+
+    def test_remove_detaches_extension_before_joining_reader_retirement(self):
+        manager = self.manager()
+        path, _, metadata = self.unix_registration()
+        RetiringExtensionAdapter.instances.clear()
+        with patch("omp_deck.terminal_sessions.ExtensionAdapter", RetiringExtensionAdapter):
+            manager._reconcile_extensions({"omp-extension": (path, metadata)})
+        adapter = RetiringExtensionAdapter.instances[-1]
+        session_id = _terminal_id("omp-extension")
+
+        self.assertTrue(manager.remove(session_id))
+
+        self.assertIsNone(manager._runtimes.get(session_id))
+        self.assertIsNotNone(adapter.reader)
+        self.assertFalse(adapter.reader.is_alive())
+        with self.assertRaises(KeyError):
+            self.model.get(session_id)
 
     def test_removed_extension_stays_hidden_across_manager_restart(self):
         manager = self.manager()
@@ -1013,11 +1141,11 @@ class TerminalSessionManagerTests(unittest.TestCase):
         image = {"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"}
         manager.command(session_id, "m", "sendMessage", {"message": "hello", "images": [image]})
         manager.command(session_id, "i", "interrupt", {})
-        manager.command(session_id, "u", "respondToUi", {"requestId": "7", "value": {"ok": True}})
+        manager.command(session_id, "u", "respondToUi", {"requestId": "7", "value": "Next"})
         manager.command(session_id, "c", "cancelUi", {"requestId": 8})
         self.assertIn(("send_message", "hello", [image]), adapter.calls)
         self.assertIn(("interrupt",), adapter.calls)
-        self.assertIn(("respond_ui", 7, '{"ok":true}'), adapter.calls)
+        self.assertIn(("respond_ui", 7, "Next"), adapter.calls)
         self.assertIn(("respond_ui", 8, None), adapter.calls)
 
         self.assertTrue(manager.remove(session_id))
@@ -1348,7 +1476,7 @@ class TerminalSessionManagerTests(unittest.TestCase):
             "connection-1",
             MappingProxyType({"sendMessage": False, "followUp": False, "interrupt": False, "shutdown": False}),
         )
-        adapter._snapshot = ExtensionSnapshot(True, False, None, (), 4, "connected", None)
+        adapter._snapshot = ExtensionSnapshot(True, False, None, async_jobs(), 4, "connected", None)
         manager.refresh_connected()
         legacy = self.model.get(session_id)
         self.assertIsNone(legacy["thinking"])
@@ -1457,7 +1585,8 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.assertFalse(public["capabilities"]["todos"])
         self.assertTrue(public["capabilities"]["remove"])
         self.assertEqual(public["pendingUiRequest"]["id"], "12")
-        self.assertTrue(public["pendingUiRequest"]["questions"][0]["multi"])
+        self.assertFalse(public["pendingUiRequest"]["questions"][0]["multi"])
+        self.assertTrue(public["pendingUiRequest"]["questions"][0]["toggleSelection"])
         self.assertEqual(
             public["pendingUiRequest"]["questions"][0]["checkedIndices"],
             [0],
@@ -1572,6 +1701,24 @@ class TerminalSessionManagerTests(unittest.TestCase):
         self.assertTrue(all(adapter.closed for adapter in FakeCollabAdapter.instances))
         self.assertEqual(self.model.get(session_id)["state"], "disconnected")
         self.managers.remove(manager)
+
+    def test_failed_collab_removal_retains_credentials_and_runtime_for_retry(self):
+        manager = self.manager()
+        secret = collab_link()
+        with patch("omp_deck.terminal_sessions.CollabAdapter", FakeCollabAdapter):
+            session = manager.add_collab(secret)
+        runtime = manager._runtimes.get(session["id"])
+        FakeCollabAdapter.fail_close = True
+        try:
+            with self.assertRaisesRegex(RuntimeError, "close failed"):
+                manager.remove(session["id"])
+            self.assertIs(manager._runtimes.get(session["id"]), runtime)
+            self.assertEqual(manager.credentials.get_link(session["id"]), secret)
+            self.assertEqual(manager.registry.load()[0]["id"], session["id"])
+        finally:
+            FakeCollabAdapter.fail_close = False
+        self.assertTrue(manager.remove(session["id"]))
+        self.assertIsNone(manager.credentials.get_link(session["id"]))
 
     def test_close_reports_failed_adapter_and_retains_runtime(self):
         manager = self.manager()

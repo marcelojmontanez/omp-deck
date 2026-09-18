@@ -13,6 +13,7 @@ from typing import Any
 
 from . import _collab_transport as _transport
 from ._collab_transport import CollabSnapshot, _freeze, _Reply, _Socket
+from ._rpc_errors import AdapterDisconnectedError, AdapterError, AdapterIncompatibleError, AdapterTimeoutError
 from .attachments import COLLAB_MAX_IMAGE_BYTES, validated_image_content
 from .collab_protocol import (
     COLLAB_PROTO,
@@ -25,13 +26,7 @@ from .collab_protocol import (
     seal_frame,
     unpack_envelope,
 )
-from .rpc_adapter import (
-    AdapterDisconnectedError,
-    AdapterError,
-    AdapterEvent,
-    AdapterIncompatibleError,
-    AdapterTimeoutError,
-)
+from .rpc_adapter import AdapterEvent
 
 WELCOME_TIMEOUT = 30.0
 TRANSCRIPT_TIMEOUT = 10.0
@@ -75,7 +70,7 @@ class CollabAdapter:
         self._lock = threading.RLock()
         self._close_lock = threading.RLock()
         self._send_lock = threading.Lock()
-        self._ready = threading.Event()
+        self._startup = _transport._StartupReadiness(self._lock)
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
         self._ws: _Socket | None = None
@@ -120,11 +115,11 @@ class CollabAdapter:
                 raise AdapterError("adapter is already started", kind="lifecycle")
             if self._stopping.is_set():
                 raise AdapterDisconnectedError("adapter is closed", kind="closed")
-            self._ready.clear()
+            self._startup.reset()
             self._fatal = None
             self._thread = threading.Thread(target=self._run, name="omp-collab-reader", daemon=True)
             self._thread.start()
-        if not self._ready.wait(WELCOME_TIMEOUT):
+        if not self._startup.wait(WELCOME_TIMEOUT):
             self.close()
             raise AdapterTimeoutError("collaboration snapshot timed out", kind="timeout")
         with self._lock:
@@ -136,7 +131,7 @@ class CollabAdapter:
     def close(self) -> None:
         with self._close_lock:
             self._stopping.set()
-            self._ready.set()
+            self._startup.finish()
             with self._lock:
                 ws, thread = self._ws, self._thread
             if ws is not None:
@@ -228,7 +223,7 @@ class CollabAdapter:
             self._send_encoded(data)
             del self._ui[req_id]
             self._settled_ui.append(req_id)
-        self._emit("ui_request_resolved", {"id": str(req_id)})
+        self._emit("ui_request_end", {"reqId": req_id})
         return True
 
     def fetch_transcript(
@@ -300,7 +295,7 @@ class CollabAdapter:
                 if fatal:
                     with self._lock:
                         self._fatal = fatal
-                    self._ready.set()
+                    self._startup.finish()
                     return
                 self._stopping.wait(delay * (0.75 + 0.5 * self._random()))
                 delay = min(30.0, delay * 2)
@@ -328,7 +323,7 @@ class CollabAdapter:
         peer, sealed = unpack_envelope(raw, max_frame_bytes=self._max_frame_bytes)
         frame = open_frame(self._link.key, sealed, max_frame_bytes=self._max_frame_bytes, direction="host")
         self._ingest(peer, frame)
-        return frame["t"] == "snapshot-chunk"
+        return frame["t"] in {"welcome", "snapshot-chunk"}
 
     def _ingest(self, peer: int, frame: dict[str, Any]) -> None:
         del peer
@@ -365,6 +360,7 @@ class CollabAdapter:
         self._host_read_only = bool(frame.get("readOnly", self._link.read_only))
         if self._expected_entries < 0 or self._expected_entries > self._entry_limit:
             raise AdapterIncompatibleError("snapshot entry limit exceeded", kind="bounds")
+        self._startup.progressed()
 
     def _ingest_snapshot_chunk(self, frame: Mapping[str, Any]) -> bool:
         entries = frame.get("entries")
@@ -378,13 +374,14 @@ class CollabAdapter:
         ):
             raise AdapterIncompatibleError("snapshot bounds exceeded", kind="bounds")
         self._entries.extend(dict(entry) for entry in entries)
+        self._startup.progressed()
         if not final:
             return False
         if len(self._entries) != self._expected_entries:
             raise AdapterIncompatibleError("incomplete collaboration snapshot", kind="protocol")
         self._snapshot_complete = True
         self._status, self._reason = "connected", None
-        self._ready.set()
+        self._startup.finish()
         return True
 
     def _ingest_live_frame(self, frame_type: str, frame: Mapping[str, Any]) -> Mapping[str, Any] | None:

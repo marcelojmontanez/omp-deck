@@ -225,10 +225,19 @@ el['agent-list'].addEventListener('click', event => {
   const card = event.target.closest('[data-id]');
   if (card) selectAgent(card.dataset.id);
 });
+function stopLiveConnections() {
+  stopEventStreams();
+  for (const node of state.nodes.values()) {
+    node.refreshRequest?.controller.abort();
+    node.refreshRequest = null;
+  }
+}
+
 let liveRecoveryGeneration = 0;
 async function recoverLiveConnections() {
   if (!ompDeckApi.authenticated()) return;
   const generation = ++liveRecoveryGeneration;
+  stopLiveConnections();
   try {
     await ompDeckApi.recoverAccess();
   } catch {
@@ -256,6 +265,11 @@ window.addEventListener('online', recoverLiveConnections);
 window.addEventListener('pageshow', event => {
   if (event.persisted) void recoverLiveConnections();
 });
+function recoverVisibleConnections() {
+  if (document.visibilityState === 'visible') void recoverLiveConnections();
+}
+window.addEventListener('focus', recoverVisibleConnections);
+document.addEventListener('resume', recoverVisibleConnections);
 window.addEventListener('popstate', event => {
   const session = event.state?.view === 'chat'
     ? event.state.session
@@ -377,11 +391,7 @@ el['scroll-newest'].addEventListener('click', () => {
 
 function resetApplication() {
   liveRecoveryGeneration += 1;
-  stopEventStreams();
-  for (const node of state.nodes.values()) {
-    node.refreshRequest?.controller.abort();
-    node.refreshRequest = null;
-  }
+  stopLiveConnections();
   state.reloadRequiredMachines.clear();
   el['fleet-reload'].hidden = true;
   clearInterval(state.recoveryTimer);

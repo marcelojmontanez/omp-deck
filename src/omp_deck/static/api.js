@@ -148,7 +148,7 @@
         emit('omp-deck-coordinator-status', {available: true});
       }
     } catch (error) {
-      if (error?.name === 'AbortError') throw error;
+      if (options.signal?.aborted || error?.name === 'AbortError') throw error;
       if (coordinatorStatusAuthority.accept(statusObservation)) {
         coordinatorAvailable = false;
         emit('omp-deck-coordinator-status', {available: false, error: 'Coordinator is unreachable'});
@@ -478,7 +478,7 @@
     initializeFleet,
     authenticated: () => authenticated,
     renewAccess,
-    recoverAccess: () => renewAccess({replace: renewalPromise !== null}),
+    recoverAccess: () => renewAccess({replace: true}),
     machines: machineList,
     machine: id => machines.has(id) ? publicMachine(machines.get(id)) : null,
     setMachineStatus: (id, status, error) => setMachineStatus(machines.get(id), status, error),

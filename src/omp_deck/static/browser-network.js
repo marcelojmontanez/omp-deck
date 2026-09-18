@@ -21,24 +21,52 @@
   }
 
   async function runBounded(operation, externalSignal, timeoutMs) {
+    if (externalSignal?.aborted) throw externalSignal.reason;
+
     const controller = new AbortController();
-    const abortFromCaller = () => controller.abort(externalSignal.reason);
-    if (externalSignal?.aborted) abortFromCaller();
-    else externalSignal?.addEventListener('abort', abortFromCaller, {once: true});
-    const timer = setTimeout(() => {
-      controller.abort(new DOMException('Request timed out', 'TimeoutError'));
-    }, timeoutMs);
-    try {
-      return await operation(controller.signal);
-    } catch (error) {
-      if (controller.signal.reason?.name === 'TimeoutError') {
-        throw new Error('Connection timed out');
+    return await new Promise((resolve, reject) => {
+      let pending = true;
+      let timer;
+
+      const cleanup = () => {
+        clearTimeout(timer);
+        externalSignal?.removeEventListener('abort', abortFromCaller);
+      };
+      const settle = (callback, value) => {
+        if (!pending) return;
+        pending = false;
+        cleanup();
+        callback(value);
+      };
+      const cancel = (reason, outwardError = reason) => {
+        if (!pending) return;
+        pending = false;
+        cleanup();
+        reject(outwardError);
+        controller.abort(reason);
+      };
+      const abortFromCaller = () => cancel(externalSignal.reason);
+
+      externalSignal?.addEventListener('abort', abortFromCaller, {once: true});
+      timer = setTimeout(() => {
+        cancel(
+          new DOMException('Request timed out', 'TimeoutError'),
+          new Error('Connection timed out'),
+        );
+      }, timeoutMs);
+
+      let result;
+      try {
+        result = operation(controller.signal);
+      } catch (error) {
+        settle(reject, error);
+        return;
       }
-      throw error;
-    } finally {
-      clearTimeout(timer);
-      externalSignal?.removeEventListener('abort', abortFromCaller);
-    }
+      Promise.resolve(result).then(
+        value => settle(resolve, value),
+        error => settle(reject, error),
+      );
+    });
   }
 
   function fetchResponseBounded(input, options = {}, timeoutMs = STARTUP_TIMEOUT_MS, request = fetch) {

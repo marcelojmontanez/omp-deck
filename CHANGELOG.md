@@ -35,6 +35,7 @@
 - Refresh managed conversations when a native turn finishes, including when prompt acceptance precedes image processing. Display supported inline RPC images through the authenticated private blob viewer.
 
 - Prevent stale access checks, superseded event streams, and incidental refresh failures from falsely marking a reachable machine unavailable or disrupting composer focus.
+- Recover on browser foreground and page resume without waiting for stuck network reads or stale access renewal. Preserve drafts and selection while reconnecting, including when a suspended request does not settle after cancellation.
 - Reduce cold dashboard loading delays caused by simultaneous asset requests and remove a redundant initial session snapshot request.
 - Route messages through native idle/streaming handling so a turn ending during delivery cannot strand a follow-up. Show native acceptance separately from proven conversation delivery; preserve newer drafts and request identity after lost responses.
 - Keep the machine selector stable during live updates instead of repeatedly replacing its open options.

@@ -26,6 +26,7 @@ from ._private_state import PrivateStateFile, validate_private_directory, valida
 
 STATE_VERSION = 1
 COOKIE_NAME = "omp_deck_device"
+COORDINATOR_COOKIE_NAME = "omp_deck_coordinator_device"
 COOKIE_ATTRIBUTES = "Path=/; HttpOnly; Secure; SameSite=Strict"
 
 
@@ -173,13 +174,13 @@ class AuthManager:
             self._state["pairing"] = None
             return self._issue_device()
 
-    def authenticate_or_issue(self, credential: str | None) -> PairedDevice:
+    def authenticate_or_issue(self, credential: str | None, *, evict_oldest: bool = True) -> PairedDevice:
         """Reuse a valid cookie session or atomically issue a new one."""
         with self._locked_state():
             try:
                 device = self._authenticate_current(credential)
             except AuthenticationFailed:
-                return self._issue_device()
+                return self._issue_device(evict_oldest=evict_oldest)
             return PairedDevice(
                 device,
                 credential,
@@ -239,18 +240,20 @@ class AuthManager:
         message = f"omp-deck-csrf-v1\0{device_id}\0{epoch}".encode()
         return hmac.new(credential.encode(), message, hashlib.sha256).hexdigest()
 
-    def _issue_device(self) -> PairedDevice:
+    def _issue_device(self, *, evict_oldest: bool = True) -> PairedDevice:
         credential = "v1." + secrets.token_urlsafe(32)
         device_id = secrets.token_hex(16)
         created = int(self._now())
         expires = created + self.session_ttl
+        self._prune_expired(created)
+        if not evict_oldest and len(self._state["devices"]) >= self.max_devices:
+            raise AuthError("authentication device capacity unavailable")
         self._state["devices"][device_id] = {
             "verifier": self._verifier(credential),
             "createdAt": created,
             "expiresAt": expires,
             "epoch": self._state["epoch"],
         }
-        self._prune_expired(created)
         while len(self._state["devices"]) > self.max_devices:
             oldest = min(
                 self._state["devices"],

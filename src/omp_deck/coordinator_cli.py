@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 
 from ._private_state import PrivateStateFile
-from .auth import AuthManager
-from .coordinator_settings import COORDINATOR_COOKIE_NAME, load_coordinator_settings
+from .auth import COORDINATOR_COOKIE_NAME, AuthManager
+from .coordinator_settings import load_coordinator_settings
 from .coordinator_store import CoordinatorStore
 
 

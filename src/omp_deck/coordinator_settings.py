@@ -22,7 +22,6 @@ _CONFIG_FIELDS = {
     "tailscale_user",
     "show_history",
 }
-COORDINATOR_COOKIE_NAME = "omp_deck_coordinator_device"
 _HOSTNAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?\Z")
 
 

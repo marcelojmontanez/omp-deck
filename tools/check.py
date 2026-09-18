@@ -6,8 +6,10 @@ import sys
 from pathlib import Path
 
 from metrics import MAINTAINED_SOURCES
+from release_lib.check_receipt import fingerprint, record
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
 NODE_BIN = os.environ.get("NODE_BIN", "node")
 NPM_BIN = os.environ.get("NPM_BIN", "npm.cmd" if os.name == "nt" else "npm")
 EXCLUDED_PARTS = {
@@ -94,6 +96,7 @@ def main():
         "--release", action="store_true", help="also require artifact, real-browser, and OMP plugin checks"
     )
     arguments = parser.parse_args()
+    before = fingerprint(ROOT)
     failures = check_text_files()
     if failures:
         print("\n".join(failures), file=sys.stderr)
@@ -111,6 +114,8 @@ def main():
             return 1
     status = check_javascript()
     if status or not arguments.release:
+        if not status:
+            record(ROOT, before, release=False)
         return status
     for command in (
         [NPM_BIN, "run", "test:browser"],
@@ -118,6 +123,7 @@ def main():
     ):
         if run(command):
             return 1
+    record(ROOT, before, release=True)
     return 0
 
 

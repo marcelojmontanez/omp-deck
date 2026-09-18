@@ -8,9 +8,9 @@ from urllib.parse import urlparse
 
 from . import build_identity
 from ._http_common import DeckHttpHandler, ThreadingHTTPServer
-from .auth import AuthenticationFailed, AuthError, AuthManager, validate_auth_state
+from .auth import COORDINATOR_COOKIE_NAME, AuthenticationFailed, AuthError, AuthManager, validate_auth_state
 from .auth_policy import AuthPolicy
-from .coordinator_settings import COORDINATOR_COOKIE_NAME, CoordinatorSettings
+from .coordinator_settings import CoordinatorSettings
 from .coordinator_store import CoordinatorStateError, CoordinatorStore
 from .fleet_protocol import issue_ticket
 

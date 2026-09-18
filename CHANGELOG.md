@@ -15,6 +15,7 @@
 - Retain private, bounded message recovery content on the owning node for up to seven days, with restore and dismissal for unresolved delivery after a browser reload or lost response. Older fingerprint-only records cannot recover message content.
 - Add explicit per-session Steer and Queue choices on capable working sessions, preserving the selected intent through delivery races and uncertain retries.
 - Show installed Deck build identities for the dashboard and enrolled machines in Deck settings, with an on-demand refresh.
+- Add one-command guarded fleet releases for existing macOS/Linux nodes and a Linux coordinator, with resumable progress, automatic verification and credential cleanup, and independent rollback protection. Terminal-owned OMP sessions are never automatically restarted.
 
 ### Changed
 

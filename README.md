@@ -468,6 +468,42 @@ The package build backend enforces this for ordinary pip, uv, wheel, and source-
 
 Build from a clean full checkout with `python3 -m build`, or from an unchanged source distribution. Editable installations are rejected; use `PYTHONPATH=src` to run changing source directly. An unbuilt checkout identifies itself as `0+unbuilt` with its revision unavailable, never as a previously installed release. Install development dependencies from a clean checkout before editing. Keep the exact previous wheel for rollback; older installations that report only `1.4.0` cannot be distinguished by that old version label alone.
 
+### Guarded fleet releases
+
+From a macOS or Linux operator checkout with the verification prerequisites below installed:
+
+```bash
+.venv/bin/python tools/release.py run
+# Or commit already-staged changes through the normal hook first:
+.venv/bin/python tools/release.py run --message "fix(ui): describe the change"
+```
+
+The operator inventory is an owner-only `~/.config/omp-deck-release/config.json` file, or a path supplied with `--config` before the subcommand. It is separate from Deck's service configuration and is never included in the package. Configure it once for the installed services; release IDs, package versions, hashes, and subsequent rollback selections are automatic.
+
+The inventory has `version: 1`, an absolute private `state_root`, and a `targets` list. Each target supplies a unique `id`, `kind` (`node` or `coordinator`), `ssh` (an SSH alias or `null` for local execution), private absolute `work_root`, public `origin`, an absolute `bootstrap_rollback` wheel path on that target, and a `profile`. Coordinator targets also list the expected enrolled `machine_ids`.
+
+The profile records the existing installation, not commands to execute: `platform` (`darwin` or `linux`), `user`, `home`, `uv`, `base_python`, `omp`, `tool_root`, `entrypoint`, `config`, `unit`, `state_root`, `plugin_expected`, `service_name`, `rollback_root`, and `port`. macOS uses `launch_domain` and `launch_label`; Linux supplies them as `null`. A Linux coordinator additionally supplies `releases_root` for its private immutable environments. Paths must be absolute. Nodes must be uv-managed installations; unsupported layouts fail before cutover. SSH must work non-interactively with an already-trusted host key. This operator automation does not deploy Windows services.
+
+`run` validates the exact source, builds one immutable wheel, stages targets concurrently, then verifies one node before continuing to the remaining nodes and coordinator. The existing commit hook remains enforced. Its successful base-gate result is reused only when the staged source bytes, Python environment, and tool versions still match; additional release checks are not replaced by that result. Modified files invalidate reuse, including edits hidden by Git index flags.
+
+For separate preparation and deployment:
+
+```bash
+.venv/bin/python tools/release.py prepare
+.venv/bin/python tools/release.py deploy RELEASE_ID
+.venv/bin/python tools/release.py status RELEASE_ID
+.venv/bin/python tools/release.py resume RELEASE_ID
+```
+
+Preparation retains rollback artifacts but never restarts services. Deployment requires observed independent watchdog readiness, safe managed-session restart admission, exact installed identities, authenticated health checks, and a private 390px Chromium check. The browser may obtain coordinator access tickets but cannot send messages or other application mutations. An unchanged extension is not reinstalled. Updated extension bytes do not replace code inside existing terminal processes: those sessions still need an idle restart and resume.
+
+Failed verification stops the rollout and attempts to restore the affected service. A detached watchdog also attempts rollback when the operator disconnects before verification. An unreachable host, changed ownership/configuration, busy managed session, or failed rollback is reported rather than forcibly overridden. Already verified machines are not automatically rolled back; this is a guarded rolling release, not an atomic fleet transaction. Persistence/protocol-sensitive source changes are blocked until a reviewed compatibility migration is available.
+
+`resume` reconciles actual target state before acting and gives a rolled-back target a fresh guarded attempt. If preparation ended before an immutable candidate was recorded, start a new `prepare` or `run`. Do not start a different release while a previous rollback remains unresolved.
+
+Release journals and retained rollback packages/environments are owner-only and remain available for recovery; they are not browser storage. Do not delete an unresolved transaction or its rollback assets. Maintenance credentials are short-lived, stored only in private files, and revoked after success, rollback, or abandonment. Browser credential files and temporary verification output are removed automatically. Preserve the private operator state when moving the release checkout; it records the latest verified artifact for each target.
+
+
 ## Regression verification
 
 In a development virtual environment, install the prerequisites and run the complete release gate:

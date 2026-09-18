@@ -36,6 +36,36 @@ function createComposerRecovery({
   const inFlight = new Map();
   const epochs = new Map();
   const records = new Map();
+  let feedback = null;
+  let feedbackTimer = null;
+
+  function clearFeedback() {
+    clearTimeout(feedbackTimer);
+    feedbackTimer = null;
+    feedback = null;
+    elements['send-state'].textContent = '';
+    elements['send-state'].className = 'send-state';
+  }
+
+  function inputChanged() {
+    if (feedback?.state === 'accepted') clearFeedback();
+    else if (feedback) feedback.notifyAccepted = false;
+  }
+
+  function select(id) {
+    clearFeedback();
+    if (!id) return;
+    const pending = pendingFor(id);
+    const item = pending.findLast(candidate => candidate.state === 'submitting') || pending.at(-1);
+    if (item) showState(id, item.state, item.id);
+  }
+
+  function submitting(id, item) {
+    if (selectedAgent()?.id !== id) return;
+    clearFeedback();
+    feedback = {id, requestId: item.id, notifyAccepted: true};
+    showState(id, 'submitting', item.id);
+  }
 
   function releasePending(id, item) {
     const pending = pendingFor(id);
@@ -48,18 +78,32 @@ function createComposerRecovery({
     dismissRetryBatch(id, item.id);
   }
 
-  function showState(id, state) {
+  function showState(id, state, requestId, message) {
     if (selectedAgent()?.id !== id) return;
-    if (pendingFor(id).some(item => item.state === 'submitting')) state = 'submitting';
+    if (feedback?.requestId && (feedback.id !== id || feedback.requestId !== requestId)) return;
+    if (state === 'accepted' && feedback?.state === 'accepted') return;
+    if (state === 'accepted' && !feedback?.notifyAccepted) {
+      if (feedback?.requestId === requestId) clearFeedback();
+      return;
+    }
+    clearTimeout(feedbackTimer);
+    feedbackTimer = null;
+    const notice = {id, requestId, state, notifyAccepted: state !== 'unavailable' && Boolean(feedback?.notifyAccepted)};
+    feedback = notice;
     const labels = {
       submitting: 'Submitting', uncertain: 'Delivery uncertain', accepted: 'Accepted',
       failed: 'Not sent', cancelled: 'Cancelled', stale: 'Stale',
     };
-    elements['send-state'].textContent = labels[state];
+    elements['send-state'].textContent = message || labels[state];
     elements['send-state'].className = `send-state ${
       state === 'accepted' ? 'ok'
-        : ['uncertain', 'failed', 'cancelled', 'stale'].includes(state) ? 'error' : ''
+        : ['uncertain', 'failed', 'cancelled', 'stale', 'unavailable'].includes(state) ? 'error' : ''
     }`.trim();
+    if (state === 'accepted') {
+      feedbackTimer = setTimeout(() => {
+        if (feedback === notice) clearFeedback();
+      }, 3_000);
+    }
   }
 
   function accept(id, item) {
@@ -68,7 +112,7 @@ function createComposerRecovery({
     records.delete(`${id}\0${item.id}`);
     deliveryState(item, 'accepted');
     releasePending(id, item);
-    showState(id, 'accepted');
+    showState(id, 'accepted', item.id);
   }
 
   function recoveredAttachment(raw) {
@@ -161,11 +205,15 @@ function createComposerRecovery({
       }
       deliveryState(item, recoveredSubmitting ? 'uncertain' : record.state);
     }
-    const latest = incoming.reduce(
-      (current, record) => !current || record.updatedAt >= current.updatedAt ? record : current,
-      null,
-    );
-    if (latest && updateStatus) showState(agent.id, latest.state);
+    // Retained successes are recovery data, not fresh composer feedback.
+    const latest = feedback?.id === agent.id && feedback.requestId
+      ? incoming.find(record => record.requestId === feedback.requestId)
+      : incoming.reduce(
+        (current, record) => record.state !== 'accepted'
+          && (!current || record.createdAt >= current.createdAt) ? record : current,
+        null,
+      );
+    if (latest && updateStatus) showState(agent.id, latest.state, latest.requestId);
     touchRender();
     if (selectedAgent()?.id === agent.id) renderDetail();
   }
@@ -178,6 +226,7 @@ function createComposerRecovery({
     if (now - (checks.get(agent.id) || 0) < 2_000) return;
     checks.set(agent.id, now);
     const accepted = new Set();
+    const currentFeedback = feedback;
     const operation = (async () => {
       const {response, payload} = await ompDeckNetwork.fetchJsonBounded(
         `/api/sessions/${encodeURIComponent(agent.id)}/deliveries`,
@@ -186,13 +235,14 @@ function createComposerRecovery({
       if (!response.ok) throw new Error(`Delivery recovery failed (${response.status})`);
       const incoming = validate(payload, agent.id, agent.localId || agent.id);
       if (generation !== dataGeneration() || epoch !== (epochs.get(agent.id) || 0)) return;
-      apply(agent, incoming.filter(record => !accepted.has(record.requestId)), accepted.size === 0);
+      apply(agent, incoming.filter(record => !accepted.has(record.requestId)),
+        accepted.size === 0 && feedback === currentFeedback);
       recovered.add(agent.id);
     })().catch(error => {
       if (generation !== dataGeneration() || epoch !== (epochs.get(agent.id) || 0)) return;
-      if (selectedAgent()?.id === agent.id) {
-        elements['send-state'].textContent = `Delivery recovery unavailable: ${error.message}`;
-        elements['send-state'].className = 'send-state error';
+      if (feedback === currentFeedback && feedback?.state !== 'submitting') {
+        showState(agent.id, 'unavailable', feedback?.requestId,
+          `Delivery recovery unavailable: ${error.message}`);
       }
     }).finally(() => {
       if (inFlight.get(agent.id)?.promise === operation) inFlight.delete(agent.id);
@@ -211,6 +261,7 @@ function createComposerRecovery({
     const item = pendingFor(agent.id).find(candidate => candidate.id === requestId);
     const record = records.get(`${agent.id}\0${requestId}`);
     if (!record && !item) return false;
+    inputChanged();
     const message = record?.message ?? item.text;
     const recoveredAttachments = item?.attachments
       || record.attachments.map(recoveredAttachment).filter(Boolean);
@@ -258,6 +309,7 @@ function createComposerRecovery({
 
   return {
     clear() {
+      clearFeedback();
       checks.clear();
       recovered.clear();
       inFlight.clear();
@@ -265,6 +317,7 @@ function createComposerRecovery({
       records.clear();
     },
     remove(id) {
+      if (feedback?.id === id) clearFeedback();
       checks.delete(id);
       recovered.delete(id);
       epochs.set(id, (epochs.get(id) || 0) + 1);
@@ -273,6 +326,10 @@ function createComposerRecovery({
         if (key.startsWith(`${id}\0`)) records.delete(key);
       }
     },
+    select,
+    submitting,
+    showState,
+    inputChanged,
     accept,
     recover,
     reconcile,

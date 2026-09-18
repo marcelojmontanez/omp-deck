@@ -33,6 +33,7 @@
 
 ### Fixed
 
+- Clear successful-send feedback after three seconds or when starting another draft or switching sessions. Keep older acknowledgements and timers from overwriting newer send progress or failures.
 - Keep portrait and landscape attachment previews inside their cards, display the whole image, and keep remove buttons visible and reachable on phones.
 - Refresh managed conversations when a native turn finishes, including when prompt acceptance precedes image processing. Display supported inline RPC images through the authenticated private blob viewer.
 - Preserve inline images in terminal conversation history and live messages instead of showing empty image placeholders. Existing terminal sessions need an idle restart and resume to load extension 1.3.5.

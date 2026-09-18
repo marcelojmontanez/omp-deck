@@ -86,7 +86,6 @@ function createComposer({
     retryBatches.clear();
     recovery.clear();
     deliveryMode.clear();
-    elements['send-state'].textContent = '';
     renderAttachments();
     commands.clear();
     touchRender();
@@ -122,6 +121,7 @@ function createComposer({
   }
 
   function select(id) {
+    if (sessionId !== (id || null)) recovery.select(id || null);
     sessionId = id || null;
     elements.message.value = loadDraft(sessionId);
     renderAttachments();
@@ -181,6 +181,7 @@ function createComposer({
       showToast(`Images must total ${formatImageLimit(limits.maxTotalBytes)} or less.`, 'error');
       return;
     }
+    recovery.inputChanged();
     if (!attachmentReservations.has(targetSessionId)) {
       attachmentReservations.set(targetSessionId, reserved);
     }
@@ -291,7 +292,7 @@ function createComposer({
     } else {
       retryBatches.delete(id);
     }
-    elements['send-state'].textContent = uncertain ? 'Delivery uncertain' : 'Not sent';
+    recovery.showState(id, uncertain ? 'uncertain' : 'failed', active.at(-1).pending.id);
     showToast(
       uncertain
         ? `Delivery outcome is uncertain: ${error.message}. Retry only after checking its status.`
@@ -387,6 +388,7 @@ function createComposer({
       }
       if (!outboundQueues.has(id)) outboundQueues.set(id, []);
       outboundQueues.get(id).push(...retry.jobs);
+      recovery.submitting(id, retry.jobs.at(-1).pending);
       touchRender();
       renderDetail();
       void drain(id);
@@ -401,8 +403,7 @@ function createComposer({
       state: 'submitting',
     };
     pendingFor(id).push(pending);
-    elements['send-state'].textContent = 'Submitting';
-    elements['send-state'].className = 'send-state';
+    recovery.submitting(id, pending);
     touchRender();
     renderDetail();
     if (!outboundQueues.has(id)) outboundQueues.set(id, []);
@@ -419,6 +420,7 @@ function createComposer({
   }
 
   elements.message.addEventListener('input', () => {
+    recovery.inputChanged();
     saveDraft(sessionId, elements.message.value);
     commands.inputChanged();
     deliveryMode.sync(selectedAgent());
@@ -431,6 +433,7 @@ function createComposer({
   elements.attachments.addEventListener('click', event => {
     const button = event.target.closest('[data-remove-attachment]');
     if (!button) return;
+    recovery.inputChanged();
     const current = attachmentsFor(sessionId);
     const index = Number(button.dataset.removeAttachment);
     const removed = current[index];

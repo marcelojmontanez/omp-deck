@@ -270,13 +270,15 @@ test('composer queue stops after a failed delivery and preserves later jobs', as
   assert.deepEqual(queue, []);
 });
 
-test('a stale recovery response cannot resurrect an accepted send', async () => {
+test('a stale recovery response cannot resurrect an accepted send', async t => {
   const agent = {id: 'session'};
   const pending = [];
   const status = {};
   let finishRead;
   const context = vm.createContext({
     Date,
+    setTimeout,
+    clearTimeout,
     ompDeckApi: {},
     ompDeckNetwork: {
       fetchJsonBounded: () => new Promise(resolve => { finishRead = resolve; }),
@@ -295,9 +297,11 @@ test('a stale recovery response cannot resurrect an accepted send', async () => 
     renderDetail: () => {},
     dataGeneration: () => 1,
   });
+  t.after(() => recovery.clear());
   const read = recovery.recover(agent);
   const item = {id: 'request', state: 'submitting', text: 'hello', attachments: []};
   pending.push(item);
+  recovery.submitting(agent.id, item);
   recovery.accept(agent.id, item);
   finishRead({
     response: {ok: true},
@@ -309,7 +313,6 @@ test('a stale recovery response cannot resurrect an accepted send', async () => 
   });
   await read;
   assert.equal(pending.length, 0, 'an older snapshot must not restore a delivery warning');
-  assert.equal(status.className, 'send-state ok');
 });
 
 test('frames large character-fragmented events across CRLF boundaries', () => {

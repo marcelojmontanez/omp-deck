@@ -105,7 +105,6 @@ export async function verifyDeliveryRecovery(page, expectedSessionId) {
     await page.evaluate(() => window.deliveryRecoveryFixture.releaseRetry());
     await page.waitForFunction((id, expected) => (
       !document.querySelector(`[data-delivery-id="${id}"]`)
-      && document.getElementById('send-state').textContent === 'Accepted'
       && document.getElementById('message').value === expected
     ), {}, requestId, newerDraft);
     await page.waitForFunction(expected => selectedAgent().session.activity.filter(event => (
@@ -137,18 +136,28 @@ export async function verifyDeliveryRecovery(page, expectedSessionId) {
       window.fetch = window.deliveryRecoveryFixture.originalFetch;
       delete window.deliveryRecoveryFixture;
     });
+    const recoveryRead = page.waitForResponse(response => {
+      const url = new URL(response.url());
+      return url.origin === identity.machineOrigin
+        && url.pathname === `/api/sessions/${encodeURIComponent(identity.localId)}/deliveries`
+        && response.request().method() === 'GET';
+    });
     await page.reload({waitUntil: 'domcontentloaded'});
     await page.waitForFunction(id => (
       !document.getElementById('app').hidden && selectedAgent()?.id === id
-      && document.getElementById('send-state').textContent === 'Accepted'
     ), {}, expectedSessionId);
+    const recoveredSnapshot = await (await recoveryRead).json();
+    assert(recoveredSnapshot.deliveries.some(record => (
+      record.requestId === requestId && record.state === 'accepted'
+    )), 'reload must recover the authoritative accepted request from its owning node');
 
     const recoveredAccepted = await page.evaluate(id => ({
       card: Boolean(document.querySelector(`[data-delivery-id="${id}"]`)),
       pending: composer.pendingFor(selectedAgent().id).length,
       status: document.getElementById('send-state').textContent,
     }), requestId);
-    assert.deepEqual(recoveredAccepted, {card: false, pending: 0, status: 'Accepted'});
+    assert.deepEqual(recoveredAccepted, {card: false, pending: 0, status: ''},
+      'recovered acceptance must not appear as fresh composer feedback');
     const sendsAfterRecovery = routedRequests.filter(request => (
       request.method === 'POST' && request.path === `/api/sessions/${encodeURIComponent(identity.localId)}/messages`
     ));
@@ -210,7 +219,6 @@ export async function verifyDeliveryRecovery(page, expectedSessionId) {
             createdObjectUrls,
             pending: composer.pendingFor(agent.id).length,
             card: Boolean(document.querySelector(`[data-delivery-id="${recoveredRequestId}"]`)),
-            status: document.getElementById('send-state').textContent,
           };
         } finally {
           window.fetch = originalFetch;
@@ -230,7 +238,6 @@ export async function verifyDeliveryRecovery(page, expectedSessionId) {
       createdObjectUrls: 0,
       pending: 0,
       card: false,
-      status: 'Accepted',
     });
 
     const recoveredUncertain = await page.evaluate(

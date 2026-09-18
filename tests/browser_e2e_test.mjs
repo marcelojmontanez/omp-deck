@@ -10,6 +10,7 @@ import puppeteer from 'puppeteer';
 import {verifyComposerParity} from './composer_parity_cases.mjs';
 import {verifySessionActions} from './session_action_cases.mjs';
 import {verifyComposerDeliveryModes} from './composer_delivery_mode_cases.mjs';
+import {verifyComposerFeedback} from './composer_feedback_cases.mjs';
 import {verifyMachineSelector} from './machine_selector_cases.mjs';
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
@@ -323,6 +324,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
 
   await verifyComposerParity(page);
   await verifyComposerDeliveryModes(page);
+  await verifyComposerFeedback(page);
   await verifyMachineSelector(page);
 
   const forbiddenRecovery = await page.evaluate(async () => {

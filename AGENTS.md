@@ -249,3 +249,9 @@ Production cutover is one final operation with a prepared rollback. If health or
 Documentation describes supported behavior, exact trust boundaries, data retention, configuration ownership, failure modes, and recovery. Do not claim support based only on inferred JSONL, terminal, or private OMP behavior.
 
 Update user-facing documentation and changelog entries when a permanent feature changes behavior. Keep implementation history and internal mechanics out of user-facing release notes unless users must act on them.
+
+## Reporting preferences
+
+- Never add generic disclaimers that software cannot be guaranteed bug-free, that audits cannot prove the absence of bugs, or equivalent stock caveats.
+- Report concrete known defects, unresolved audit findings, and relevant verification or deployment gaps. Do not invent hypothetical problems to qualify a positive result.
+- Preserve completed audit and verification context. If no known issues remain in the requested scope, say so directly.

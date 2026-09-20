@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from tools.release_lib import coordinator
+from tools.release_lib import coordinator, coordinator_prepare
 
 
 @unittest.skipIf(os.name == "nt", "coordinator release guard targets Linux services")
@@ -96,6 +98,103 @@ class CoordinatorReleaseTests(unittest.TestCase):
             saved = json.loads(manifest.read_text())
             self.assertEqual(saved["decision"], "rollback_failed")
             self.assertIsNone(saved["deadline"])
+
+    @unittest.skipUnless(shutil.which("uv"), "uv is required for the coordinator environment regression")
+    def test_prepare_with_real_uv_does_not_change_the_live_unit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            transaction = root / "transaction"
+            transaction.mkdir(mode=0o700)
+            (transaction / "guard").mkdir(mode=0o700)
+            state_root = root / "state"
+            state_root.mkdir(mode=0o700)
+            profile = {
+                "home": root,
+                "uv": Path(shutil.which("uv")),
+                "base_python": Path(sys.executable),
+                "tool_root": root / "old",
+                "releases_root": root / "releases",
+                "unit": root / "coordinator.service",
+                "config": root / "config.json",
+                "state_root": state_root,
+            }
+            command = [
+                str(profile["tool_root"] / "bin/python"),
+                "-m",
+                "omp_deck",
+                "coordinator",
+                "serve",
+                "--config",
+                str(profile["config"]),
+            ]
+            unit = (
+                "[Service]\nExecStart=" + " ".join(coordinator_prepare.systemd_quote(value) for value in command) + "\n"
+            ).encode()
+            profile["unit"].write_bytes(unit)
+            for path in (profile["config"], state_root / "fleet-coordinator.json"):
+                path.write_text("{}")
+                path.chmod(0o600)
+            candidate = {"wheelSha256": "a" * 64, "wheelVersion": "2.0", "revision": "a" * 40}
+            rollback = {"wheelSha256": "b" * 64, "wheelVersion": "1.0", "revision": "b" * 40}
+            original_run = coordinator._run
+
+            def run(argv, current_profile, timeout=300):
+                if argv[1] == "venv":
+                    return original_run(argv, current_profile, timeout)
+                if argv[1:3] in (["pip", "freeze"], ["pip", "install"]):
+                    return b""
+                raise AssertionError("unexpected release command")
+
+            with (
+                mock.patch.object(
+                    coordinator,
+                    "_wheel",
+                    side_effect=[
+                        (candidate, root / "candidate.whl"),
+                        (rollback, root / "rollback.whl"),
+                    ],
+                ),
+                mock.patch.object(coordinator, "_active", return_value=True),
+                mock.patch.object(coordinator, "_health"),
+                mock.patch.object(
+                    coordinator,
+                    "_live_identity",
+                    return_value={
+                        "version": rollback["wheelVersion"],
+                        "revision": rollback["revision"],
+                    },
+                ),
+                mock.patch.object(
+                    coordinator,
+                    "_identity",
+                    return_value={
+                        "version": candidate["wheelVersion"],
+                        "revision": candidate["revision"],
+                    },
+                ),
+                mock.patch.object(coordinator, "_enabled", return_value=True),
+                mock.patch.object(coordinator, "_run", side_effect=run),
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "XDG_CACHE_HOME": str(root / "cache"),
+                        "XDG_CONFIG_HOME": str(root / "configuration"),
+                        "UV_CACHE_DIR": str(root / "cache"),
+                        "UV_OFFLINE": "1",
+                    },
+                ),
+            ):
+                result = coordinator_prepare.prepare(
+                    {"transaction": "release-1", "candidate": candidate, "rollback": rollback},
+                    profile,
+                    transaction,
+                    transaction / "guard/manifest.json",
+                )
+            self.assertEqual(result["state"], "prepared")
+            self.assertEqual(profile["unit"].read_bytes(), unit)
+            release = profile["releases_root"] / "release-1"
+            prefix = original_run([release / "bin/python", "-c", "import sys; print(sys.prefix)"], profile, 30)
+            self.assertEqual(prefix.decode().strip(), str(release))
 
 
 if __name__ == "__main__":

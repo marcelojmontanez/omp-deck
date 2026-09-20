@@ -70,8 +70,8 @@ def prepare(request: dict[str, Any], profile: dict[str, Any], root: Path, manife
     )
     release.mkdir(mode=0o700)
     try:
-        c._atomic(release / "constraints.txt", constraints)
         c._run([profile["uv"], "venv", "--python", profile["base_python"], release], profile)
+        c._atomic(release / "constraints.txt", constraints)
         c._run(
             [
                 profile["uv"],

@@ -92,6 +92,9 @@ export async function verifyComposerParity(page) {
     await page.evaluate(() => {
       globalThis.__composerParityRequests = [];
       ompDeckApi.request = async (path, options) => {
+        if (path.endsWith('/draft')) return {ok: true, status: 200, json: async () => ({
+          enabled: false, revision: null, text: '', images: [], updatedAt: null, expiresAt: null,
+        })};
         if (path.endsWith('/deliveries')) return {ok: true, json: async () => ({version: 1, deliveries: []})};
         const body = JSON.parse(options.body);
         globalThis.__composerParityRequests.push({path, body});

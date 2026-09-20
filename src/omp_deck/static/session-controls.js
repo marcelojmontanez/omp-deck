@@ -291,13 +291,13 @@ async function runSettingsAction(button) {
   const status = el['settings-status'];
   const action = button.dataset.sessionAction;
   if (button.matches('[data-clear-local-data]')) {
-    if (!confirm('Clear drafts and other local browser data for OMP Deck?')) return;
+    if (!confirm('Clear drafts and other data held only in this browser tab? Drafts saved on a Deck machine are not deleted and can restore later.')) return;
     setSettingsBusy(true);
-    if (status) status.textContent = 'Clearing local data…';
+    if (status) status.textContent = 'Clearing browser-only data…';
     try {
       await clearLocalData();
-      if (status) status.textContent = 'Local data cleared.';
-      showToast('Local data cleared', 'success');
+      if (status) status.textContent = 'Browser-only data cleared.';
+      showToast('Browser-only data cleared', 'success');
     } catch (error) {
       if (status) status.textContent = error.message;
       showToast(error.message, 'error');
@@ -323,7 +323,7 @@ async function runSettingsAction(button) {
   try {
     await ompDeckApi.logout({all});
     loggedOut = true;
-    await clearLocalData();
+    await clearLocalData({forgetSelection: true});
   } catch (error) {
     if (!loggedOut) {
       if (status) status.textContent = error.message;
@@ -341,6 +341,10 @@ async function runSettingsAction(button) {
 async function removeSession(agent) {
   const removable = Boolean(agent?.nodeAvailable !== false && agent?.capabilities?.remove);
   if (!removable || !confirm('Remove this terminal session from Deck?')) return;
+  if (!(await composer.prepareRemove(agent.id))) {
+    showToast('Session was not removed because its saved draft could not be deleted.', 'error');
+    return;
+  }
   const generation = sessionActionGeneration;
   try {
     const response = await ompDeckApi.request(`/api/sessions/${encodeURIComponent(agent.id)}/remove`, {

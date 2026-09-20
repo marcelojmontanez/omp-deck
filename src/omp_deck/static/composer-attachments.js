@@ -8,6 +8,7 @@ function createComposerAttachmentReads({
   renderAttachments,
   renderDetail,
   inputChanged,
+  attachmentChanged,
   showToast,
 }) {
   const readers = new Map();
@@ -107,6 +108,7 @@ function createComposerAttachmentReads({
           return false;
         }
         current.push(...loaded);
+        attachmentChanged(id);
         if (failed) {
           reserved.failed = true;
           failures.add(id);
@@ -185,4 +187,79 @@ function createComposerAttachmentReads({
       readers.clear();
     },
   };
+}
+
+function createComposerAttachmentStore({
+  attachments,
+  elements,
+  escapeHtml,
+  commands,
+  deliveryMode,
+  selectedAgent,
+  selectedSessionId,
+  attachmentsFor,
+  pendingFor,
+  outboundFor,
+  saveDraft,
+}) {
+  const revokedUrls = new Set();
+
+  function revoke(attachment) {
+    if (!attachment?.url || revokedUrls.has(attachment.url)) return;
+    const viewerImage = document.getElementById('image-viewer-image');
+    if (viewerImage?.src === attachment.url && document.getElementById('image-viewer')?.open) {
+      window.closeImageViewer?.();
+    }
+    revokedUrls.add(attachment.url);
+    URL.revokeObjectURL(attachment.url);
+  }
+
+  function replace(id, text, images) {
+    const restored = [];
+    try {
+      for (const [index, image] of images.entries()) {
+        const binary = atob(image.data);
+        const bytes = new Uint8Array(binary.length);
+        for (let offset = 0; offset < binary.length; offset += 1) bytes[offset] = binary.charCodeAt(offset);
+        const blob = new Blob([bytes], {type: image.mimeType});
+        restored.push({
+          name: image.name || `Restored image ${index + 1}`,
+          type: image.mimeType,
+          size: blob.size,
+          data: `data:${image.mimeType};base64,${image.data}`,
+          url: URL.createObjectURL(blob),
+        });
+      }
+    } catch (error) {
+      restored.forEach(revoke);
+      throw error;
+    }
+    for (const attachment of attachmentsFor(id)) {
+      const retained = pendingFor(id).some(item => item.attachments.includes(attachment))
+        || outboundFor(id).some(job => job.outgoingAttachments.includes(attachment));
+      if (!retained) revoke(attachment);
+    }
+    saveDraft(id, text);
+    attachments.set(id, restored);
+    if (selectedSessionId() === id) elements.message.value = text;
+  }
+
+  function render() {
+    const current = attachments.get(selectedSessionId()) || [];
+    elements.attachments.innerHTML = current.map((attachment, index) =>
+      `<span class="attachment" role="group" aria-label="Attachment: ${escapeHtml(attachment.name)}">
+        <button class="attachment-preview" type="button" data-view-image="${attachment.url}" aria-label="Enlarge attachment: ${escapeHtml(attachment.name)}"><img src="${attachment.url}" alt="${escapeHtml(attachment.name)}"></button>
+        <button type="button" data-remove-attachment="${index}" aria-label="Remove attachment: ${escapeHtml(attachment.name)}">×</button>
+      </span>`
+    ).join('');
+    commands.sync({showSuggestions: false});
+    deliveryMode.sync(selectedAgent());
+  }
+
+  return Object.freeze({
+    clearRevokedUrls: () => revokedUrls.clear(),
+    render,
+    replace,
+    revoke,
+  });
 }

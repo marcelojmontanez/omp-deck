@@ -55,6 +55,11 @@ export async function verifyBrowserStateRegressions(page) {
     });
 
     ompDeckApi.request = async (path, options = {}) => {
+      if (path.endsWith('/draft')) {
+        return {ok: true, status: 200, json: async () => ({
+          enabled: false, revision: null, text: '', images: [], updatedAt: null, expiresAt: null,
+        })};
+      }
       if (path.endsWith('/deliveries')) {
         const id = decodeURIComponent(path.split('/')[3]);
         return {ok: true, status: 200, json: async () => ({
@@ -118,9 +123,9 @@ export async function verifyBrowserStateRegressions(page) {
       await waitFor(() => readers.length === 1, 'clear reader');
       const clearPosts = posts.length;
       window.confirm = () => true;
-      el['settings-status'].textContent = '';
       document.querySelector('[data-clear-local-data]').click();
-      await waitFor(() => el['settings-status'].textContent === 'Local data cleared.', 'settings clear');
+      await waitFor(() => el.message.value === '' && el.attachments.children.length === 0
+        && readers[0].aborted, 'browser draft and pending image read cleared');
       window.confirm = originalConfirm;
       el.composer.requestSubmit();
       await new Promise(resolve => setTimeout(resolve, 20));

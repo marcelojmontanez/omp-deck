@@ -27,19 +27,21 @@ const el = Object.fromEntries([
   'idle-count', 'agent-list', 'history-toggle', 'history-count', 'session-scope-title',
   'app', 'workspace', 'detail', 'detail-chips', 'task-control', 'transport-status',
   'pending-request', 'activity', 'scroll-newest', 'composer', 'attachments', 'attach',
-  'attachment-status', 'command-menu', 'command-mode', 'delivery-mode', 'message', 'send',
+  'attachment-status', 'command-menu', 'command-mode', 'delivery-mode', 'draft-save-control',
+  'save-draft', 'draft-save-status', 'draft-conflict', 'draft-restore-saved',
+  'draft-overwrite-saved', 'message', 'send',
   'send-state', 'toast', 'overflow-button', 'session-menu', 'machine-panel', 'machine-select',
   'session-info', 'session-metadata', 'session-name-dialog', 'session-name-form',
   'session-name-input', 'session-name-status', 'deck-settings', 'settings-status',
   'machine-status-list', 'fleet-reload', 'fleet-reload-button', 'project-root-label',
   'project-select', 'project-new', 'project-launch', 'launch-state'
 ].map(id => [id, document.getElementById(id)]));
-async function clearLocalData() {
+async function clearLocalData({forgetSelection = false} = {}) {
   try { localStorage.clear(); } catch {}
   try { sessionStorage.clear(); } catch {}
   thinkingOverrides.clear();
   thinkingUpdateTokens = new Map();
-  composer?.clearLocalData();
+  composer?.clearLocalData({forgetSelection});
   clearPendingRequestAttempts();
   clearSessionActionAttempts();
   if (typeof window.clearLauncherAttempts === 'function') window.clearLauncherAttempts();
@@ -422,7 +424,7 @@ function resetApplication() {
   state.showArchive = false;
   state.showTodo = false;
   closeSessionMenu();
-  composer?.select(null);
+  composer?.clearLocalData({forgetSelection: true});
   el.app.classList.remove('chat-open');
   document.body.classList.remove('chat-open');
   el.workspace.classList.remove('chat-open');

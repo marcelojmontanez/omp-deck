@@ -65,7 +65,7 @@
       </div>
       <div class="machine-status-list" id="machine-status-list" role="status" aria-live="polite"></div>
       <div class="fleet-reload" id="fleet-reload" role="alert" hidden>
-        <span>The machine roster changed. Reload to authorize connections to newly added origins. Unsaved drafts will be cleared.</span>
+        <span>The machine roster changed. Reload to authorize connections to newly added origins. Browser-only drafts will be cleared; wait for Saved before reloading an opted-in draft.</span>
         <button id="fleet-reload-button" type="button">Reload dashboard</button>
       </div>
     </section>
@@ -135,6 +135,18 @@
             <button type="button" data-delivery-mode="queue" aria-pressed="false" title="Wait until the current run finishes">Queue</button>
             <span class="sr-only" id="delivery-mode-help">Steer sends at the next interruption point. Queue waits until the current run finishes.</span>
           </div>
+          <div class="draft-save-control" id="draft-save-control" hidden>
+            <div class="draft-save-row">
+              <label><input id="save-draft" type="checkbox"> Save draft on this machine</label>
+              <span class="draft-save-status" id="draft-save-status" role="status" aria-live="polite">Not saved on this machine</span>
+            </div>
+            <p>Optional for this session. Text and selected images are shared with authenticated devices through the session’s Deck machine and retained for up to seven days.</p>
+            <div class="draft-conflict" id="draft-conflict" role="alert" hidden>
+              <span>A different saved draft exists. Your local draft has not been replaced.</span>
+              <button id="draft-restore-saved" type="button">Restore saved draft</button>
+              <button id="draft-overwrite-saved" type="button">Keep local and overwrite</button>
+            </div>
+          </div>
             <div class="command-menu" id="command-menu" role="listbox" aria-label="Session actions" hidden></div>
           <div class="composer-shell">
             <label class="attach">
@@ -187,7 +199,8 @@
       <button id="deck-build-refresh" type="button">Refresh versions</button>
     </details>
     <div class="settings-actions">
-      <button type="button" data-clear-local-data>Clear local drafts</button>
+      <button type="button" data-clear-local-data>Clear browser-only drafts</button>
+      <p class="settings-note">This clears drafts held only in this browser tab. Drafts saved on a Deck machine can restore later; turn off “Save draft on this machine” in each session to delete them.</p>
       <button type="button" data-session-action="logout">Log out this device</button>
       <button class="danger" type="button" data-session-action="revoke-all">Revoke all devices</button>
     </div>
@@ -215,6 +228,9 @@
   <script src="/composer-commands.js"></script>
   <script src="/composer-recovery.js"></script>
   <script src="/composer-delivery-mode.js"></script>
+  <script src="/composer-draft-protocol.js"></script>
+  <script src="/composer-draft-view.js"></script>
+  <script src="/composer-drafts.js"></script>
   <script src="/composer-attachments.js"></script>
   <script src="/composer.js"></script>
   <script src="/deck-rendering.js"></script>

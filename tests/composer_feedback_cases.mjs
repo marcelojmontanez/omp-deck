@@ -47,6 +47,9 @@ export async function verifyComposerFeedback(page) {
       for (const id of ids) composer.remove(id);
       receipts.set(ids[2], receipt(ids[2], {requestId: 'historical', message: 'already accepted'}));
       ompDeckApi.request = async (path, options = {}) => {
+        if (path.endsWith('/draft')) return {ok: true, status: 200, json: async () => ({
+          enabled: false, revision: null, text: '', images: [], updatedAt: null, expiresAt: null,
+        })};
         const id = decodeURIComponent(path.split('/')[3]);
         if (path.endsWith('/deliveries')) {
           if (id === ids[3]) await new Promise((resolve, reject) => { recoveryRead = {resolve, reject}; });

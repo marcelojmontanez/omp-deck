@@ -371,6 +371,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
       || (!attachmentStatus && canAttach && !agent.attachmentLimits.reason);
     el.send.disabled = !canMessage;
     getComposer().syncDeliveryMode(agent);
+    getComposer().syncDraftSaving(agent);
   }
 
   function selectAgent(id, {pushHistory = true} = {}) {

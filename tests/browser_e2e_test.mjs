@@ -11,6 +11,7 @@ import {verifyComposerParity} from './composer_parity_cases.mjs';
 import {verifySessionActions} from './session_action_cases.mjs';
 import {verifyComposerDeliveryModes} from './composer_delivery_mode_cases.mjs';
 import {verifyComposerFeedback} from './composer_feedback_cases.mjs';
+import {verifyComposerDrafts} from './composer_draft_cases.mjs';
 import {verifyMachineSelector} from './machine_selector_cases.mjs';
 import {verifyBrowserStateRegressions} from './browser_state_cases.mjs';
 import {verifyBrowserSurface} from './browser_surface_cases.mjs';
@@ -327,6 +328,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   await verifyComposerParity(page);
   await verifyComposerDeliveryModes(page);
   await verifyComposerFeedback(page);
+  await verifyComposerDrafts(page);
   await verifyMachineSelector(page);
   await verifyBrowserStateRegressions(page);
   await verifyBrowserSurface(page);
@@ -937,13 +939,19 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     const originalRequest = ompDeckApi.request;
     let composerPath = null;
     ompDeckApi.request = async (path, options) => {
+      if (path.endsWith('/draft')) return {ok: true, status: 200, json: async () => ({
+        enabled: false, revision: null, text: '', images: [], updatedAt: null, expiresAt: null,
+      })};
       if (path.endsWith('/deliveries')) return {ok: true, json: async () => ({version: 1, deliveries: []})};
       composerPath = path;
       return {ok: true, status: 202, json: async () => ({requestId: JSON.parse(options.body).requestId, status: 'accepted', acceptance: 'accepted'})};
     };
     el.message.value = 'Control channel still works';
+    el.message.dispatchEvent(new Event('input', {bubbles: true}));
     el.composer.requestSubmit();
-    await new Promise(resolve => setTimeout(resolve, 0));
+    for (let attempt = 0; attempt < 100 && !composerPath; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
     ompDeckApi.request = originalRequest;
     const historyFailure = {
       sendDisabled: el.send.disabled,
@@ -1141,6 +1149,9 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       let releaseFirst;
       let releaseSecond;
       ompDeckApi.request = (path, options) => {
+        if (path.endsWith('/draft')) return Promise.resolve({ok: true, status: 200, json: async () => ({
+          enabled: false, revision: null, text: '', images: [], updatedAt: null, expiresAt: null,
+        })});
         if (path.endsWith('/deliveries')) return Promise.resolve({ok: true, json: async () => ({version: 1, deliveries: []})});
         routes.push(path);
         if (routes.length <= 2) {
@@ -1168,6 +1179,9 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       const failedRequests = [];
       let rejectFirst;
       ompDeckApi.request = (path, options) => {
+        if (path.endsWith('/draft')) return Promise.resolve({ok: true, status: 200, json: async () => ({
+          enabled: false, revision: null, text: '', images: [], updatedAt: null, expiresAt: null,
+        })});
         if (path.endsWith('/deliveries')) return Promise.resolve({ok: true, json: async () => ({version: 1, deliveries: []})});
         failedRequests.push({path, body: JSON.parse(options.body)});
         return new Promise((resolve, reject) => {
@@ -1185,6 +1199,9 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       const restoredDraft = document.getElementById('message').value;
       const retryRequests = [];
       ompDeckApi.request = (path, options) => {
+        if (path.endsWith('/draft')) return Promise.resolve({ok: true, status: 200, json: async () => ({
+          enabled: false, revision: null, text: '', images: [], updatedAt: null, expiresAt: null,
+        })});
         if (path.endsWith('/deliveries')) return Promise.resolve({ok: true, json: async () => ({version: 1, deliveries: []})});
         retryRequests.push({path, body: JSON.parse(options.body)});
         return Promise.resolve(response(options));
@@ -1246,6 +1263,9 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
     };
     try {
       ompDeckApi.request = async (path, options = {}) => {
+        if (path.endsWith('/draft')) return {ok: true, status: 200, json: async () => ({
+          enabled: false, revision: null, text: '', images: [], updatedAt: null, expiresAt: null,
+        })};
         if (path.endsWith('/deliveries')) {
           return {ok: true, json: async () => ({version: 1, deliveries: []})};
         }
@@ -1259,8 +1279,9 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       selectAgent(agent.id, {pushHistory: false});
       for (let index = 0; index < 1_001; index += 1) {
         el.message.value = `accepted ${index}`;
+        el.message.dispatchEvent(new Event('input', {bubbles: true}));
         el.composer.requestSubmit();
-        await waitUntil(() => composer.pendingFor(agent.id).length === 0);
+        await waitUntil(() => requestCount === index + 1 && composer.pendingFor(agent.id).length === 0);
       }
       return {
         requestCount,

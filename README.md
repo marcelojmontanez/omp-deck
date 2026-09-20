@@ -130,7 +130,13 @@ The conversation toolbar stays compact: provider-qualified model, effective thin
 
 The session light is green for connected managed RPC, amber for connected terminal transports, red for an unavailable ongoing connection, and neutral for history. Its accessible label and **Session details** identify the connection without relying on color. Actual machine, transport, and history failures remain visible. **Deck settings**, available from the dashboard or session menu, holds terminal connection setup, local-draft clearing, logout, and device revocation.
 
-Unsent drafts and selected images stay with their session when you switch conversations. They remain memory-only: reloading, logging out, or clearing local data discards them. Submitted messages are different: once the owning node saves the request, its private recovery receipt can survive a browser reload or Deck restart.
+Unsent drafts and selected images stay with their session when you switch conversations. By default they remain memory-only: reloading, logging out, or **Clear browser-only drafts** discards them.
+
+Optionally enable **Save draft on this machine** in a session's composer. Its owning Deck machine then saves the text and selected images for recovery after a browser reload or Deck restart, shared with your other authenticated devices. Nothing is stored in browser storage or sent to OMP automatically. Wait for **Saved** before leaving; **Saving…** and **Unsaved** do not confirm durability. A conflicting device edit preserves your local draft and offers **Restore saved draft** or **Keep local and overwrite**.
+
+Saved drafts expire seven days after their last save; expired files are reclaimed on the next draft access. Turning the option off deletes the saved text and images while keeping the current browser draft. Logout and **Clear browser-only drafts** do not delete server copies, which can restore later. Removing a session also removes its saved draft, with cleanup failures reported explicitly.
+
+An enabled saved draft must be cleared successfully before an explicit Send proceeds. Storage errors or conflicts block sending without discarding the local draft. Submitted messages are separate: once the owning node saves the request, its private recovery receipt can survive a browser reload or Deck restart.
 
 Send waits for images already selected in the file picker to finish loading, preserves their selection order, and reports read failures without sending a partial attachment set. Switching sessions does not move those images to another draft. Clearing local drafts also clears the visible composer and cancels pending image reads.
 

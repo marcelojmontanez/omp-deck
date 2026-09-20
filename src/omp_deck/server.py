@@ -4,9 +4,9 @@ import re
 import threading
 from urllib.parse import urlparse, urlsplit
 
-from . import build_identity
+from . import _draft_http, build_identity
 from ._fleet_trust import FleetTrustStore
-from ._http_common import DeckHttpHandler
+from ._http_common import DeckHttpHandler, node_preflight_route_known
 from ._http_common import ThreadingHTTPServer as ThreadingHTTPServer
 from ._rpc_dispatch import SessionCommandConflictError, SessionNotConnectedError
 from ._sse import send_stream
@@ -23,14 +23,12 @@ from .read_cursors import CursorStore
 from .registry_store import RegistryError, RegistryStore
 from .rpc_sessions import RpcSessionManager
 from .settings import load_settings
-from .terminal_sessions import (
-    TerminalSessionManager,
-    TerminalSessionNotConnected,
-)
+from .terminal_sessions import TerminalSessionManager, TerminalSessionNotConnected
 from .usage import UsageService
 
 _IMAGE_REQUEST_BODY_TIMEOUT = 120.0
 _IMAGE_RESPONSE_TIMEOUT = 120.0
+_IMAGE_REQUEST_ROUTE = re.compile(r"/api/sessions/[^/]+/(messages|follow-ups|draft)")
 
 
 SETTINGS = load_settings()
@@ -241,35 +239,6 @@ class Handler(DeckHttpHandler):
             return enrollment is not None and self._fleet_request_boundary(enrollment)
         return self.browser_origin_valid()
 
-    @staticmethod
-    def _preflight_route_known(path, method):
-        if method == "GET":
-            return (
-                path
-                in {
-                    "/api/client-config",
-                    "/api/events",
-                    "/api/projects",
-                    "/api/sessions",
-                    "/api/usage",
-                }
-                or re.fullmatch(r"/api/blob/[^/]+", path) is not None
-                or re.fullmatch(r"/api/sessions/[^/]+/deliveries", path) is not None
-            )
-        if method != "POST":
-            return False
-        return (
-            path == "/api/terminal-sessions/collab"
-            or re.fullmatch(r"/api/projects/.+/sessions", path) is not None
-            or re.fullmatch(
-                r"/api/sessions/[^/]+/(messages|follow-ups|interrupt|shutdown|model|thinking|branch|switch|resume|compact|read|remove|presentation)",
-                path,
-            )
-            is not None
-            or re.fullmatch(r"/api/sessions/[^/]+/ui-requests/[^/]+/(respond|cancel)", path) is not None
-            or re.fullmatch(r"/api/sessions/[^/]+/deliveries/[^/]+/dismiss", path) is not None
-        )
-
     def do_OPTIONS(self):
         request_path = urlparse(self.path).path
         methods = self.headers.get_all("Access-Control-Request-Method", [])
@@ -286,7 +255,7 @@ class Handler(DeckHttpHandler):
         if (
             enrollment is None
             or not self._fleet_request_boundary(enrollment)
-            or not self._preflight_route_known(request_path, requested_method)
+            or not node_preflight_route_known(request_path, requested_method)
             or len(requested_header_values) > 1
             or len(private_network_values) > 1
             or not header_names.issubset({"authorization", "content-type", "last-event-id"})
@@ -385,6 +354,8 @@ class Handler(DeckHttpHandler):
             except Exception:
                 self.reply(503, {"error": "session state unavailable"})
             return
+        if _draft_http.handle_draft_get(self, request_path, _fleet_model, SETTINGS.state_root):
+            return
         if request_path.startswith("/api/sessions/") and request_path.endswith("/deliveries"):
             try:
                 result = action_dispatcher().recover(request_path)
@@ -437,6 +408,8 @@ class Handler(DeckHttpHandler):
         # Revalidate at the action boundary rather than dispatching stale authority.
         if not self._authorize_mutation():
             return
+        if _draft_http.handle_draft_post(self, request_path, data, _fleet_model, SETTINGS.state_root):
+            return
         self._normalized_action(request_path, data)
 
     def _authorize_mutation(self):
@@ -450,7 +423,7 @@ class Handler(DeckHttpHandler):
         return False
 
     def _read_post_body(self, request_path):
-        image_request = re.fullmatch(r"/api/sessions/[^/]+/(messages|follow-ups)", request_path) is not None
+        image_request = _IMAGE_REQUEST_ROUTE.fullmatch(request_path) is not None
         limit = MAX_IMAGE_REQUEST_BYTES if image_request else 64 * 1024
         try:
             return self.read_json(limit, timeout=_IMAGE_REQUEST_BODY_TIMEOUT if image_request else None)
@@ -466,6 +439,7 @@ class Handler(DeckHttpHandler):
             if response is None:
                 self.reply(404, {"error": "not found"})
                 return
+            response = _draft_http.purge_removed_draft(request_path, response, SETTINGS.state_root)
             self.reply(*response)
         except (SessionCommandConflictError, TerminalCommandConflict) as error:
             self.reply(409, {"error": str(error), "errorCode": "request_conflict"})

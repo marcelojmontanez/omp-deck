@@ -232,6 +232,7 @@ button.chip:active { background: #283247; }
 .settings-actions { display: grid; gap: 8px; }
 .settings-actions button { min-height: 44px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: #1a2130; color: var(--text); text-align: left; cursor: pointer; }
 .settings-actions .danger { color: var(--red); }
+.settings-note { margin: -2px 2px 2px; color: var(--muted); font-size: 11px; line-height: 1.45; }
 #settings-status { margin-top: 12px; font-size: 13px; overflow-wrap: anywhere; }
 #settings-status:empty { display: none; }
 .deck-dialog form > label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 12px; font-weight: 750; }

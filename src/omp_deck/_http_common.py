@@ -18,6 +18,28 @@ from .request_parsing import cookie_credential, read_json_request, request_host,
 _STATIC_ROOT = Path(__file__).parent / "static"
 
 
+def node_preflight_route_known(path, method):
+    if method == "GET":
+        return (
+            path in {"/api/client-config", "/api/events", "/api/projects", "/api/sessions", "/api/usage"}
+            or re.fullmatch(r"/api/blob/[^/]+", path) is not None
+            or re.fullmatch(r"/api/sessions/[^/]+/(deliveries|draft)", path) is not None
+        )
+    if method != "POST":
+        return False
+    return (
+        path == "/api/terminal-sessions/collab"
+        or re.fullmatch(r"/api/projects/.+/sessions", path) is not None
+        or re.fullmatch(
+            r"/api/sessions/[^/]+/(messages|follow-ups|interrupt|shutdown|model|thinking|branch|switch|resume|compact|read|remove|presentation|draft)",
+            path,
+        )
+        is not None
+        or re.fullmatch(r"/api/sessions/[^/]+/ui-requests/[^/]+/(respond|cancel)", path) is not None
+        or re.fullmatch(r"/api/sessions/[^/]+/deliveries/[^/]+/dismiss", path) is not None
+    )
+
+
 class ThreadingHTTPServer(_ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False

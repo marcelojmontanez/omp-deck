@@ -18,10 +18,10 @@ function createComposer({
   const sending = new Set();
   const outboundQueues = new Map();
   const retryBatches = new Map();
-  const revokedAttachmentUrls = new Set();
   const queueTokens = new Map();
   let sessionId = null;
   let dataGeneration = 0;
+  let serverDrafts = null;
   const commands = createComposerCommands({
     elements,
     selectedAgent,
@@ -34,6 +34,22 @@ function createComposer({
     hasAttachments: () => (attachments.get(sessionId) || []).length > 0,
   });
   const deliveryMode = createComposerDeliveryMode({elements, selectedAgent});
+  const attachmentStore = createComposerAttachmentStore({
+    attachments,
+    elements,
+    escapeHtml,
+    commands,
+    deliveryMode,
+    selectedAgent,
+    selectedSessionId: () => sessionId,
+    attachmentsFor,
+    pendingFor,
+    outboundFor: id => outboundQueues.get(id) || [],
+    saveDraft,
+  });
+  const revokeAttachment = attachmentStore.revoke;
+  const replaceDraftSnapshot = attachmentStore.replace;
+  const renderAttachments = attachmentStore.render;
   const queueToken = id => queueTokens.get(id) || queueTokens.set(id, {}).get(id);
   const recovery = createComposerRecovery({
     elements,
@@ -41,7 +57,7 @@ function createComposer({
     pendingFor,
     loadDraft,
     saveDraft,
-    draftChanged: id => commands.draftChanged(id),
+    draftChanged: noteDraftChanged,
     attachmentsFor,
     setAttachments: (id, items) => attachments.set(id, items),
     mergeAttachments: mergeComposerAttachments,
@@ -68,9 +84,30 @@ function createComposer({
     revokeAttachment,
     renderAttachments,
     renderDetail,
-    inputChanged: () => recovery.inputChanged(),
+    inputChanged: () => {
+      recovery.inputChanged();
+      serverDrafts?.changed(sessionId, {images: true});
+      commands.draftChanged(sessionId);
+    },
+    attachmentChanged: id => serverDrafts?.changed(id, {images: true}),
     showToast,
   });
+  serverDrafts = createComposerDrafts({
+    elements,
+    selectedAgent,
+    snapshot: id => ({
+      text: loadDraft(id),
+      attachments: [...attachmentsFor(id)],
+    }),
+    replaceSnapshot: replaceDraftSnapshot,
+    snapshotChanged: id => commands.draftChanged(id),
+    renderAttachments,
+    showToast,
+  });
+  function noteDraftChanged(id) {
+    commands.draftChanged(id);
+    serverDrafts?.changed(id, {images: true});
+  }
   function saveDraft(id, value) {
     if (!id) return;
     if (value) drafts.set(id, value);
@@ -79,8 +116,9 @@ function createComposer({
   function loadDraft(id) {
     return id ? drafts.get(id) || '' : '';
   }
-  function clearLocalData() {
+  function clearLocalData({forgetSelection = false} = {}) {
     dataGeneration += 1;
+    serverDrafts.clear({forgetSelection});
     attachmentReads.clear();
     for (const items of attachments.values()) items.forEach(revokeAttachment);
     for (const items of pendingMessages.values()) {
@@ -99,7 +137,7 @@ function createComposer({
     deliveryMode.clear();
     elements.message.value = '';
     elements.attach.value = '';
-    revokedAttachmentUrls.clear();
+    attachmentStore.clearRevokedUrls();
     renderAttachments();
     commands.clear();
     touchRender();
@@ -114,33 +152,13 @@ function createComposer({
     if (!pendingMessages.has(id)) pendingMessages.set(id, []);
     return pendingMessages.get(id);
   }
-  function revokeAttachment(attachment) {
-    if (!attachment?.url || revokedAttachmentUrls.has(attachment.url)) return;
-    const viewerImage = document.getElementById('image-viewer-image');
-    if (viewerImage?.src === attachment.url && document.getElementById('image-viewer')?.open) {
-      window.closeImageViewer?.();
-    }
-    revokedAttachmentUrls.add(attachment.url);
-    URL.revokeObjectURL(attachment.url);
-  }
-
-  function renderAttachments() {
-    const current = attachments.get(sessionId) || [];
-    elements.attachments.innerHTML = current.map((attachment, index) =>
-      `<span class="attachment" role="group" aria-label="Attachment: ${escapeHtml(attachment.name)}">
-        <button class="attachment-preview" type="button" data-view-image="${attachment.url}" aria-label="Enlarge attachment: ${escapeHtml(attachment.name)}"><img src="${attachment.url}" alt="${escapeHtml(attachment.name)}"></button>
-        <button type="button" data-remove-attachment="${index}" aria-label="Remove attachment: ${escapeHtml(attachment.name)}">×</button>
-      </span>`
-    ).join('');
-    commands.sync({showSuggestions: false});
-    deliveryMode.sync(selectedAgent());
-  }
 
   function select(id) {
     if (sessionId !== (id || null)) recovery.select(id || null);
     sessionId = id || null;
     elements.message.value = loadDraft(sessionId);
     renderAttachments();
+    serverDrafts.select(sessionId);
     commands.reset();
   }
 
@@ -217,12 +235,12 @@ function createComposer({
     const messages = active.map(job => job.message);
     const restoredDraft = [...messages, currentDraft].filter(Boolean).join('\n');
     saveDraft(id, restoredDraft);
-    commands.draftChanged(id);
     const restoredAttachments = mergeComposerAttachments(
       ...active.map(job => job.outgoingAttachments),
       currentAttachments,
     );
     attachments.set(id, restoredAttachments);
+    noteDraftChanged(id);
     if (uncertain && !currentDraft) {
       retryBatches.set(id, {jobs: active, revision: commands.revision({id})});
     } else {
@@ -285,8 +303,16 @@ function createComposer({
         elements.message.focus();
         return;
       }
-      commands.reset();
+      if (!(await serverDrafts.beforeSend(id))) return;
+      agent = state.agents.find(candidate => candidate.id === id);
+      if (!agent || !commands.unchanged(agent, commandRevision)) {
+        serverDrafts.changed(id, {images: true});
+        showToast('Draft changed while its saved copy was clearing. Review it and send again.', 'error');
+        return;
+      }
+      if (sessionId === id) commands.reset();
       const accepted = await commands.run(command, agent);
+      if (!accepted) serverDrafts.changed(id);
       const unchanged = commands.unchanged(agent, commandRevision);
       if (accepted && unchanged && loadDraft(id) === commandDraft) saveDraft(id, '');
       if (unchanged && sessionId === id && elements.message.value === commandDraft) {
@@ -325,11 +351,20 @@ function createComposer({
       showToast('Send queue is full. Wait for pending sends or dismiss old receipts.', 'error');
       return;
     }
+    if (!(await serverDrafts.beforeSend(id))) return;
+    agent = state.agents.find(candidate => candidate.id === id);
+    if (!agent || !commands.unchanged(agent, commandRevision)) {
+      serverDrafts.changed(id, {images: true});
+      showToast('Draft changed while its saved copy was clearing. Review it and send again.', 'error');
+      return;
+    }
     retryBatches.delete(id);
     saveDraft(id, '');
     attachments.set(id, []);
-    elements.message.value = '';
-    renderAttachments();
+    if (sessionId === id) {
+      elements.message.value = '';
+      renderAttachments();
+    }
     if (matchesRetry) {
       for (const job of retry.jobs) {
         job.generation = dataGeneration;
@@ -374,6 +409,7 @@ function createComposer({
     recovery.inputChanged();
     saveDraft(sessionId, elements.message.value);
     commands.inputChanged();
+    serverDrafts.changed(sessionId);
     deliveryMode.sync(selectedAgent());
   });
   elements.attach.addEventListener('change', async event => {
@@ -389,6 +425,7 @@ function createComposer({
     const index = Number(button.dataset.removeAttachment);
     const removed = current[index];
     current.splice(index, 1);
+    noteDraftChanged(sessionId);
     const retained = pendingFor(sessionId).some(item => item.attachments.includes(removed))
       || (outboundQueues.get(sessionId) || []).some(job => job.outgoingAttachments.includes(removed));
     if (!retained) revokeAttachment(removed);
@@ -418,6 +455,7 @@ function createComposer({
 
   function remove(id) {
     recovery.remove(id);
+    serverDrafts.remove(id);
     (attachments.get(id) || []).forEach(revokeAttachment);
     (pendingMessages.get(id) || []).flatMap(item => item.attachments || []).forEach(revokeAttachment);
     (outboundQueues.get(id) || []).flatMap(job => job.outgoingAttachments || []).forEach(revokeAttachment);
@@ -437,6 +475,8 @@ function createComposer({
   }
 
   return {
+    prepareRemove: id => serverDrafts.prepareRemove(id),
+    syncDraftSaving: agent => serverDrafts.sync(agent),
     pendingFor,
     clearLocalData,
     reconcile: recovery.reconcile,

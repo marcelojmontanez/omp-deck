@@ -38,6 +38,8 @@ function createComposerRecovery({
   const epochs = new Map();
   const records = new Map();
   let feedback = null;
+  const preparations = new Map();
+
   let feedbackTimer = null;
 
   function clearFeedback() {
@@ -51,6 +53,7 @@ function createComposerRecovery({
   function inputChanged() {
     if (feedback?.state === 'accepted') clearFeedback();
     else if (feedback) feedback.notifyAccepted = false;
+    withdrawPreparation(preparations.get(selectedSessionId()));
   }
 
   function select(id) {
@@ -60,6 +63,47 @@ function createComposerRecovery({
     const item = pending.findLast(candidate => candidate.state === 'submitting') || pending.at(-1);
     if (item) showState(id, item.state, item.id);
   }
+  function withdrawPreparation(preparation) {
+    if (!preparation || preparations.get(preparation.id) !== preparation) return false;
+    preparations.delete(preparation.id);
+    const pending = pendingFor(preparation.id);
+    for (const entry of preparation.entries) {
+      deliveryState(entry.item, entry.state);
+      if (!entry.added) continue;
+      const index = pending.indexOf(entry.item);
+      if (index >= 0) pending.splice(index, 1);
+    }
+    touchRender();
+    if (selectedSessionId() === preparation.id) renderDetail();
+    return true;
+  }
+
+  function prepare(id, items) {
+    if (preparations.has(id)) return null;
+    const pending = pendingFor(id);
+    const preparation = {
+      id,
+      entries: items.map(item => {
+        const added = !pending.includes(item);
+        if (added) pending.push(item);
+        const entry = {item, added, state: item.state};
+        deliveryState(item, 'preparing');
+        return entry;
+      }),
+    };
+    preparations.set(id, preparation);
+    touchRender();
+    if (selectedSessionId() === id) renderDetail();
+    return preparation;
+  }
+
+  function submitPreparation(preparation) {
+    if (!preparation || preparations.get(preparation.id) !== preparation) return false;
+    preparations.delete(preparation.id);
+    preparation.entries.forEach(entry => deliveryState(entry.item, 'submitting'));
+    return true;
+  }
+
 
   function submitting(id, item) {
     if (selectedAgent()?.id !== id) return;
@@ -92,8 +136,8 @@ function createComposerRecovery({
     const notice = {id, requestId, state, notifyAccepted: state !== 'unavailable' && Boolean(feedback?.notifyAccepted)};
     feedback = notice;
     const labels = {
-      submitting: 'Submitting', uncertain: 'Delivery uncertain', accepted: 'Accepted',
-      failed: 'Not sent', cancelled: 'Cancelled', stale: 'Stale',
+      preparing: 'Preparing', submitting: 'Submitting', uncertain: 'Delivery uncertain',
+      accepted: 'Accepted', failed: 'Not sent', cancelled: 'Cancelled', stale: 'Stale',
     };
     elements['send-state'].textContent = message || labels[state];
     elements['send-state'].className = `send-state ${
@@ -317,6 +361,7 @@ function createComposerRecovery({
       inFlight.clear();
       epochs.clear();
       records.clear();
+      preparations.clear();
     },
     remove(id) {
       if (feedback?.id === id) clearFeedback();
@@ -327,8 +372,12 @@ function createComposerRecovery({
       for (const key of records.keys()) {
         if (key.startsWith(`${id}\0`)) records.delete(key);
       }
+      preparations.delete(id);
     },
     select,
+    prepare,
+    submitPreparation,
+    withdrawPreparation,
     submitting,
     showState,
     inputChanged,

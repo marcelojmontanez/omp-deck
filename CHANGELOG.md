@@ -36,6 +36,7 @@
 
 ### Fixed
 
+- Restore immediate greyed-out message previews after Send, including while saved drafts are being cleared. Failed preparation preserves unsent text and images.
 - Fix coordinator upgrades failing while preparing a new release environment.
 - Wait for coordinator health during startup and rollback instead of treating an initial unavailable response as a failed release.
 - Preserve combined restored drafts, wait for selected images before sending, retain image-read failures across redraws, and clear the visible composer when local drafts are cleared.

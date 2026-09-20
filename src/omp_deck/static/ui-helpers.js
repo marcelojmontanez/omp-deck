@@ -89,7 +89,7 @@ function eventAttachments(event) {
 function deliveryEvent(item) {
   if (item.state === 'accepted') return null;
   const labels = {
-    submitting: 'Submitting', uncertain: 'Delivery uncertain',
+    preparing: 'Preparing', submitting: 'Submitting', uncertain: 'Delivery uncertain',
     failed: 'Not sent', cancelled: 'Cancelled', stale: 'Stale',
   };
   return {
@@ -100,7 +100,7 @@ function deliveryEvent(item) {
 }
 
 function deliveryControls(event) {
-  if (!event.deliveryId || ['submitting', 'accepted'].includes(event.deliveryState)) return '';
+  if (!event.deliveryId || ['preparing', 'submitting', 'accepted'].includes(event.deliveryState)) return '';
   const id = escapeHtml(event.deliveryId);
   return `<div class="delivery-controls"><span>Receipt only; check the conversation before sending again.</span><button type="button" data-delivery-action="restore" data-delivery-id="${id}">Restore draft</button><button type="button" data-delivery-action="dismiss" data-delivery-id="${id}">Dismiss receipt</button></div>`;
 }

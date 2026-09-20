@@ -350,13 +350,36 @@ function createComposer({
       showToast('Send queue is full. Wait for pending sends or dismiss old receipts.', 'error');
       return;
     }
-    if (!(await serverDrafts.beforeSend(id))) return;
-    agent = state.agents.find(candidate => candidate.id === id);
-    if (!agent || !commands.unchanged(agent, commandRevision)) {
-      serverDrafts.changed(id, {images: true});
-      showToast('Draft changed while its saved copy was clearing. Review it and send again.', 'error');
+    const jobs = matchesRetry ? retry.jobs : [{
+      id,
+      message,
+      outgoingAttachments,
+      action,
+      pending: {
+        id: requestId(),
+        text: message,
+        attachments: outgoingAttachments,
+        action,
+        createdAt: Date.now(),
+        state: 'submitting',
+      },
+    }];
+    const preparation = recovery.prepare(id, jobs.map(job => job.pending));
+    if (!preparation) return;
+    if (!(await serverDrafts.beforeSend(id))) {
+      recovery.withdrawPreparation(preparation);
       return;
     }
+    agent = state.agents.find(candidate => candidate.id === id);
+    if (!agent || !commands.unchanged(agent, commandRevision)) {
+      recovery.withdrawPreparation(preparation);
+      if (agent) {
+        serverDrafts.changed(id, {images: true});
+        showToast('Draft changed while its saved copy was clearing. Review it and send again.', 'error');
+      }
+      return;
+    }
+    if (!recovery.submitPreparation(preparation)) return;
     retryBatches.delete(id);
     saveDraft(id, '');
     attachments.set(id, []);
@@ -364,43 +387,15 @@ function createComposer({
       elements.message.value = '';
       renderAttachments();
     }
-    if (matchesRetry) {
-      for (const job of retry.jobs) {
-        job.generation = dataGeneration;
-        job.token = queueToken(id);
-        setComposerDeliveryState(job.pending, 'submitting');
-        if (!pendingFor(id).includes(job.pending)) pendingFor(id).push(job.pending);
-      }
-      if (!outboundQueues.has(id)) outboundQueues.set(id, []);
-      outboundQueues.get(id).push(...retry.jobs);
-      recovery.submitting(id, retry.jobs.at(-1).pending);
-      touchRender();
-      renderDetail();
-      void drain(id);
-      return;
+    for (const job of jobs) {
+      job.generation = dataGeneration;
+      job.token = queueToken(id);
     }
-    const pending = {
-      id: requestId(),
-      text: message,
-      attachments: outgoingAttachments,
-      action,
-      createdAt: Date.now(),
-      state: 'submitting',
-    };
-    pendingFor(id).push(pending);
-    recovery.submitting(id, pending);
+    if (!outboundQueues.has(id)) outboundQueues.set(id, []);
+    outboundQueues.get(id).push(...jobs);
+    recovery.submitting(id, jobs.at(-1).pending);
     touchRender();
     renderDetail();
-    if (!outboundQueues.has(id)) outboundQueues.set(id, []);
-    outboundQueues.get(id).push({
-      id,
-      message,
-      outgoingAttachments,
-      action,
-      pending,
-      generation: dataGeneration,
-      token: queueToken(id),
-    });
     void drain(id);
   }
 

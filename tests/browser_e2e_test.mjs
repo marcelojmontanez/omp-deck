@@ -12,6 +12,7 @@ import {verifySessionActions} from './session_action_cases.mjs';
 import {verifyComposerDeliveryModes} from './composer_delivery_mode_cases.mjs';
 import {verifyComposerFeedback} from './composer_feedback_cases.mjs';
 import {verifyComposerDrafts} from './composer_draft_cases.mjs';
+import {verifyComposerOptimism} from './composer_optimistic_cases.mjs';
 import {verifyMachineSelector} from './machine_selector_cases.mjs';
 import {verifyBrowserStateRegressions} from './browser_state_cases.mjs';
 import {verifyBrowserSurface} from './browser_surface_cases.mjs';
@@ -329,6 +330,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   await verifyComposerDeliveryModes(page);
   await verifyComposerFeedback(page);
   await verifyComposerDrafts(page);
+  await verifyComposerOptimism(page);
   await verifyMachineSelector(page);
   await verifyBrowserStateRegressions(page);
   await verifyBrowserSurface(page);

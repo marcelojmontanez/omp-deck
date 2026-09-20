@@ -136,7 +136,7 @@ Nothing is stored in browser storage or sent to OMP automatically. Saving is del
 
 Saved drafts expire seven days after their last save; expired files are reclaimed on the next draft access. Set `"save_drafts": false` in the owning node's configuration to keep drafts browser-only. This prevents new saves and deletes each previously saved draft when that session's draft is next accessed. Logout and **Clear browser-only drafts** do not delete server copies, which can restore later. Removing a session also removes its saved draft, with cleanup failures reported explicitly.
 
-An enabled saved draft must be cleared successfully before an explicit Send proceeds. Storage errors or conflicts block sending without discarding the local draft. Submitted messages are separate: once the owning node saves the request, its private recovery receipt can survive a browser reload or Deck restart.
+Send shows a greyed-out message preview immediately while saved-draft clearance and submission are pending. This is local feedback, not delivery proof. An enabled saved draft must still be cleared successfully before delivery proceeds; a failed clearance removes the preview and preserves the local draft. Submitted messages are separate: once the owning node saves the request, its private recovery receipt can survive a browser reload or Deck restart.
 
 Send waits for images already selected in the file picker to finish loading, preserves their selection order, and reports read failures without sending a partial attachment set. Switching sessions does not move those images to another draft. Clearing local drafts also clears the visible composer and cancels pending image reads.
 

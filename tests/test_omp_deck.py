@@ -79,19 +79,24 @@ class SettingsTests(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "project_discovery_depth"):
                         load_settings(config)
 
-    def test_show_history_defaults_false_and_rejects_non_boolean_values(self):
+    def test_boolean_settings_defaults_and_reject_non_boolean_values(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "config.json"
             config.write_text("{}")
             config.chmod(0o600)
-            self.assertFalse(load_settings(config).show_history)
+            settings = load_settings(config)
+            self.assertFalse(settings.show_history)
+            self.assertTrue(settings.save_drafts)
+            config.write_text('{"save_drafts":false}')
+            self.assertFalse(load_settings(config).save_drafts)
 
-            for value in (0, 1, "true", None, []):
-                with self.subTest(value=value):
-                    config.write_text(json.dumps({"show_history": value}))
-                    config.chmod(0o600)
-                    with self.assertRaisesRegex(RuntimeError, "show_history"):
-                        load_settings(config)
+            for name in ("show_history", "save_drafts"):
+                for value in (0, 1, "true", None, []):
+                    with self.subTest(name=name, value=value):
+                        config.write_text(json.dumps({name: value}))
+                        config.chmod(0o600)
+                        with self.assertRaisesRegex(RuntimeError, name):
+                            load_settings(config)
 
     def test_world_writable_configuration_is_rejected_before_values_are_used(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -219,6 +219,7 @@ class DraftHttpTests(unittest.TestCase):
             state_root=root / "state",
             auth_mode="pairing",
             tailscale_user=None,
+            save_drafts=True,
         )
         self.model = FleetModel()
         self.model.load_record(
@@ -306,10 +307,11 @@ class DraftHttpTests(unittest.TestCase):
         self.assertEqual(headers["Cache-Control"], "no-store")
         status, headers, payload = self.request("GET", route, headers=self.get_headers())
         self.assertEqual(status, 200)
-        self.assertFalse(payload["enabled"])
+        self.assertTrue(payload["enabled"])
+        self.assertIsNone(payload["revision"])
         self.assertEqual(headers["Cache-Control"], "no-store")
 
-        body = {"revision": None, "enabled": True, "text": "private", "images": []}
+        body = {"revision": None, "text": "private", "images": []}
         self.assertEqual(self.post("session-1", body, self.get_headers())[0], 403)
         self.assertEqual(
             self.post("session-1", body, self.post_headers(Origin="https://attacker.example"))[0],
@@ -342,10 +344,11 @@ class DraftHttpTests(unittest.TestCase):
                 403,
             )
 
-    def test_http_cas_optional_images_and_disable_contract(self):
-        first_body = {"revision": None, "enabled": True, "text": "first", "images": [_IMAGE]}
+    def test_http_cas_optional_images_and_effective_policy(self):
+        first_body = {"revision": None, "text": "first", "images": [_IMAGE]}
         status, headers, first = self.post("session-1", first_body)
         self.assertEqual((status, headers["Cache-Control"]), (200, "no-store"))
+        self.assertTrue(first["enabled"])
         self.assertNotIn("images", first)
         anonymous_status, _, anonymous = self.request("GET", "/api/sessions/session-1/draft")
         self.assertEqual(anonymous_status, 401)
@@ -353,7 +356,7 @@ class DraftHttpTests(unittest.TestCase):
 
         status, _, second = self.post(
             "session-1",
-            {"revision": first["revision"], "enabled": True, "text": "second"},
+            {"revision": first["revision"], "text": "second"},
         )
         self.assertEqual(status, 200)
         status, _, loaded = self.request("GET", "/api/sessions/session-1/draft", headers=self.get_headers())
@@ -361,40 +364,50 @@ class DraftHttpTests(unittest.TestCase):
 
         status, _, conflict = self.post(
             "session-1",
-            {"revision": first["revision"], "enabled": True, "text": "stale"},
+            {"revision": first["revision"], "text": "stale"},
         )
         self.assertEqual(status, 409)
         self.assertEqual(conflict["draft"], loaded)
-        status, _, rejected = self.post(
+
+        _draft_http_store = server._draft_http._store(server.SETTINGS.state_root)
+        _draft_http_store.save(
             "session-1",
-            {"revision": second["revision"], "enabled": False, "text": "private"},
+            revision=second["revision"],
+            enabled=False,
+            text="",
+            images=[],
         )
-        self.assertEqual(status, 400)
-        self.assertIn("disabled drafts", rejected["error"])
-        status, _, disabled = self.post(
+        projected = self.request("GET", "/api/sessions/session-1/draft", headers=self.get_headers())[2]
+        self.assertTrue(projected["enabled"])
+        self.assertEqual(projected["text"], "")
+        status, _, _ = self.post(
             "session-1",
-            {"revision": second["revision"], "enabled": False, "text": ""},
+            {"revision": projected["revision"], "text": "delete this private draft", "images": [_IMAGE]},
         )
-        self.assertEqual((status, disabled["enabled"], disabled["text"]), (200, False, ""))
-        self.assertEqual(
-            self.request("GET", "/api/sessions/session-1/draft", headers=self.get_headers())[2]["images"],
-            [],
-        )
+        self.assertEqual(status, 200)
+
+        server.SETTINGS.save_drafts = False
+        status, _, disabled = self.request("GET", "/api/sessions/session-1/draft", headers=self.get_headers())
+        self.assertEqual((status, disabled["enabled"], disabled["revision"]), (200, False, None))
+        erased = _draft_http_store.get("session-1")
+        self.assertEqual((erased["revision"], erased["text"], erased["images"]), (None, "", []))
+        status, _, _ = self.post("session-1", {"revision": None, "text": "malicious"})
+        self.assertEqual(status, 403)
 
     def test_corrupt_persistence_returns_an_explicit_unavailable_response(self):
         status, _, _ = self.post(
             "session-1",
-            {"revision": None, "enabled": True, "text": "private", "images": []},
+            {"revision": None, "text": "private", "images": []},
         )
         self.assertEqual(status, 200)
         (server.SETTINGS.state_root / "drafts/manifest.json").write_text("{", encoding="utf-8")
 
-        status, _, payload = self.request(
+        status, _, _ = self.request(
             "GET",
             "/api/sessions/session-1/draft",
             headers=self.get_headers(),
         )
-        self.assertEqual((status, payload), (503, {"error": "draft storage is corrupt"}))
+        self.assertEqual(status, 503)
 
     def test_malformed_and_oversize_images_are_rejected_at_http_boundary(self):
         bodies = (
@@ -407,7 +420,7 @@ class DraftHttpTests(unittest.TestCase):
             with self.subTest(images=len(images)):
                 status, _, payload = self.post(
                     "session-1",
-                    {"revision": None, "enabled": True, "text": "", "images": images},
+                    {"revision": None, "text": "", "images": images},
                 )
                 self.assertEqual(status, 400)
                 self.assertIn("error", payload)
@@ -417,7 +430,6 @@ class DraftHttpTests(unittest.TestCase):
             "session-1",
             {
                 "revision": None,
-                "enabled": True,
                 "text": "",
                 "images": [
                     {

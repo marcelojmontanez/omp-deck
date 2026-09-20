@@ -235,8 +235,8 @@ its own transcripts and blobs. The browser retains rosters, short-lived
 tickets, drafts, attachments, optimistic requests, and rendered state only in
 memory and revokes attachment object URLs when their owner is removed.
 
-Unsent draft persistence is disabled by default for each session. Opting in
-stores its text and selected images under the owning node's private `drafts/`
+Unsent draft persistence is enabled by default. The owning node automatically
+stores text and selected images under its private `drafts/`
 directory, not on the coordinator or in browser storage. All of the owner's
 authenticated devices with access to that session can read and replace the
 same draft; revisions reject stale overwrites. Draft routes retain normal
@@ -245,8 +245,9 @@ The store is bounded to 1,000 records, a 32 MiB manifest, and 128 MiB of image
 payloads per node. Each draft accepts at most 4,000 text characters and four
 images totaling 20 MiB; sending remains subject to the session's advertised
 image limit. Drafts expire seven days after the last save, with expired content
-reclaimed on the next draft access. Disabling saving removes its stored text
-and images. Logout, device revocation, and browser-only clearing do not erase
+reclaimed on the next draft access. Setting `save_drafts` to `false` in the node's
+configuration prevents new saves and removes each stored draft on its next
+authenticated access. Logout, device revocation, and browser-only clearing do not erase
 server drafts. Session removal also removes its draft; a cleanup failure is
 reported rather than silently claiming deletion.
 

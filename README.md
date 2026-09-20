@@ -130,11 +130,11 @@ The conversation toolbar stays compact: provider-qualified model, effective thin
 
 The session light is green for connected managed RPC, amber for connected terminal transports, red for an unavailable ongoing connection, and neutral for history. Its accessible label and **Session details** identify the connection without relying on color. Actual machine, transport, and history failures remain visible. **Deck settings**, available from the dashboard or session menu, holds terminal connection setup, local-draft clearing, logout, and device revocation.
 
-Unsent drafts and selected images stay with their session when you switch conversations. By default they remain memory-only: reloading, logging out, or **Clear browser-only drafts** discards them.
+Unsent drafts and selected images stay with their session when you switch conversations. By default, the owning Deck machine saves them automatically for recovery after a browser reload or Deck restart, shared with your other authenticated devices.
 
-Optionally enable **Save draft on this machine** in a session's composer. Its owning Deck machine then saves the text and selected images for recovery after a browser reload or Deck restart, shared with your other authenticated devices. Nothing is stored in browser storage or sent to OMP automatically. Wait for **Saved** before leaving; **Saving…** and **Unsaved** do not confirm durability. A conflicting device edit preserves your local draft and offers **Restore saved draft** or **Keep local and overwrite**.
+Nothing is stored in browser storage or sent to OMP automatically. Saving is delayed briefly while you edit; leaving before a save finishes can lose the latest changes. Save failures remain visible. A conflicting device edit preserves your local draft and offers **Restore saved draft** or **Keep local and overwrite**.
 
-Saved drafts expire seven days after their last save; expired files are reclaimed on the next draft access. Turning the option off deletes the saved text and images while keeping the current browser draft. Logout and **Clear browser-only drafts** do not delete server copies, which can restore later. Removing a session also removes its saved draft, with cleanup failures reported explicitly.
+Saved drafts expire seven days after their last save; expired files are reclaimed on the next draft access. Set `"save_drafts": false` in the owning node's configuration to keep drafts browser-only. This prevents new saves and deletes each previously saved draft when that session's draft is next accessed. Logout and **Clear browser-only drafts** do not delete server copies, which can restore later. Removing a session also removes its saved draft, with cleanup failures reported explicitly.
 
 An enabled saved draft must be cleared successfully before an explicit Send proceeds. Storage errors or conflicts block sending without discarding the local draft. Submitted messages are separate: once the owning node saves the request, its private recovery receipt can survive a browser reload or Deck restart.
 
@@ -307,6 +307,7 @@ Optional configuration lives at `~/.config/omp-deck/config.json` on Linux/macOS 
   "project_root": "~/dev",
   "project_discovery_depth": 2,
   "show_history": false,
+  "save_drafts": true,
   "session_root": "~/.omp/agent/sessions",
   "socket_root": "~/.local/state/omp-deck/sockets",
   "state_root": "~/.local/state/omp-deck",
@@ -316,6 +317,8 @@ Optional configuration lives at `~/.config/omp-deck/config.json` on Linux/macOS 
 ```
 
 `show_history` accepts only JSON `true` or `false`; omitting it means `false`. For the shared dashboard, set it in the coordinator's configuration, not the individual machines' files. Restart the service whose configuration changed, then refresh its dashboard. Save unsent drafts before refreshing. No OMP restart is needed for this presentation setting.
+
+`save_drafts` accepts only JSON `true` or `false`; omitting it means `true`. Configure it on each node, not the coordinator. Restart the node's Deck service and refresh the dashboard after changing it; terminal-owned OMP sessions do not need restarting. With saving disabled, reload, logout, or **Clear browser-only drafts** discards the browser's unsent text and images.
 
 Project names are resolved beneath `project_root`; traversal, symlink escapes, broken links, and non-directories are rejected. `project_discovery_depth` limits filesystem traversal to 1–8 directory levels and defaults to `2`: direct children and grandchildren are listed, while configured depths beyond two discover only directories containing `.git`, `AGENTS.md`, `Cargo.toml`, `go.mod`, `package.json`, or `pyproject.toml`. Keep `project_root` near the common parent of your projects and increase the depth only when nested repositories must appear.
 Use real directories for the project root and its user-controlled ancestors, not symlink aliases. Empty XDG directory variables use the normal home-directory defaults rather than the current working directory.

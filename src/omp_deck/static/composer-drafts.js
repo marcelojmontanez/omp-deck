@@ -7,7 +7,6 @@ function createComposerDrafts({
   replaceSnapshot,
   snapshotChanged,
   renderAttachments,
-  showToast,
 }) {
   const SAVE_DELAY_MS = 700;
   const records = new Map();
@@ -31,15 +30,15 @@ function createComposerDrafts({
 
   function recordFor(id) {
     if (!records.has(id)) {
+      const current = snapshot(id);
       records.set(id, {
         id,
         loaded: false,
         loadPromise: null,
-        desiredEnabled: false,
-        confirmedEnabled: false,
+        enabled: false,
         revision: null,
         mutation: 0,
-        savedMutation: 0, // null keeps retained browser-only content fenced from remote replacement.
+        savedMutation: current.text || current.attachments.length ? null : 0,
         imageMutation: 0,
         savedImageMutation: 0,
         dirty: false,
@@ -75,8 +74,7 @@ function createComposerDrafts({
   function acceptRemote(record, remote, capturedMutation = record.mutation) {
     record.loaded = true;
     record.revision = remote.revision;
-    record.confirmedEnabled = remote.enabled;
-    record.desiredEnabled = remote.enabled;
+    record.enabled = remote.enabled;
     record.savedMutation = localMatches(record.id, remote) ? capturedMutation : null;
     record.savedImageMutation = record.imageMutation;
     record.dirty = false;
@@ -112,20 +110,24 @@ function createComposerDrafts({
         if (controller.signal.aborted || requestGeneration !== generation || records.get(id) !== record) return record;
         record.loaded = true;
         record.revision = remote.revision;
-        record.confirmedEnabled = remote.enabled;
+        record.enabled = remote.enabled;
         const localChanged = record.mutation !== capturedMutation || record.mutation !== record.savedMutation;
+        const remoteEmpty = !remote.text && remote.images.length === 0;
         if (localChanged) {
           if (localMatches(id, remote)) {
             acceptRemote(record, remote, record.mutation);
-          } else if (remote.enabled) {
-            record.desiredEnabled = true;
+          } else if (!remote.enabled) {
+            record.dirty = false;
+            record.phase = 'disabled';
+          } else if (remoteEmpty) {
+            record.savedImageMutation = null;
+            record.dirty = true;
+            record.phase = 'dirty';
+            schedule(record, 0);
+          } else {
             record.dirty = true;
             record.conflictDraft = remote;
             record.phase = 'conflict';
-          } else {
-            record.desiredEnabled = false;
-            record.dirty = false;
-            record.phase = 'disabled';
           }
         } else if (remote.enabled) {
           restoreRemote(record, remote);
@@ -150,7 +152,7 @@ function createComposerDrafts({
   function schedule(record, delay = SAVE_DELAY_MS) {
     clearTimeout(record.timer);
     record.timer = null;
-    if (!record.desiredEnabled || record.conflictDraft) {
+    if (!record.enabled || record.conflictDraft) {
       present(record);
       return;
     }
@@ -165,13 +167,13 @@ function createComposerDrafts({
 
   function acceptWrite(record, remote, attempted, capturedMutation, capturedImageMutation) {
     record.revision = remote.revision;
-    record.confirmedEnabled = remote.enabled;
-    record.savedMutation = attempted.enabled || localMatches(record.id, attempted) ? capturedMutation : null;
+    record.enabled = remote.enabled;
+    record.savedMutation = capturedMutation;
     if (Object.hasOwn(attempted, 'images')) record.savedImageMutation = capturedImageMutation;
     record.error = '';
-    if (record.mutation === capturedMutation && record.desiredEnabled === attempted.enabled) {
+    if (record.mutation === capturedMutation) {
       record.dirty = false;
-      record.phase = attempted.enabled ? 'saved' : 'disabled';
+      record.phase = remote.enabled ? 'saved' : 'disabled';
     } else {
       schedule(record, 0);
     }
@@ -179,13 +181,17 @@ function createComposerDrafts({
 
   async function reconcileUncertain(record, attempted, capturedMutation, capturedImageMutation, signal) {
     const remote = await requestDraft(record.id, {signal});
+    if (!remote.enabled) {
+      acceptRemote(record, remote, record.mutation);
+      return true;
+    }
     if (attemptedMatches(record.id, attempted, remote)) {
       acceptWrite(record, remote, attempted, capturedMutation, capturedImageMutation);
       return true;
     }
     if (remote.revision === attempted.revision) return false;
     record.revision = remote.revision;
-    record.confirmedEnabled = remote.enabled;
+    record.enabled = remote.enabled;
     record.conflictDraft = remote;
     record.dirty = true;
     record.phase = 'conflict';
@@ -218,12 +224,16 @@ function createComposerDrafts({
       ) throw error;
       if (error.response?.status === 409 && error.payload?.draft) {
         const remote = validateDraft(error.payload.draft);
+        if (!remote.enabled) {
+          acceptRemote(record, remote, record.mutation);
+          return remote;
+        }
         if (attemptedMatches(record.id, attempted, remote)) {
           acceptWrite(record, remote, attempted, capturedMutation, capturedImageMutation);
           return remote;
         }
         record.revision = remote.revision;
-        record.confirmedEnabled = remote.enabled;
+        record.enabled = remote.enabled;
         record.conflictDraft = remote;
         record.dirty = true;
         record.phase = 'conflict';
@@ -262,15 +272,14 @@ function createComposerDrafts({
 
   function queueSave(record) {
     return queueOperation(record, async () => {
-      if (!record.desiredEnabled || record.conflictDraft || !record.dirty) return true;
+      if (!record.enabled || record.conflictDraft || !record.dirty) return true;
       const capturedMutation = record.mutation;
       const capturedImageMutation = record.imageMutation;
       let attempted;
       try {
         attempted = wireSnapshot(
           record.id,
-          true,
-          !record.confirmedEnabled || record.imageMutation !== record.savedImageMutation,
+          record.imageMutation !== record.savedImageMutation,
         );
       } catch (error) {
         record.phase = 'error';
@@ -294,44 +303,9 @@ function createComposerDrafts({
     const record = recordFor(id);
     record.mutation += 1;
     if (images) record.imageMutation += 1;
-    if (record.desiredEnabled) schedule(record);
-  }
-
-  async function setEnabled(record, enabled) {
-    clearTimeout(record.timer);
-    record.timer = null;
-    record.desiredEnabled = enabled;
-    record.conflictDraft = null;
-    record.mutation += 1;
     record.dirty = true;
-    record.phase = 'saving';
-    record.error = '';
-    present(record);
-    const capturedMutation = record.mutation;
-    const capturedImageMutation = record.imageMutation;
-    let attempted;
-    try {
-      attempted = wireSnapshot(record.id, enabled);
-    } catch (error) {
-      record.phase = 'error';
-      record.error = error.message;
-      present(record);
-      return false;
-    }
-    const saved = await queueOperation(record, async () => {
-      try {
-        await postSnapshot(record, attempted, capturedMutation, capturedImageMutation);
-        return true;
-      } catch {
-        return false;
-      }
-    });
-    if (records.get(record.id) !== record) return null;
-    if (!saved && !enabled && !record.conflictDraft) {
-      record.desiredEnabled = record.confirmedEnabled;
-      present(record);
-    }
-    return saved;
+    if (record.loaded && record.enabled) schedule(record);
+    else present(record);
   }
 
   async function ensureLoadedForSend(record) {
@@ -361,13 +335,7 @@ function createComposerDrafts({
         present(record);
         return false;
       }
-      if (!record.confirmedEnabled && !record.desiredEnabled) return true;
-      if (!record.desiredEnabled) {
-        record.error = 'saved draft deletion is not confirmed; message was not sent';
-        record.phase = 'error';
-        present(record);
-        return false;
-      }
+      if (!record.enabled) return true;
       const capturedMutation = record.mutation;
       const capturedImageMutation = record.imageMutation;
       record.phase = 'saving';
@@ -376,7 +344,7 @@ function createComposerDrafts({
         try {
           await postSnapshot(
             record,
-            {enabled: true, text: '', images: []},
+            {text: '', images: []},
             capturedMutation,
             capturedImageMutation,
           );
@@ -400,8 +368,21 @@ function createComposerDrafts({
   async function prepareRemove(id) {
     const record = recordFor(id);
     if (!(await ensureLoadedForSend(record))) return false;
-    if (!record.confirmedEnabled && !record.desiredEnabled) return true;
-    return await setEnabled(record, false);
+    if (!record.enabled) return true;
+    clearTimeout(record.timer);
+    record.timer = null;
+    await record.tail.catch(() => {});
+    if (record.conflictDraft) return false;
+    const capturedMutation = record.mutation;
+    const capturedImageMutation = record.imageMutation;
+    return queueOperation(record, async () => {
+      try {
+        await postSnapshot(record, {text: '', images: []}, capturedMutation, capturedImageMutation);
+        return true;
+      } catch {
+        return false;
+      }
+    });
   }
 
   function select(id) {
@@ -417,8 +398,10 @@ function createComposerDrafts({
 
   function sync(agent = selectedAgent()) {
     const active = Boolean(agent?.id && agent.id === selectedId && agent.lifecycle === 'ongoing');
-    elements['draft-save-control'].hidden = !active;
-    if (!active) return;
+    if (!active) {
+      clearSelection();
+      return;
+    }
     present(recordFor(agent.id));
   }
 
@@ -441,9 +424,8 @@ function createComposerDrafts({
     const record = currentRecord();
     if (!record?.conflictDraft) return;
     record.revision = record.conflictDraft.revision;
-    record.confirmedEnabled = record.conflictDraft.enabled;
+    record.enabled = record.conflictDraft.enabled;
     record.conflictDraft = null;
-    record.desiredEnabled = true;
     record.imageMutation += 1;
     record.dirty = true;
     schedule(record, 0);
@@ -451,12 +433,9 @@ function createComposerDrafts({
 
   bindView({
     records,
-    currentRecord,
     overwriteConflict,
     restoreConflict,
     schedule,
-    setEnabled,
-    showToast,
   });
 
   function remove(id) {

@@ -16,7 +16,7 @@
 - Add explicit per-session Steer and Queue choices on capable working sessions, preserving the selected intent through delivery races and uncertain retries.
 - Show installed Deck build identities for the dashboard and enrolled machines in Deck settings, with an on-demand refresh.
 - Add one-command guarded fleet releases for existing macOS/Linux nodes and a Linux coordinator, with resumable progress, automatic verification and credential cleanup, and independent rollback protection. Terminal-owned OMP sessions are never automatically restarted.
-- Add opt-in per-session saved drafts with selected images on the owning machine, reload and restart recovery, explicit cross-device conflict resolution, and no automatic sending. Saved content expires after seven days; browser-only clearing and logout do not delete server copies.
+- Save session drafts and selected images automatically on the owning machine, with reload and restart recovery, explicit cross-device conflict resolution, and no automatic sending. Disable saving with the node's `save_drafts` configuration instead of a composer control. Saved content expires after seven days; browser-only clearing and logout do not delete server copies.
 
 ### Changed
 

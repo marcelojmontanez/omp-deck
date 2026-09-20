@@ -4,8 +4,8 @@ const IDS = Object.freeze({
   reload: 'composer-draft-reload',
   failedClear: 'composer-draft-failed-clear',
   delayedClear: 'composer-draft-delayed-clear',
-  localOptOut: 'composer-draft-local-opt-out',
-  remoteOptOut: 'composer-draft-remote-opt-out',
+  earlyEdit: 'composer-draft-early-edit',
+  configDisabled: 'composer-draft-config-disabled',
   doubleSend: 'composer-draft-double-send',
 });
 
@@ -75,7 +75,6 @@ export async function verifyComposerDrafts(page) {
       const reload = {
         text: el.message.value,
         images: el.attachments.querySelectorAll('img').length,
-        enabled: el['save-draft'].checked,
         deliveries: reloadCalls.filter(call => call.path.endsWith('/messages')).length,
       };
 
@@ -146,7 +145,6 @@ export async function verifyComposerDrafts(page) {
       releaseClear();
       await waitFor(() => delayedRequests.some(call => call.path.endsWith('/draft')
         && call.method === 'POST' && call.body.text === 'Newer text while clearing'), 'newer draft resave');
-      await waitFor(() => el['draft-save-status'].textContent === 'Saved', 'newer draft saved');
       await tick();
       const delayedClear = {
         text: el.message.value,
@@ -184,50 +182,45 @@ export async function verifyComposerDrafts(page) {
       await tick();
       const doubleSend = {clearCount, deliveryCount};
 
-      const optOutCases = [];
-      for (const locallyDisabled of [true, false]) {
-        const fixture = agent(locallyDisabled ? ids.localOptOut : ids.remoteOptOut);
-        let stored = remote('opt-r1', 'Retain this browser-only draft');
-        let reads = 0;
-        let writes = 0;
-        ompDeckApi.request = async (path, options = {}) => {
-          if (path.endsWith('/deliveries')) return response({version: 1, deliveries: []});
-          if (!path.endsWith('/draft')) throw new Error(`Unexpected opt-out request: ${path}`);
-          if ((options.method || 'GET') === 'GET') {
-            reads += 1;
-            return response(stored);
-          }
-          const body = JSON.parse(options.body);
-          if (body.revision !== stored.revision) return response({error: 'Changed', draft: stored}, 409);
-          writes += 1;
-          stored = {...stored, ...body, revision: `opt-write-${writes}`};
-          const {images, ...acknowledgement} = stored;
-          return response(acknowledgement);
-        };
-        select(fixture);
-        await waitFor(() => el.message.value === 'Retain this browser-only draft', 'opt-out initial load');
-        if (locallyDisabled) {
-          el['save-draft'].click();
-          await waitFor(() => !stored.enabled && el['draft-save-status'].textContent === 'Not saved on this machine',
-            'opt-out acknowledged');
-        } else stored = {...stored, enabled: false, revision: 'opt-remote-disabled', text: '', images: []};
-        composer.select(null);
-        composer.select(fixture.id);
-        await waitFor(() => reads === 2 && el['draft-save-status'].textContent === 'Not saved on this machine',
-          'disabled state refreshed');
-        stored = remote('opt-new-device', 'Different content saved on another device');
-        composer.select(null);
-        composer.select(fixture.id);
-        await waitFor(() => reads === 3 && !el['draft-conflict'].hidden, 'browser-only ownership conflict');
-        optOutCases.push({
-          locallyDisabled,
-          text: el.message.value,
-          images: el.attachments.querySelectorAll('img').length,
-          remoteText: stored.text,
-          writes,
-        });
-      }
-      return {reload, failedClear, delayedClear, doubleSend, optOutCases};
+      const earlyAgent = agent(ids.earlyEdit);
+      let releaseEarly;
+      let earlyStored = remote(null, '', []);
+      const earlyWrites = [];
+      ompDeckApi.request = async (path, options = {}) => {
+        if (path.endsWith('/deliveries')) return response({version: 1, deliveries: []});
+        if (!path.endsWith('/draft')) throw new Error(`Unexpected early-edit request: ${path}`);
+        if ((options.method || 'GET') === 'GET') {
+          await new Promise(resolve => { releaseEarly = resolve; });
+          return response(earlyStored);
+        }
+        const body = JSON.parse(options.body);
+        earlyWrites.push(body);
+        earlyStored = {...earlyStored, ...body, enabled: true, revision: 'early-r1'};
+        return response(earlyStored);
+      };
+      select(earlyAgent);
+      type('Typed before load');
+      await waitFor(() => releaseEarly, 'early draft load pending');
+      releaseEarly();
+      await waitFor(() => earlyWrites.length === 1, 'early draft saved');
+
+      const disabledAgent = agent(ids.configDisabled);
+      let disabledReads = 0;
+      let disabledWrites = 0;
+      ompDeckApi.request = async (path, options = {}) => {
+        if (path.endsWith('/deliveries')) return response({version: 1, deliveries: []});
+        if (!path.endsWith('/draft')) throw new Error(`Unexpected disabled request: ${path}`);
+        if ((options.method || 'GET') === 'POST') disabledWrites += 1;
+        else disabledReads += 1;
+        return response({enabled: false, revision: null, text: '', images: [], updatedAt: null, expiresAt: null});
+      };
+      select(disabledAgent);
+      await waitFor(() => disabledReads === 1 && el['draft-save-feedback'].hidden, 'disabled policy loaded');
+      type('Browser-only while disabled');
+      await new Promise(resolve => setTimeout(resolve, 800));
+      const configDisabled = {text: el.message.value, writes: disabledWrites};
+
+      return {reload, failedClear, delayedClear, doubleSend, earlyWrites, configDisabled};
     } finally {
       if (originalFiles) Object.defineProperty(el.attach, 'files', originalFiles);
       else delete el.attach.files;
@@ -239,8 +232,8 @@ export async function verifyComposerDrafts(page) {
     }
   }, IDS);
 
-  assert.deepEqual(result.reload, {text: 'Restored text', images: 1, enabled: true, deliveries: 0},
-    'an opted-in text and image draft reloads without delivering a message');
+  assert.deepEqual(result.reload, {text: 'Restored text', images: 1, deliveries: 0},
+    'a default-enabled text and image draft reloads without delivering a message');
   assert.equal(result.failedClear.text, 'Keep after failed clear');
   assert.equal(result.failedClear.images, 1);
   assert.equal(result.failedClear.deliveries, 0, 'a failed saved-draft clear must block delivery');
@@ -249,16 +242,16 @@ export async function verifyComposerDrafts(page) {
     'an unchanged revision after an uncertain clear must not claim another-device conflict');
   assert.equal(result.failedClear.conflictVisible, false);
   assert.deepEqual(result.failedClear.clear, {
-    revision: 'failed-r1', enabled: true, text: '', images: [],
+    revision: 'failed-r1', text: '', images: [],
   }, 'Send clears the exact saved revision before attempting delivery');
 
   assert.equal(result.delayedClear.text, 'Newer text while clearing');
   assert.equal(result.delayedClear.images, 2);
   assert.equal(result.delayedClear.deliveries, 0,
     'editing while the saved draft is clearing must cancel the captured send');
-  assert.equal(result.delayedClear.status, 'Saved');
+  assert.equal(result.delayedClear.status, '');
   assert.deepEqual(result.delayedClear.saves[0], {
-    revision: 'delayed-r1', enabled: true, text: '', images: [],
+    revision: 'delayed-r1', text: '', images: [],
   });
   assert.equal(result.delayedClear.saves[1].revision, 'delayed-r2');
   assert.equal(result.delayedClear.saves[1].text, 'Newer text while clearing');
@@ -266,12 +259,11 @@ export async function verifyComposerDrafts(page) {
     'the replacement save preserves both the restored and newly selected image');
   assert.deepEqual(result.doubleSend, {clearCount: 1, deliveryCount: 1},
     'a repeated click while the saved draft is clearing must not submit duplicate messages');
-  for (const fixture of result.optOutCases) {
-    assert.equal(fixture.text, 'Retain this browser-only draft',
-      'disabling saving must not surrender ownership of retained browser text');
-    assert.equal(fixture.images, 1);
-    assert.equal(fixture.remoteText, 'Different content saved on another device');
-    assert.equal(fixture.writes, fixture.locallyDisabled ? 1 : 0,
-      'refresh must neither overwrite local content nor re-enable saving automatically');
-  }
+  assert.deepEqual(result.earlyWrites, [{
+    revision: null, text: 'Typed before load', images: [],
+  }], 'editing before an empty enabled GET resolves saves locally typed content without conflict');
+  assert.deepEqual(result.configDisabled, {
+    text: 'Browser-only while disabled',
+    writes: 0,
+  }, 'disabled server configuration keeps browser editing functional without saving');
 }

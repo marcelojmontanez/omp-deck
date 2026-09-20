@@ -102,7 +102,6 @@ function createComposer({
     replaceSnapshot: replaceDraftSnapshot,
     snapshotChanged: id => commands.draftChanged(id),
     renderAttachments,
-    showToast,
   });
   function noteDraftChanged(id) {
     commands.draftChanged(id);

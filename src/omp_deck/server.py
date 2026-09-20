@@ -354,7 +354,7 @@ class Handler(DeckHttpHandler):
             except Exception:
                 self.reply(503, {"error": "session state unavailable"})
             return
-        if _draft_http.handle_draft_get(self, request_path, _fleet_model, SETTINGS.state_root):
+        if _draft_http.handle_draft_get(self, request_path, _fleet_model, SETTINGS):
             return
         if request_path.startswith("/api/sessions/") and request_path.endswith("/deliveries"):
             try:
@@ -408,7 +408,7 @@ class Handler(DeckHttpHandler):
         # Revalidate at the action boundary rather than dispatching stale authority.
         if not self._authorize_mutation():
             return
-        if _draft_http.handle_draft_post(self, request_path, data, _fleet_model, SETTINGS.state_root):
+        if _draft_http.handle_draft_post(self, request_path, data, _fleet_model, SETTINGS):
             return
         self._normalized_action(request_path, data)
 

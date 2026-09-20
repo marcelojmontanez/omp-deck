@@ -30,6 +30,7 @@ class Settings:
     auth_mode: str = "pairing"
     tailscale_user: str | None = None
     show_history: bool = False
+    save_drafts: bool = True
 
     @property
     def cursor_path(self):
@@ -123,6 +124,9 @@ def load_settings(path=None):
     show_history = values.get("show_history", False)
     if type(show_history) is not bool:
         raise RuntimeError("show_history must be a boolean")
+    save_drafts = values.get("save_drafts", True)
+    if type(save_drafts) is not bool:
+        raise RuntimeError("save_drafts must be a boolean")
     configured_omp = values.get("omp_bin", shutil.which("omp") or default_omp_path())
     if sys.platform == "linux":
         configured_omp = os.environ.get("OMP_DECK_OMP_BIN", configured_omp)
@@ -139,4 +143,5 @@ def load_settings(path=None):
         auth_mode=auth_mode,
         tailscale_user=tailscale_user,
         show_history=show_history,
+        save_drafts=save_drafts,
     )

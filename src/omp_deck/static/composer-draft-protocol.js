@@ -45,10 +45,10 @@ function createComposerDraftProtocol(snapshot) {
     };
   }
 
-  function wireSnapshot(id, enabled = true, includeImages = true) {
+  function wireSnapshot(id, includeImages = true) {
     const current = snapshot(id);
-    const result = {enabled, text: enabled ? current.text : ''};
-    if (includeImages) result.images = enabled ? current.attachments.map(wireImage) : [];
+    const result = {text: current.text};
+    if (includeImages) result.images = current.attachments.map(wireImage);
     return result;
   }
 
@@ -62,16 +62,14 @@ function createComposerDraftProtocol(snapshot) {
   }
 
   function sameWire(left, right) {
-    if (!left || !right || left.enabled !== right.enabled || left.text !== right.text) return false;
+    if (!left || !right || left.text !== right.text) return false;
     if (!Object.hasOwn(left, 'images')) return true;
     return sameImages(left.images, right.images);
   }
 
   function localMatches(id, remote) {
     try {
-      const current = wireSnapshot(id);
-      current.enabled = remote.enabled;
-      return sameWire(current, remote);
+      return sameWire(wireSnapshot(id), remote);
     } catch {
       return false;
     }

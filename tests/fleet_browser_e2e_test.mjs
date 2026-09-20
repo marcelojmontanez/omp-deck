@@ -43,6 +43,8 @@ async function configure(root, name, coordinator = false) {
     session_root: path.join(base, 'sessions'),
     socket_root: path.join(base, 'state', 'sockets'),
     omp_bin: process.execPath,
+    // These viewers exercise independent transport state, not shared-draft conflicts.
+    save_drafts: false,
   });
   await writeFile(config, JSON.stringify(values), {mode: 0o600});
   const env = {

@@ -29,18 +29,33 @@ def _store(state_root):
     return _store_instance
 
 
-def handle_draft_get(handler, request_path: str, fleet_model, state_root) -> bool:
+def _project_policy(draft, enabled):
+    projected = dict(draft)
+    projected["enabled"] = enabled
+    return projected
+
+
+def handle_draft_get(handler, request_path: str, fleet_model, settings) -> bool:
     match = _DRAFT_ROUTE.fullmatch(request_path)
     if match is None:
         return False
     try:
         session_id = decoded_segment(match.group(1), "session")
         fleet_model.get(session_id)
-        handler.reply(
-            200,
-            _store(state_root).get(session_id),
-            write_timeout=_IMAGE_RESPONSE_TIMEOUT,
-        )
+        store = _store(settings.state_root)
+        if not settings.save_drafts:
+            store.remove(session_id)
+            draft = {
+                "enabled": False,
+                "revision": None,
+                "text": "",
+                "images": [],
+                "updatedAt": None,
+                "expiresAt": None,
+            }
+        else:
+            draft = _project_policy(store.get(session_id), True)
+        handler.reply(200, draft, write_timeout=_IMAGE_RESPONSE_TIMEOUT)
     except KeyError:
         handler.reply(404, {"error": "session not found"})
     except ValueError as error:
@@ -52,30 +67,33 @@ def handle_draft_get(handler, request_path: str, fleet_model, state_root) -> boo
     return True
 
 
-def handle_draft_post(handler, request_path: str, data, fleet_model, state_root) -> bool:
+def handle_draft_post(handler, request_path: str, data, fleet_model, settings) -> bool:
     match = _DRAFT_ROUTE.fullmatch(request_path)
     if match is None:
         return False
     try:
-        if not isinstance(data, dict):
-            raise ValueError("request body must be an object")
-        required = {"revision", "enabled", "text"}
-        if not required.issubset(data) or not set(data).issubset(required | {"images"}):
-            raise ValueError("draft body must contain revision, enabled, text, and optional images")
         session_id = decoded_segment(match.group(1), "session")
         fleet_model.get(session_id)
+        if not settings.save_drafts:
+            handler.reply(403, {"error": "draft saving is disabled"})
+            return True
+        if not isinstance(data, dict):
+            raise ValueError("request body must be an object")
+        required = {"revision", "text"}
+        if not required.issubset(data) or not set(data).issubset(required | {"images"}):
+            raise ValueError("draft body must contain revision, text, and optional images")
         arguments = {
             "revision": data["revision"],
-            "enabled": data["enabled"],
+            "enabled": True,
             "text": data["text"],
         }
         if "images" in data:
             arguments["images"] = data["images"]
-        handler.reply(200, _store(state_root).save(session_id, **arguments))
+        handler.reply(200, _store(settings.state_root).save(session_id, **arguments))
     except DraftConflictError as error:
         handler.reply(
             409,
-            {"error": str(error), "draft": error.draft},
+            {"error": str(error), "draft": _project_policy(error.draft, True)},
             write_timeout=_IMAGE_RESPONSE_TIMEOUT,
         )
     except KeyError:

@@ -312,9 +312,11 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
       : [];
     const events = [...currentEvents].reverse();
     const pending = isLiveSession && agent
-      ? [...getComposer().pendingFor(agent.id)].reverse().map(deliveryEvent).filter(Boolean)
+      ? [...getComposer().pendingFor(agent.id)].reverse()
+        .sort((left, right) => right.createdAt - left.createdAt)
+        .map(deliveryEvent)
+        .filter(Boolean)
       : [];
-    events.unshift(...pending);
     if (isLiveSession && executionState === 'working') {
       const workingOn = agent?.activitySummary || session.workingOn || 'Preparing a response';
       events.unshift({kind: 'thinking', title: `OMP · ${workingOn}`, time: null});
@@ -323,6 +325,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     } else if (isLiveSession && executionState === 'failed') {
       events.unshift({kind: 'error', title: 'OMP failed', detail: agent.activitySummary || 'The last operation failed.', time: null});
     }
+    events.unshift(...pending);
 
     const scope = agent?.id || 'no-session';
     const activity = [];

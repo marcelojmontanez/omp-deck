@@ -156,9 +156,25 @@
 .attach:has(input:disabled) { background: transparent; color: var(--muted); }
 .attach input:disabled { cursor: not-allowed; }
 .attachment-status { margin: 6px 7px 0; color: var(--muted); font-size: 11px; }
-.delivery-controls { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.delivery-controls span { flex-basis: 100%; color: var(--muted); font-size: 11px; }
+.delivery-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  max-width: 100%;
+  margin-top: 8px;
+}
+.delivery-controls > * { min-width: 0; }
+.delivery-controls span {
+  flex: 1 1 100%;
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.event.queued .delivery-controls span { color: #d9c79f; }
 .delivery-controls button {
+  max-width: 100%;
   min-height: 44px;
   padding: 7px 10px;
   border: 1px solid var(--line-bright);
@@ -166,6 +182,7 @@
   background: transparent;
   color: inherit;
   font: inherit;
+  overflow-wrap: anywhere;
   cursor: pointer;
 }
 .attach svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.6; vertical-align: middle; }

@@ -14,6 +14,7 @@
 - Enable capability-advertised terminal image uploads, including image-only messages, through the documented OMP extension API. Extension 1.3.3 requires an idle restart and resume of already-running terminal sessions.
 - Retain private, bounded message recovery content on the owning node for up to seven days, with restore and dismissal for unresolved delivery after a browser reload or lost response. Older fingerprint-only records cannot recover message content.
 - Add explicit per-session Steer and Queue choices on capable working sessions, preserving the selected intent through delivery races and uncertain retries.
+- Show queued follow-ups as distinct, newest-first chat cards above Working. Retain queue-acceptance confirmations across session switches and reload, with dismissal that does not cancel or resend native work.
 - Show installed Deck build identities for the dashboard and enrolled machines in Deck settings, with an on-demand refresh.
 - Add one-command guarded fleet releases for existing macOS/Linux nodes and a Linux coordinator, with resumable progress, automatic verification and credential cleanup, and independent rollback protection. Terminal-owned OMP sessions are never automatically restarted.
 - Save session drafts and selected images automatically on the owning machine, with reload and restart recovery, explicit cross-device conflict resolution, and no automatic sending. Disable saving with the node's `save_drafts` configuration instead of a composer control. Saved content expires after seven days; browser-only clearing and logout do not delete server copies.
@@ -31,7 +32,7 @@
 - Derive each Deck package version automatically from its committed source revision. Reject dirty or ambiguous builds, and preserve verified source identity through source-distribution rebuilds.
 - Raise image attachments to four images totaling 20 MiB for managed RPC and extension 1.3.4, or 10 MiB for writable Collab. Already-running older extensions retain 700 KiB until an idle restart and resume. Allow more time for large image transfers and make full recovery-storage errors actionable.
 - When History is enabled, distinguish live sessions from saved conversations with matching names; number only duplicates of the same kind. Hide these labels when History is disabled.
-- Keep successful sends to a compact Accepted status without duplicate receipt cards or manual cleanup. Automatically reclaim accepted recovery storage as needed while retaining explicit recovery for unresolved sends.
+- Keep ordinary successful sends to a compact Accepted status without duplicate receipt cards or manual cleanup. Automatically reclaim accepted recovery storage as needed while retaining explicit recovery for unresolved sends.
 - Store request recovery content separately from compact deduplication metadata, with explicit capacity reservation, bounded dismissed-request history, and crash-safe submission ownership. The ledger now uses schema 3; older rollback packages must be replaced with schema-compatible artifacts before a guarded rollout.
 - Keep installed and retained extension sources outside mutable Python environments. Linux services retain the resolved OMP executable path; rerun setup if that path changes.
 

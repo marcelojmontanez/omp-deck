@@ -87,21 +87,36 @@ function eventAttachments(event) {
 }
 
 function deliveryEvent(item) {
-  if (item.state === 'accepted') return null;
+  const queued = item.action === 'followUp';
+  if (item.state === 'accepted' && !queued) return null;
   const labels = {
-    preparing: 'Preparing', submitting: 'Submitting', uncertain: 'Delivery uncertain',
-    failed: 'Not sent', cancelled: 'Cancelled', stale: 'Stale',
+    preparing: 'Preparing',
+    submitting: queued ? 'Queueing' : 'Submitting',
+    uncertain: queued ? 'Queue uncertain' : 'Delivery uncertain',
+    accepted: 'Queue accepted',
+    failed: queued ? 'Not queued' : 'Not sent',
+    cancelled: queued ? 'Queue cancelled' : 'Cancelled',
+    stale: queued ? 'Queue stale' : 'Stale',
   };
+  const pendingClass = item.state === 'accepted' ? '' : ' pending';
   return {
-    kind: 'user pending', title: `You · ${labels[item.state] || 'Delivery uncertain'}`,
-    detail: item.text, time: new Date(item.createdAt).toISOString(),
-    attachments: item.attachments, deliveryId: item.id, deliveryState: item.state,
+    kind: `user${queued ? ' queued' : ''}${pendingClass}`,
+    title: `You · ${labels[item.state] || (queued ? 'Queue uncertain' : 'Delivery uncertain')}`,
+    detail: item.text,
+    time: new Date(item.createdAt).toISOString(),
+    attachments: item.attachments,
+    deliveryId: item.id,
+    deliveryState: item.state,
   };
 }
 
 function deliveryControls(event) {
-  if (!event.deliveryId || ['preparing', 'submitting', 'accepted'].includes(event.deliveryState)) return '';
+  if (!event.deliveryId) return '';
   const id = escapeHtml(event.deliveryId);
+  if (event.deliveryState === 'accepted') {
+    return `<div class="delivery-controls accepted"><span>Accepted by OMP. This confirms delivery, not completion.</span><button type="button" data-delivery-action="dismiss" data-delivery-id="${id}">Dismiss receipt</button></div>`;
+  }
+  if (['preparing', 'submitting'].includes(event.deliveryState)) return '';
   return `<div class="delivery-controls"><span>Receipt only; check the conversation before sending again.</span><button type="button" data-delivery-action="restore" data-delivery-id="${id}">Restore draft</button><button type="button" data-delivery-action="dismiss" data-delivery-id="${id}">Dismiss receipt</button></div>`;
 }
 

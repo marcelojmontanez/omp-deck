@@ -152,11 +152,11 @@ function createComposerRecovery({
   }
 
   function accept(id, item) {
-    // An older recovery read cannot resurrect a locally acknowledged request.
+    // An older recovery read cannot resurrect or remove a locally acknowledged request.
     inFlight.get(id)?.accepted.add(item.id);
     records.delete(`${id}\0${item.id}`);
     deliveryState(item, 'accepted');
-    releasePending(id, item);
+    if (item.action !== 'followUp') releasePending(id, item);
     showState(id, 'accepted', item.id);
   }
 
@@ -210,14 +210,18 @@ function createComposerRecovery({
   }
 
 
-  function apply(agent, incoming, updateStatus) {
+  function apply(agent, incoming, updateStatus, protectedIds) {
     const pending = pendingFor(agent.id);
     const byId = new Map(pending.map(item => [item.id, item]));
-    const retainedIds = new Set(incoming.map(record => record.requestId));
+    const retainedIds = new Set(protectedIds);
+    for (const record of incoming) retainedIds.add(record.requestId);
     for (let index = pending.length - 1; index >= 0; index -= 1) {
       const item = pending[index];
       const key = `${agent.id}\0${item.id}`;
-      if (!records.has(key) || retainedIds.has(item.id)) continue;
+      if (
+        (!records.has(key) && !(item.action === 'followUp' && item.state === 'accepted'))
+        || retainedIds.has(item.id)
+      ) continue;
       records.delete(key);
       byId.delete(item.id);
       releasePending(agent.id, item);
@@ -225,13 +229,17 @@ function createComposerRecovery({
     for (const record of incoming) {
       const key = `${agent.id}\0${record.requestId}`;
       let item = byId.get(record.requestId);
-      if (record.state === 'accepted') {
+      if (record.state === 'accepted' && record.action !== 'followUp') {
         records.delete(key);
         if (item) {
           byId.delete(record.requestId);
           deliveryState(item, 'accepted');
           releasePending(agent.id, item);
         }
+        continue;
+      }
+      // A server snapshot started before the acknowledgement cannot regress a retained queue receipt.
+      if (item?.action === 'followUp' && item.state === 'accepted' && record.state !== 'accepted') {
         continue;
       }
       records.set(key, record);
@@ -281,7 +289,7 @@ function createComposerRecovery({
       const incoming = validate(payload, agent.id, agent.localId || agent.id);
       if (generation !== dataGeneration() || epoch !== (epochs.get(agent.id) || 0)) return;
       apply(agent, incoming.filter(record => !accepted.has(record.requestId)),
-        accepted.size === 0 && feedback === currentFeedback);
+        accepted.size === 0 && feedback === currentFeedback, accepted);
       recovered.add(agent.id);
     })().catch(error => {
       if (generation !== dataGeneration() || epoch !== (epochs.get(agent.id) || 0)) return;

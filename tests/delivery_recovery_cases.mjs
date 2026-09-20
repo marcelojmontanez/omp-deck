@@ -240,6 +240,100 @@ export async function verifyDeliveryRecovery(page, expectedSessionId) {
       card: false,
     });
 
+    const acceptedFollowUpRecovery = await page.evaluate(
+      async ({origin, localId, dismissRequestId, pruneRequestId}) => {
+        const agent = selectedAgent();
+        const originalFetch = window.fetch;
+        const originalNow = Date.now;
+        const targetPath = `/api/sessions/${encodeURIComponent(localId)}/deliveries`;
+        const dismissedPath = `${targetPath}/${encodeURIComponent(dismissRequestId)}/dismiss`;
+        let now = originalNow();
+        let returnRecords = true;
+        Date.now = () => now;
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+          const method = (options.method || (typeof input === 'object' && input.method) || 'GET').toUpperCase();
+          if (url.origin === origin && url.pathname === targetPath && method === 'GET') {
+            const deliveries = returnRecords ? [dismissRequestId, pruneRequestId].map(requestId => ({
+              requestId, sessionId: localId, action: 'followUp', message: `Queued ${requestId}`,
+              state: 'accepted',
+              attachments: [{
+                name: `${requestId}.png`, type: 'image/png',
+                data: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aM1sAAAAASUVORK5CYII=',
+              }],
+              createdAt: now - 10, updatedAt: now, expiresAt: now + 60_000,
+            })) : [];
+            return new Response(JSON.stringify({version: 1, deliveries}), {
+              status: 200, headers: {'Content-Type': 'application/json'},
+            });
+          }
+          if (url.origin === origin && url.pathname === dismissedPath && method === 'POST') {
+            return new Response(JSON.stringify({requestId: dismissRequestId, status: 'dismissed'}),
+              {status: 200, headers: {'Content-Type': 'application/json'}});
+          }
+          return originalFetch(input, options);
+        };
+        const readable = async url => {
+          const image = new Image();
+          image.src = url;
+          try {
+            await image.decode();
+            return image.naturalWidth === 1;
+          } catch {
+            return false;
+          } finally {
+            image.removeAttribute('src');
+          }
+        };
+        try {
+          composer.remove(agent.id);
+          composer.select(agent.id);
+          await composer.recover(agent);
+          const images = [dismissRequestId, pruneRequestId].map(id => el.activity.querySelector(
+            `[data-delivery-action="dismiss"][data-delivery-id="${CSS.escape(id)}"]`,
+          ).closest('.event').querySelector('img'));
+          await Promise.all(images.map(image => image.decode()));
+          const decodedWidths = images.map(image => image.naturalWidth);
+          const urls = images.map(image => image.src);
+          await composer.dismissDelivery(dismissRequestId);
+          const afterDismiss = {
+            dismissedGone: !images[0].isConnected,
+            dismissedReleased: !await readable(urls[0]),
+            remainingDecoded: images[1].isConnected && images[1].naturalWidth === 1,
+            remainingReadable: await readable(urls[1]),
+          };
+          returnRecords = false;
+          now += 2_001;
+          await composer.recover(agent);
+          return {
+            decodedWidths, afterDismiss,
+            prunedGone: !images[1].isConnected,
+            prunedReleased: !await readable(urls[1]),
+          };
+        } finally {
+          window.fetch = originalFetch;
+          Date.now = originalNow;
+          composer.remove(agent.id);
+          composer.select(agent.id);
+        }
+      },
+      {
+        origin: identity.machineOrigin,
+        localId: identity.localId,
+        dismissRequestId: `${requestId}-accepted-follow-up-dismiss`,
+        pruneRequestId: `${requestId}-accepted-follow-up-prune`,
+      },
+    );
+    assert.deepEqual(acceptedFollowUpRecovery, {
+      decodedWidths: [1, 1],
+      afterDismiss: {
+        dismissedGone: true, dismissedReleased: true,
+        remainingDecoded: true, remainingReadable: true,
+      },
+      prunedGone: true,
+      prunedReleased: true,
+    }, 'Recovered queue images stay previewable until acknowledged dismissal or authoritative pruning releases them');
+
     const recoveredUncertain = await page.evaluate(
       async ({origin, localId, recoveredRequestId}) => {
         const agent = selectedAgent();
@@ -315,7 +409,7 @@ export async function verifyDeliveryRecovery(page, expectedSessionId) {
       request.method === 'GET' && request.path === `${localPrefix}/deliveries`
     )), 'reload recovery must route the composite fleet session to its local session ID');
     assert.equal(routedRequests.some(request => request.path.includes('/dismiss')), false,
-      'accepted recovery must not require a dismissal request');
+      'ordinary accepted send recovery must not issue a dismissal request');
   } finally {
     page.off('request', observeRequest);
     await page.evaluate(() => {

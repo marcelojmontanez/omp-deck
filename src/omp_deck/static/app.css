@@ -338,6 +338,13 @@ button.chip:active { background: #283247; }
 .event.tool { --event-color: var(--amber); }
 .event.error { --event-color: var(--red); background: rgba(255,113,133,.055); }
 .event.pending { opacity: .55; }
+.event.queued {
+  --event-color: var(--amber);
+  border-color: rgba(255, 199, 107, .44);
+  background: rgba(255, 199, 107, .075);
+}
+.event.queued.pending { opacity: .72; }
+.event.queued .event-detail { color: #f0e5cf; }
 .event.thinking { --event-color: var(--violet); background: rgba(155,140,255,.035); }
 .typing-dots { display: inline-flex; gap: 4px; padding: 4px 0 2px; }
 .typing-dots i {

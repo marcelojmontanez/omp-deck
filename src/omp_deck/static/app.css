@@ -314,8 +314,13 @@ button.chip:active { background: #283247; }
   max-height: min(70vh, 680px);
   object-fit: contain;
 }
-.message-image.image-loading, .message-image.image-failed { padding: 12px; }
+.message-image.image-loading, .message-image.image-failed, .message-image.image-deferred {
+  height: var(--image-placeholder-height, auto);
+  max-height: min(70vh, 680px);
+  padding: 12px;
+}
 .message-image.image-loading, .message-image:disabled { cursor: default; }
+.message-image.image-deferred, .message-image.image-failed { cursor: pointer; }
 .activity-empty { margin: auto; color: var(--muted); text-align: center; }
 .event {
   --event-color: var(--muted);

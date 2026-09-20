@@ -13,7 +13,7 @@ async function holdImage(page, stage, shortenDeadline = true) {
     const held = {originalFetch, originalTimeout, release: () => {}, signal: null};
     window.imageRecoveryFixture = held;
     window.setTimeout = (callback, delay, ...args) => originalTimeout(
-      callback, shortenDeadline ? Math.min(delay, 120) : delay, ...args,
+      callback, shortenDeadline && delay === 120_000 ? 120 : delay, ...args,
     );
     window.fetch = (input, options = {}) => {
       const pathname = new URL(typeof input === 'string' ? input : input.url, location.href).pathname;
@@ -35,21 +35,33 @@ async function holdImage(page, stage, shortenDeadline = true) {
     ompDeckImages.clear();
     touchRender();
     renderDetail();
-    window.setTimeout = originalTimeout;
   }, {stage, shortenDeadline});
+  try {
+    await page.waitForFunction(() => imageRecoveryFixture?.signal, {timeout: 2000});
+  } catch (error) {
+    await restoreImageFetch(page);
+    throw error;
+  } finally {
+    await page.evaluate(() => {
+      if (window.imageRecoveryFixture) window.setTimeout = imageRecoveryFixture.originalTimeout;
+    });
+  }
 }
 
 async function restoreImageFetch(page) {
   await page.evaluate(() => {
     const held = window.imageRecoveryFixture;
     if (!held) return;
-    held.release();
-    window.fetch = held.originalFetch;
-    window.setTimeout = held.originalTimeout;
-    delete window.imageRecoveryFixture;
-    ompDeckImages.clear();
-    touchRender();
-    renderDetail();
+    try {
+      held.release();
+    } finally {
+      window.fetch = held.originalFetch;
+      window.setTimeout = held.originalTimeout;
+      delete window.imageRecoveryFixture;
+      ompDeckImages.clear();
+      touchRender();
+      renderDetail();
+    }
   });
 }
 
@@ -103,11 +115,16 @@ async function verifySupersededImage(page) {
   await page.evaluate(() => {
     const originalFetch = window.fetch;
     const target = document.querySelector('#activity [data-image-path]').dataset.imagePath;
-    const held = {originalFetch, originalTimeout: window.setTimeout, release: () => {}};
+    const held = {
+      originalFetch, originalTimeout: window.setTimeout, release: () => {},
+      signal: null, started: false,
+    };
     window.imageRecoveryFixture = held;
     window.fetch = (input, options = {}) => {
       const pathname = new URL(typeof input === 'string' ? input : input.url, location.href).pathname;
       if (pathname !== target) return originalFetch(input, options);
+      held.signal = options.signal;
+      held.started = true;
       // Deliver a response already in flight even after its request is superseded.
       return new Promise(resolve => { held.release = resolve; });
     };
@@ -116,6 +133,8 @@ async function verifySupersededImage(page) {
     renderDetail();
   });
   try {
+    await page.waitForFunction(() => imageRecoveryFixture?.started
+      && imageRecoveryFixture.signal, {timeout: 2000});
     await page.evaluate(() => {
       window.fetch = imageRecoveryFixture.originalFetch;
       recoverLiveConnections();

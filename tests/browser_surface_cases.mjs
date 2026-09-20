@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {verifyViewportImages} from './image_viewport_cases.mjs';
 
 const viewports = [
   {width: 390, height: 844},
@@ -49,67 +50,6 @@ async function verifyStructuredRendering(page) {
   }
 }
 
-async function verifyImageCapacity(page) {
-  const result = await page.evaluate(async () => {
-    const previousRequest = ompDeckApi.request;
-    const owner = 'surface-capacity-owner';
-    const sharedOwner = 'surface-capacity-shared';
-    const container = document.createElement('div');
-    const shared = document.createElement('div');
-    document.body.append(container, shared);
-    let fetched = 0;
-    const button = number => {
-      const element = document.createElement('button');
-      element.dataset.imageMachine = state.selectedMachineId || 'local';
-      element.dataset.imagePath = `/api/blob/${number.toString(16).padStart(64, '0')}`;
-      return element;
-    };
-    const waitFor = async condition => {
-      const deadline = performance.now() + 2000;
-      while (!condition()) {
-        if (performance.now() > deadline) throw new Error('Image surface case timed out');
-        await new Promise(resolve => setTimeout(resolve, 10));
-      }
-    };
-    try {
-      ompDeckImages.clear();
-      ompDeckApi.request = async () => {
-        fetched += 1;
-        return new Response(new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), {
-          headers: {'Content-Type': 'image/png'},
-        });
-      };
-      container.replaceChildren(...Array.from({length: 32}, (_, index) => button(index)));
-      ompDeckImages.hydrate(container, owner);
-      await waitFor(() => [...container.children].every(element => element.dataset.viewImage));
-      shared.replaceChildren(button(0));
-      ompDeckImages.hydrate(shared, sharedOwner);
-      const sharedUrl = shared.firstElementChild.dataset.viewImage;
-
-      container.replaceChildren(...Array.from({length: 31}, (_, index) => button(index)), button(32));
-      ompDeckImages.hydrate(container, owner);
-      await waitFor(() => container.lastElementChild.dataset.viewImage);
-      return {
-        fetched,
-        incomingLoaded: Boolean(container.lastElementChild.dataset.viewImage),
-        incomingDisabled: container.lastElementChild.disabled,
-        sharedRetained: shared.firstElementChild.dataset.viewImage === sharedUrl,
-      };
-    } finally {
-      ompDeckImages.releaseOwner(owner);
-      ompDeckImages.releaseOwner(sharedOwner);
-      ompDeckApi.request = previousRequest;
-      container.remove();
-      shared.remove();
-      touchRender();
-      renderDetail();
-    }
-  });
-  assert.equal(result.fetched, 33);
-  assert.equal(result.incomingLoaded, true);
-  assert.equal(result.incomingDisabled, false);
-  assert.equal(result.sharedRetained, true);
-}
 
 async function verifySelectionAndAccessibleName(page) {
   const result = await page.evaluate(async () => {
@@ -357,7 +297,7 @@ async function verifyWideTables(page) {
 export async function verifyBrowserSurface(page) {
   await verifyStructuredRendering(page);
   await verifyWideTables(page);
-  await verifyImageCapacity(page);
+  await verifyViewportImages(page);
   await verifySelectionAndAccessibleName(page);
   await verifyUsageLifecycle(page);
 }

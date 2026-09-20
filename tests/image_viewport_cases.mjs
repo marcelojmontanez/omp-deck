@@ -22,8 +22,8 @@ async function scrollToImage(page, index) {
   await waitForImage(page, index);
 }
 
-async function installGallery(page) {
-  await page.evaluate(({png}) => {
+async function installGallery(page, {compact = false} = {}) {
+  await page.evaluate(({png, compact}) => {
     const originalRequest = ompDeckApi.request;
     const fixture = {
       originalRequest,
@@ -72,10 +72,11 @@ async function installGallery(page) {
           fixture.held.resolve = () => resolve(response(bytes));
         });
       }
-      return response(fixture.largePaths.has(path) ? largeBytes : bytes);
+      return response(fixture.largePaths.has(path) ? largeBytes : compact ? base : bytes);
     };
     const gallery = document.createElement('div');
     gallery.dataset.imageViewportGallery = '';
+    if (compact) gallery.className = 'message-attachments';
     Object.assign(gallery.style, {
       position: 'fixed', top: '8px', left: '8px', zIndex: '10000',
       width: '330px', height: '288px', overflowY: 'auto', background: '#000',
@@ -90,6 +91,10 @@ async function installGallery(page) {
       Object.assign(element.style, {
         display: 'block', width: '100%', height: '96px', minHeight: '96px',
       });
+      if (compact && number === 0) {
+        element.style.removeProperty('height');
+        element.style.minHeight = '44px';
+      }
       return element;
     };
     gallery.replaceChildren(...Array.from({length: 48}, (_, index) => button(index)));
@@ -99,7 +104,7 @@ async function installGallery(page) {
     window.imageViewportFixture = fixture;
     ompDeckImages.clear();
     ompDeckImages.hydrate(gallery, fixture.owner);
-  }, {png: PNG});
+  }, {png: PNG, compact});
 }
 
 async function verifySharedOwner(page, index) {
@@ -292,10 +297,38 @@ async function cleanupGallery(page) {
   });
 }
 
+async function verifyCachedThumbnailRevisit(page) {
+  await installGallery(page, {compact: true});
+  try {
+    await waitForImage(page, 0);
+    const initial = await page.$eval(imageSelector(0), button => ({
+      url: button.dataset.viewImage,
+      height: button.getBoundingClientRect().height,
+      calls: imageViewportFixture.calls.get(button.dataset.imagePath),
+    }));
+    await scrollToImage(page, 12);
+    await page.waitForFunction(selector => !document.querySelector(selector).querySelector('img'),
+      {timeout: 5000}, imageSelector(0));
+    const deferredHeight = await page.$eval(imageSelector(0), button => button.getBoundingClientRect().height);
+    assert(Math.abs(deferredHeight - initial.height) <= 1,
+      `Releasing an offscreen decoded thumbnail must preserve its height (${initial.height} to ${deferredHeight})`);
+    await scrollToImage(page, 0);
+    const revisited = await page.$eval(imageSelector(0), button => ({
+      url: button.dataset.viewImage,
+      calls: imageViewportFixture.calls.get(button.dataset.imagePath),
+    }));
+    assert.deepEqual(revisited, {url: initial.url, calls: initial.calls},
+      'A cached image must decode again on return without another authenticated download');
+  } finally {
+    await cleanupGallery(page);
+  }
+}
+
 export async function verifyViewportImages(page) {
   const originalViewport = page.viewport();
   await page.setViewport({width: 390, height: 844, deviceScaleFactor: 1});
   try {
+    await verifyCachedThumbnailRevisit(page);
     await installGallery(page);
     await waitForImage(page, 0);
     const initial = await page.evaluate(() => {

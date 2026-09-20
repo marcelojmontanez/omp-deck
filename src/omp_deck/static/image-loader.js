@@ -12,6 +12,8 @@
   let accessSequence = 0;
 
   const viewport = ompDeckImageViewport.create(handleViewportChange);
+  const {preserveTransitionLayouts, refresh, showLoaded} =
+    ompDeckImagePresentation.create(viewport);
 
   function keyFor(machineId, path) {
     return JSON.stringify([machineId, path]);
@@ -28,78 +30,6 @@
     }
     image.removeAttribute('src');
     if (viewer?.open) viewer.close();
-  }
-
-  function preserveLayout(element) {
-    if (!element.dataset.viewImage) return;
-    const height = Math.ceil(element.getBoundingClientRect().height);
-    if (height > 44) element.style.setProperty('--image-placeholder-height', `${height}px`);
-  }
-
-  function showLoaded(element, url) {
-    if (!element.isConnected) return;
-    const image = element.firstElementChild;
-    const alreadyLoaded = element.dataset.viewImage === url
-      && image?.tagName === 'IMG'
-      && image.src === url;
-    element.dataset.viewImage = url;
-    element.disabled = false;
-    element.setAttribute('aria-label', 'Enlarge attached image');
-    element.classList.remove('image-loading', 'image-failed', 'image-deferred');
-    if (alreadyLoaded) return;
-    element.replaceChildren(Object.assign(document.createElement('img'), {
-      src: url,
-      alt: 'Attached image',
-      loading: 'lazy',
-    }));
-  }
-
-  function showFailure(element) {
-    if (!element.isConnected) return;
-    preserveLayout(element);
-    delete element.dataset.viewImage;
-    element.disabled = false;
-    element.setAttribute('aria-label', 'Retry attached image');
-    element.classList.remove('image-loading', 'image-deferred');
-    element.classList.add('image-failed');
-    element.replaceChildren(Object.assign(document.createElement('span'), {
-      textContent: 'Image unavailable · Retry',
-    }));
-  }
-
-  function showLoading(element) {
-    if (!element.isConnected) return;
-    preserveLayout(element);
-    delete element.dataset.viewImage;
-    element.disabled = true;
-    element.setAttribute('aria-label', 'Loading attached image');
-    element.classList.remove('image-failed', 'image-deferred');
-    element.classList.add('image-loading');
-    element.replaceChildren(Object.assign(document.createElement('span'), {
-      textContent: 'Loading image…',
-    }));
-  }
-
-  function showDeferred(element) {
-    if (!element.isConnected) return;
-    preserveLayout(element);
-    delete element.dataset.viewImage;
-    element.disabled = false;
-    element.setAttribute('aria-label', 'Load attached image');
-    element.classList.remove('image-loading', 'image-failed');
-    element.classList.add('image-deferred');
-    element.replaceChildren(Object.assign(document.createElement('span'), {
-      textContent: 'Load image',
-    }));
-  }
-
-  function refresh(record) {
-    for (const element of viewport.elements(record)) {
-      if (record.url) showLoaded(element, record.url);
-      else if (record.error) showFailure(element);
-      else if (record.controller) showLoading(element);
-      else showDeferred(element);
-    }
   }
 
   function viewerProtects(record) {
@@ -143,7 +73,7 @@
     return count;
   }
 
-  function priority(record, geometry = viewport.geometry(record)) {
+  function priority(record, geometry) {
     return {
       explicit: record.explicit,
       visible: geometry.visible,
@@ -165,9 +95,9 @@
     return left.lastUsed - right.lastUsed;
   }
 
-  function evictionCandidate(target) {
+  function evictionCandidate(target, geometries) {
     const targetExplicit = target.explicit;
-    const targetVisible = viewport.geometry(target).visible;
+    const targetVisible = geometries.get(target).visible;
     let selected = null;
     let selectedPriority = null;
 
@@ -175,7 +105,7 @@
       if (record === target || !record.url || viewerProtects(record)) continue;
       if (!targetExplicit && record.pressurePinned) continue;
 
-      const geometry = viewport.geometry(record);
+      const geometry = geometries.get(record);
       if (!targetExplicit) {
         if (targetVisible && geometry.visible) continue;
         if (!targetVisible && geometry.near) continue;
@@ -196,17 +126,18 @@
     return true;
   }
 
-  function makeResourceSlot(target) {
+  function makeResourceSlot(target, geometries) {
     while (resourceCount() >= MAX_OBJECT_URLS) {
-      if (!evict(evictionCandidate(target))) return false;
+      if (!evict(evictionCandidate(target, geometries))) return false;
     }
     return true;
   }
 
   function makeByteRoom(target, size) {
     if (size > MAX_RETAINED_BYTES) return false;
+    const geometries = viewport.measure();
     while (retainedBytes + size > MAX_RETAINED_BYTES) {
-      if (!evict(evictionCandidate(target))) return false;
+      if (!evict(evictionCandidate(target, geometries))) return false;
     }
     return true;
   }
@@ -296,13 +227,13 @@
     void load(record, record.controller);
   }
 
-  function nextCandidate() {
+  function nextCandidate(geometries) {
     let selected = null;
     let selectedPriority = null;
     for (const record of records.values()) {
       if (record.url || record.controller || record.error
           || record.blockedEpoch === capacityEpoch) continue;
-      const geometry = viewport.geometry(record);
+      const geometry = geometries.get(record);
       if (!record.explicit && !geometry.near) continue;
       const candidatePriority = priority(record, geometry);
       if (!selected || comparePriority(candidatePriority, selectedPriority) < 0) {
@@ -315,29 +246,33 @@
 
   function runQueue() {
     queueScheduled = false;
-    while (activeFetches() < MAX_IN_FLIGHT) {
-      const record = nextCandidate();
+    const geometries = viewport.measure();
+    let fetches = activeFetches();
+    while (fetches < MAX_IN_FLIGHT) {
+      const record = nextCandidate(geometries);
       if (!record) return;
-      if (!makeResourceSlot(record)) {
+      if (!makeResourceSlot(record, geometries)) {
         record.explicit = false;
         record.blockedEpoch = capacityEpoch;
         refresh(record);
         continue;
       }
       start(record);
+      fetches += 1;
     }
   }
 
   function handleViewportChange(affected) {
     capacityEpoch += 1;
+    for (const record of affected) record.pressurePinned = false;
+    preserveTransitionLayouts(affected);
     for (const record of affected) {
-      record.pressurePinned = false;
       if (!record.explicit && !viewport.near(record) && record.controller) {
         record.controller.abort();
         record.controller = null;
         record.blockedEpoch = capacityEpoch;
       }
-      refresh(record);
+      refresh(record, true);
     }
     schedule();
   }
@@ -435,9 +370,11 @@
   function leastImportantPending(except) {
     let selected = null;
     let selectedPriority = null;
+    const geometries = viewport.measure();
     for (const record of records.values()) {
       if (record === except || !record.controller || record.explicit) continue;
-      const candidatePriority = priority(record);
+      const geometry = geometries.get(record);
+      const candidatePriority = priority(record, geometry);
       if (!selected || comparePriority(candidatePriority, selectedPriority) > 0) {
         selected = record;
         selectedPriority = candidatePriority;
@@ -469,8 +406,10 @@
     if (!element) return;
     const record = records.get(keyFor(element.dataset.imageMachine, element.dataset.imagePath));
     if (!record || !viewport.has(record, element)) return;
-    if (element.dataset.viewImage) {
+    if (record.url) {
       record.lastUsed = ++accessSequence;
+      if (!viewport.nearElement(element)) record.pressurePinned = true;
+      showLoaded(element, record.url);
       return;
     }
     if (!element.classList.contains('image-deferred')

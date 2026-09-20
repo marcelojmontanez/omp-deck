@@ -311,12 +311,6 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
       ? (session.archiveActivity || []).filter(event => ['user', 'assistant', 'error'].includes(event.kind))
       : [];
     const events = [...currentEvents].reverse();
-    const todoPanel = state.showTodo && session.todos?.length
-      ? TodoUI.render(session.todos, escapeHtml)
-      : '';
-    const archive = (session.archiveActivity || []).length
-      ? `<div class="archive-separator"><button type="button" data-toggle-archive aria-expanded="${state.showArchive}">${state.showArchive ? 'Hide earlier history' : 'Show earlier history'}</button></div>${state.showArchive ? archivedEvents.reverse().map(event => `<article class="event archived ${escapeHtml(event.kind)}"><div class="event-head"><span class="event-title">${escapeHtml(event.title)}</span><time class="event-time">${escapeHtml(clockTime(event.time))}</time></div>${eventAttachments(event)}${renderEventDetail(event)}</article>`).join('') : ''}`
-      : '';
     const pending = isLiveSession && agent
       ? [...getComposer().pendingFor(agent.id)].reverse().map(deliveryEvent).filter(Boolean)
       : [];
@@ -329,16 +323,40 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
     } else if (isLiveSession && executionState === 'failed') {
       events.unshift({kind: 'error', title: 'OMP failed', detail: agent.activitySummary || 'The last operation failed.', time: null});
     }
-    const conversation = events.length ? events.map(event => `<article class="event ${escapeHtml(event.kind)}" ${event.id ? `data-event-id="${escapeHtml(event.id)}"` : ''}>
-      <div class="event-head">
-        <span class="event-title">${escapeHtml(event.title)}</span>
-        <time class="event-time">${escapeHtml(clockTime(event.time))}</time>
-      </div>
-      ${event.kind === 'thinking'
-        ? '<div class="typing-dots" aria-label="OMP is working"><i></i><i></i><i></i></div>'
-        : `${eventAttachments(event)}${renderEventDetail(event)}${deliveryControls(event)}`}
-    </article>`).join('') : `<p class="activity-empty">${agentLifecycle === 'history' ? 'No conversation content retained for this session.' : 'No conversation available yet.'}</p>`;
-    el.activity.innerHTML = todoPanel + conversation + archive;
+
+    const scope = agent?.id || 'no-session';
+    const activity = [];
+    if (state.showTodo && session.todos?.length) {
+      const todoMarkup = TodoUI.render(session.todos, escapeHtml);
+      activity.push(ompDeckConversation.descriptor(
+        `${scope}:todos`,
+        todoMarkup,
+        () => todoMarkup,
+      ));
+    }
+    if (events.length) {
+      activity.push(...ompDeckConversation.eventDescriptors(events, `${scope}:current`));
+    } else {
+      activity.push(ompDeckConversation.descriptor(
+        `${scope}:empty`,
+        agentLifecycle,
+        () => `<p class="activity-empty">${agentLifecycle === 'history' ? 'No conversation content retained for this session.' : 'No conversation available yet.'}</p>`,
+      ));
+    }
+    if ((session.archiveActivity || []).length) {
+      activity.push(ompDeckConversation.archiveToggleDescriptor(
+        `${scope}:archive-toggle`,
+        state.showArchive,
+      ));
+      if (state.showArchive) {
+        activity.push(...ompDeckConversation.eventDescriptors(
+          archivedEvents.reverse(),
+          `${scope}:archive`,
+          {archived: true},
+        ));
+      }
+    }
+    ompDeckConversation.reconcile(el.activity, activity);
     if (agent) ompDeckImages.hydrate(el.activity, agent.id);
     el['scroll-newest'].hidden = el.activity.scrollTop < 160;
 

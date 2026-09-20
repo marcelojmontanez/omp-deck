@@ -17,6 +17,7 @@ import {verifyComposerOptimism} from './composer_optimistic_cases.mjs';
 import {verifyMachineSelector} from './machine_selector_cases.mjs';
 import {verifyBrowserStateRegressions} from './browser_state_cases.mjs';
 import {verifyBrowserSurface} from './browser_surface_cases.mjs';
+import {verifyConversationRendering} from './conversation_render_cases.mjs';
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const PYTHON = process.env.PYTHON || (
@@ -336,6 +337,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   await verifyMachineSelector(page);
   await verifyBrowserStateRegressions(page);
   await verifyBrowserSurface(page);
+  await verifyConversationRendering(page);
 
   const forbiddenRecovery = await page.evaluate(async () => {
     const originalFetch = window.fetch;

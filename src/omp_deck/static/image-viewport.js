@@ -78,7 +78,12 @@
     function attach(element, owner, container, record) {
       const binding = {element, owner, container, record, near: false, visible: false};
       bindings.set(element, binding);
-      owners.get(owner).add(element);
+      let ownerElements = owners.get(owner);
+      if (!ownerElements) {
+        ownerElements = new Set();
+        owners.set(owner, ownerElements);
+      }
+      ownerElements.add(element);
       let elements = recordElements.get(record);
       if (!elements) {
         elements = new Set();
@@ -93,19 +98,26 @@
       for (const element of [...bindings.keys()]) {
         if (!element.isConnected) affected.add(detach(element));
       }
+
+      const next = new Map(entries.map(({element, record}) => [element, record]));
       for (const element of [...(owners.get(owner) || [])]) {
-        affected.add(detach(element));
+        const binding = bindings.get(element);
+        if (next.get(element) !== binding?.record || binding.container !== container) {
+          affected.add(detach(element));
+        }
+      }
+      for (const {element, record} of entries) {
+        const binding = bindings.get(element);
+        if (binding?.owner === owner
+            && binding.container === container
+            && binding.record === record) continue;
+        if (binding) affected.add(detach(element));
+        attach(element, owner, container, record);
+        affected.add(record);
       }
       for (const [previousOwner, elements] of owners) {
         if (!elements.size) owners.delete(previousOwner);
       }
-
-      owners.set(owner, new Set());
-      for (const {element, record} of entries) {
-        attach(element, owner, container, record);
-        affected.add(record);
-      }
-      if (!owners.get(owner).size) owners.delete(owner);
       affected.delete(null);
       return affected;
     }
@@ -153,7 +165,7 @@
       return false;
     }
 
-    function geometry(record) {
+    function geometry(record, rootRects = new Map()) {
       let near = false;
       let visible = false;
       let distance = Number.POSITIVE_INFINITY;
@@ -163,10 +175,33 @@
         near = true;
         visible ||= binding.visible;
         const item = element.getBoundingClientRect();
-        const root = binding.container.getBoundingClientRect();
+        let root = rootRects.get(binding.container);
+        if (!root) {
+          root = binding.container.getBoundingClientRect();
+          rootRects.set(binding.container, root);
+        }
         distance = Math.min(distance, Math.max(root.top - item.bottom, item.top - root.bottom, 0));
       }
       return {near, visible, distance};
+    }
+
+    function measure() {
+      const rootRects = new Map();
+      const geometries = new Map();
+      return Object.freeze({
+        get(record) {
+          let measured = geometries.get(record);
+          if (!measured) {
+            measured = geometry(record, rootRects);
+            geometries.set(record, measured);
+          }
+          return measured;
+        },
+      });
+    }
+
+    function nearElement(element) {
+      return Boolean(bindings.get(element)?.near);
     }
 
     function clear() {
@@ -186,7 +221,9 @@
       geometry,
       has,
       hasElements,
+      measure,
       near,
+      nearElement,
       releaseOwner,
       releaseWhere,
       replace,

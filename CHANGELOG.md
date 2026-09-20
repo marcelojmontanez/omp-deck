@@ -37,6 +37,7 @@
 
 ### Fixed
 
+- Reduce mobile conversation lag by keeping unchanged messages and visible images stable during updates, and unloading off-screen thumbnails without losing their scroll position or cached download.
 - Restore immediate greyed-out message previews after Send, including while saved drafts are being cleared. Failed preparation preserves unsent text and images.
 - Remove the conversation-wide image display ceiling. Load thumbnails as you scroll, reload off-screen images when needed, and preserve enlarged previews under cache pressure.
 - Fix coordinator upgrades failing while preparing a new release environment.

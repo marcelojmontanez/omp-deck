@@ -146,7 +146,7 @@ async function verifySelectionAndAccessibleName(page) {
       return {
         preserved,
         applied,
-        flushed: !paragraph.isConnected && el.activity.textContent.includes('Authoritative update'),
+        flushed: el.activity.textContent.includes('Authoritative update'),
         readLabel,
         unreadLabel,
         deliveryNotice,

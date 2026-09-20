@@ -173,6 +173,7 @@ function createComposer({
       error.reuseRequestId = false;
       throw error;
     }
+    recovery.capture(agent, pending);
     job.attempted = true;
     const suffix = job.action === 'followUp' ? 'follow-ups' : 'messages';
     const {response, payload: body} = await ompDeckNetwork.fetchJsonBounded(
@@ -206,7 +207,7 @@ function createComposer({
       error.reuseRequestId = true;
       throw error;
     }
-    recovery.accept(id, pending);
+    recovery.accept(state.agents.find(candidate => candidate.id === id) || agent, pending);
     touchRender();
     renderDetail();
   }
@@ -466,6 +467,7 @@ function createComposer({
   function prune(validIds) {
     commands.prune(validIds);
     deliveryMode.prune(new Set(validIds));
+    recovery.prune(validIds);
   }
 
   return {

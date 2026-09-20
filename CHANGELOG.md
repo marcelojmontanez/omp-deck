@@ -32,7 +32,7 @@
 - Derive each Deck package version automatically from its committed source revision. Reject dirty or ambiguous builds, and preserve verified source identity through source-distribution rebuilds.
 - Raise image attachments to four images totaling 20 MiB for managed RPC and extension 1.3.4, or 10 MiB for writable Collab. Already-running older extensions retain 700 KiB until an idle restart and resume. Allow more time for large image transfers and make full recovery-storage errors actionable.
 - When History is enabled, distinguish live sessions from saved conversations with matching names; number only duplicates of the same kind. Hide these labels when History is disabled.
-- Keep ordinary successful sends to a compact Accepted status without duplicate receipt cards or manual cleanup. Automatically reclaim accepted recovery storage as needed while retaining explicit recovery for unresolved sends.
+- Keep accepted-send feedback compact and automatically reclaim accepted recovery storage as needed, while retaining explicit recovery for unresolved sends.
 - Store request recovery content separately from compact deduplication metadata, with explicit capacity reservation, bounded dismissed-request history, and crash-safe submission ownership. The ledger now uses schema 3; older rollback packages must be replaced with schema-compatible artifacts before a guarded rollout.
 - Keep installed and retained extension sources outside mutable Python environments. Linux services retain the resolved OMP executable path; rerun setup if that path changes.
 
@@ -40,6 +40,7 @@
 
 - Reduce mobile conversation lag by keeping unchanged messages and visible images stable during updates, and unloading off-screen thumbnails without losing their scroll position or cached download.
 - Restore immediate greyed-out message previews after Send, including while saved drafts are being cleared. Failed preparation preserves unsent text and images.
+- Keep accepted Send and Steer previews visible until the corresponding native text entry appears, avoiding the disappearance between acknowledgement and conversation refresh. Preserve separate previews for repeated identical sends.
 - Remove the conversation-wide image display ceiling. Load thumbnails as you scroll, reload off-screen images when needed, and preserve enlarged previews under cache pressure.
 - Fix coordinator upgrades failing while preparing a new release environment.
 - Wait for coordinator health during startup and rollback instead of treating an initial unavailable response as a failed release.

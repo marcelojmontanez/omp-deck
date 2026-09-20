@@ -39,6 +39,7 @@ function createComposerRecovery({
   const records = new Map();
   let feedback = null;
   const preparations = new Map();
+  const handoff = createComposerHandoff({pendingFor, releasePending});
 
   let feedbackTimer = null;
 
@@ -113,6 +114,7 @@ function createComposerRecovery({
   }
 
   function releasePending(id, item) {
+    handoff.forget(id, item);
     const pending = pendingFor(id);
     const index = pending.indexOf(item);
     if (index >= 0) pending.splice(index, 1);
@@ -151,12 +153,13 @@ function createComposerRecovery({
     }
   }
 
-  function accept(id, item) {
+  function accept(agent, item) {
+    const id = agent.id;
     // An older recovery read cannot resurrect or remove a locally acknowledged request.
     inFlight.get(id)?.accepted.add(item.id);
     records.delete(`${id}\0${item.id}`);
     deliveryState(item, 'accepted');
-    if (item.action !== 'followUp') releasePending(id, item);
+    if (item.action !== 'followUp' && !handoff.accepted(agent, item)) releasePending(id, item);
     showState(id, 'accepted', item.id);
   }
 
@@ -211,6 +214,9 @@ function createComposerRecovery({
 
 
   function apply(agent, incoming, updateStatus, protectedIds) {
+    const selected = selectedAgent();
+    const observedAgent = selected?.id === agent.id ? selected : agent;
+    handoff.reconcile(observedAgent);
     const pending = pendingFor(agent.id);
     const byId = new Map(pending.map(item => [item.id, item]));
     const retainedIds = new Set(protectedIds);
@@ -219,7 +225,8 @@ function createComposerRecovery({
       const item = pending[index];
       const key = `${agent.id}\0${item.id}`;
       if (
-        (!records.has(key) && !(item.action === 'followUp' && item.state === 'accepted'))
+        (item.state === 'accepted' && handoff.has(agent.id, item))
+        || (!records.has(key) && !(item.action === 'followUp' && item.state === 'accepted'))
         || retainedIds.has(item.id)
       ) continue;
       records.delete(key);
@@ -234,12 +241,12 @@ function createComposerRecovery({
         if (item) {
           byId.delete(record.requestId);
           deliveryState(item, 'accepted');
-          releasePending(agent.id, item);
+          if (!handoff.accepted(observedAgent, item)) releasePending(agent.id, item);
         }
         continue;
       }
-      // A server snapshot started before the acknowledgement cannot regress a retained queue receipt.
-      if (item?.action === 'followUp' && item.state === 'accepted' && record.state !== 'accepted') {
+      // An older server snapshot cannot regress a locally confirmed acceptance.
+      if (item?.state === 'accepted' && record.state !== 'accepted') {
         continue;
       }
       records.set(key, record);
@@ -305,6 +312,7 @@ function createComposerRecovery({
   }
 
   function reconcile(agent) {
+    if (handoff.reconcile(agent)) touchRender();
     if (!recovered.has(agent.id) && selectedAgent()?.id === agent.id) void recover(agent);
   }
 
@@ -370,6 +378,7 @@ function createComposerRecovery({
       epochs.clear();
       records.clear();
       preparations.clear();
+      handoff.clear();
     },
     remove(id) {
       if (feedback?.id === id) clearFeedback();
@@ -381,9 +390,11 @@ function createComposerRecovery({
         if (key.startsWith(`${id}\0`)) records.delete(key);
       }
       preparations.delete(id);
+      handoff.remove(id);
     },
     select,
     prepare,
+    capture: handoff.capture,
     submitPreparation,
     withdrawPreparation,
     submitting,
@@ -392,6 +403,7 @@ function createComposerRecovery({
     accept,
     recover,
     reconcile,
+    prune: handoff.prune,
     restoreDelivery,
     dismissDelivery,
   };

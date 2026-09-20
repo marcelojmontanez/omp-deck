@@ -19,6 +19,7 @@ import {verifyBrowserStateRegressions} from './browser_state_cases.mjs';
 import {verifyBrowserSurface} from './browser_surface_cases.mjs';
 import {verifyConversationRendering} from './conversation_render_cases.mjs';
 import {verifyQueueVisibility} from './queue_visibility_cases.mjs';
+import {verifySteeringHandoff} from './steering_handoff_cases.mjs';
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const PYTHON = process.env.PYTHON || (
@@ -335,6 +336,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   await verifyComposerFeedback(page);
   await verifyComposerDrafts(page);
   await verifyComposerOptimism(page);
+  await verifySteeringHandoff(page);
   await verifyMachineSelector(page);
   await verifyBrowserStateRegressions(page);
   await verifyBrowserSurface(page);
@@ -1180,7 +1182,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
       await waitUntil(() => routes.length === 2, 'follow-up request');
       const statusWhileSecondPending = document.getElementById('send-state').textContent;
       releaseSecond();
-      await waitUntil(() => composer.pendingFor(agent.id).length === 0, 'follow-up acceptance');
+      await waitUntil(() => el['send-state'].textContent === 'Accepted', 'second acceptance');
 
       agent.status = 'idle';
       agent.executionState = 'idle';
@@ -1279,6 +1281,12 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
         }
         requestCount += 1;
         const body = JSON.parse(options.body);
+        agent.session.activity = [{
+          id: `native-accepted-${requestCount}`, kind: 'user', title: 'You',
+          detail: body.message, attachments: [], time: null,
+        }];
+        agent.session.updatedMs += 1;
+        composer.reconcile(agent);
         return {ok: true, status: 202, json: async () => ({
           requestId: body.requestId, status: 'accepted', acceptance: 'accepted',
         })};

@@ -88,12 +88,11 @@ function eventAttachments(event) {
 
 function deliveryEvent(item) {
   const queued = item.action === 'followUp';
-  if (item.state === 'accepted' && !queued) return null;
   const labels = {
     preparing: 'Preparing',
     submitting: queued ? 'Queueing' : 'Submitting',
     uncertain: queued ? 'Queue uncertain' : 'Delivery uncertain',
-    accepted: 'Queue accepted',
+    accepted: queued ? 'Queue accepted' : 'Accepted',
     failed: queued ? 'Not queued' : 'Not sent',
     cancelled: queued ? 'Queue cancelled' : 'Cancelled',
     stale: queued ? 'Queue stale' : 'Stale',
@@ -113,7 +112,12 @@ function deliveryEvent(item) {
 function deliveryControls(event) {
   if (!event.deliveryId) return '';
   const id = escapeHtml(event.deliveryId);
+  const queued = String(event.kind || '').split(/\s+/).includes('queued');
+  const hasAttachments = Array.isArray(event.attachments)
+    ? event.attachments.length > 0
+    : Boolean(event.attachments);
   if (event.deliveryState === 'accepted') {
+    if (!queued && !hasAttachments) return '';
     return `<div class="delivery-controls accepted"><span>Accepted by OMP. This confirms delivery, not completion.</span><button type="button" data-delivery-action="dismiss" data-delivery-id="${id}">Dismiss receipt</button></div>`;
   }
   if (['preparing', 'submitting'].includes(event.deliveryState)) return '';

@@ -6,6 +6,7 @@ import vm from 'node:vm';
 const source = await readFile(new URL('../src/omp_deck/static/fleet-projection.js', import.meta.url), 'utf8');
 const helperSource = await readFile(new URL('../src/omp_deck/static/ui-helpers.js', import.meta.url), 'utf8');
 const recoverySource = await readFile(new URL('../src/omp_deck/static/composer-recovery.js', import.meta.url), 'utf8');
+const handoffSource = await readFile(new URL('../src/omp_deck/static/composer-handoff.js', import.meta.url), 'utf8');
 
 const todoSource = await readFile(new URL('../src/omp_deck/static/todo-ui.js', import.meta.url), 'utf8');
 const sseParserSource = await readFile(
@@ -289,8 +290,8 @@ test('composer queue stops after a failed delivery and preserves later jobs', as
   assert.deepEqual(queue, []);
 });
 
-test('a stale recovery response cannot resurrect an accepted send', async t => {
-  const agent = {id: 'session'};
+test('a stale recovery response cannot regress an accepted preview', async t => {
+  const agent = {id: 'session', session: {activity: []}};
   const pending = [];
   const status = {};
   let finishRead;
@@ -303,6 +304,7 @@ test('a stale recovery response cannot resurrect an accepted send', async t => {
       fetchJsonBounded: () => new Promise(resolve => { finishRead = resolve; }),
     },
   });
+  vm.runInContext(handoffSource, context, {filename: 'composer-handoff.js'});
   vm.runInContext(recoverySource, context, {filename: 'composer-recovery.js'});
   const recovery = context.createComposerRecovery({
     elements: {'send-state': status},
@@ -318,10 +320,11 @@ test('a stale recovery response cannot resurrect an accepted send', async t => {
   });
   t.after(() => recovery.clear());
   const read = recovery.recover(agent);
-  const item = {id: 'request', state: 'submitting', text: 'hello', attachments: []};
+  const item = {id: 'request', action: 'sendMessage', state: 'submitting', text: 'hello', attachments: [], createdAt: 1};
   pending.push(item);
+  recovery.capture(agent, item);
   recovery.submitting(agent.id, item);
-  recovery.accept(agent.id, item);
+  recovery.accept(agent, item);
   finishRead({
     response: {ok: true},
     payload: {version: 1, deliveries: [{
@@ -331,7 +334,10 @@ test('a stale recovery response cannot resurrect an accepted send', async t => {
     }]},
   });
   await read;
-  assert.equal(pending.length, 0, 'an older snapshot must not restore a delivery warning');
+  assert.equal(pending.length, 1, 'the accepted preview remains until its native echo is visible');
+  const preview = loadUiHelpers().deliveryEvent(pending[0]);
+  assert.equal(preview.title, 'You · Accepted', 'an older snapshot must not restore a delivery warning');
+  assert.equal(preview.detail, 'hello', 'recovery must preserve visible accepted content');
 });
 
 test('frames large character-fragmented events across CRLF boundaries', () => {

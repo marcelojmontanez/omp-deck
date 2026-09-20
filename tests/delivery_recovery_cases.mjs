@@ -181,65 +181,6 @@ export async function verifyDeliveryRecovery(page, expectedSessionId) {
       event.kind === 'user' && event.detail === expected
     )).length, message), 1, 'hidden accepted recovery must preserve native request deduplication');
 
-    const acceptedAttachmentRecovery = await page.evaluate(
-      async ({origin, localId, recoveredRequestId, recoveredMessage}) => {
-        const agent = selectedAgent();
-        const originalFetch = window.fetch;
-        const originalCreateObjectURL = URL.createObjectURL;
-        const targetPath = `/api/sessions/${encodeURIComponent(localId)}/deliveries`;
-        let createdObjectUrls = 0;
-        URL.createObjectURL = blob => {
-          createdObjectUrls += 1;
-          return originalCreateObjectURL.call(URL, blob);
-        };
-        window.fetch = async (input, options = {}) => {
-          const url = new URL(typeof input === 'string' ? input : input.url, location.href);
-          const method = (options.method || (typeof input === 'object' && input.method) || 'GET').toUpperCase();
-          if (url.origin === origin && url.pathname === targetPath && method === 'GET') {
-            const now = Date.now();
-            return new Response(JSON.stringify({version: 1, deliveries: [{
-              requestId: recoveredRequestId,
-              sessionId: localId,
-              action: 'sendMessage',
-              message: recoveredMessage,
-              state: 'accepted',
-              attachments: [{name: 'accepted.png', type: 'image/png', data: 'data:image/png;base64,aQ=='}],
-              createdAt: now - 10,
-              updatedAt: now,
-              expiresAt: now + 60_000,
-            }]}), {status: 200, headers: {'Content-Type': 'application/json'}});
-          }
-          return originalFetch(input, options);
-        };
-        try {
-          composer.remove(agent.id);
-          composer.select(agent.id);
-          await composer.recover(agent);
-          return {
-            createdObjectUrls,
-            pending: composer.pendingFor(agent.id).length,
-            card: Boolean(document.querySelector(`[data-delivery-id="${recoveredRequestId}"]`)),
-          };
-        } finally {
-          window.fetch = originalFetch;
-          URL.createObjectURL = originalCreateObjectURL;
-          composer.remove(agent.id);
-          composer.select(agent.id);
-        }
-      },
-      {
-        origin: identity.machineOrigin,
-        localId: identity.localId,
-        recoveredRequestId: `${requestId}-accepted-image`,
-        recoveredMessage: message,
-      },
-    );
-    assert.deepEqual(acceptedAttachmentRecovery, {
-      createdObjectUrls: 0,
-      pending: 0,
-      card: false,
-    });
-
     const acceptedFollowUpRecovery = await page.evaluate(
       async ({origin, localId, dismissRequestId, pruneRequestId}) => {
         const agent = selectedAgent();

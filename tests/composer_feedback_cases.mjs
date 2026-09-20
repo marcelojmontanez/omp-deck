@@ -85,8 +85,14 @@ export async function verifyComposerFeedback(page) {
       await waitFor(() => held.has('held draft'), 'held draft request');
       type('keep this newer draft');
       held.get('held draft').resolve();
-      await waitFor(() => composer.pendingFor(ids[0]).length === 0, 'old draft acceptance');
-      result.lateAcceptance = {status: status(), draft: el.message.value};
+      await waitFor(() => [...el.activity.querySelectorAll('.event.user:not(.pending) .event-detail')]
+        .some(detail => detail.textContent.trim() === 'held draft'), 'old draft accepted preview');
+      result.lateAcceptance = {
+        status: status(),
+        draft: el.message.value,
+        acceptedVisible: [...el.activity.querySelectorAll('.event-title')]
+          .some(title => title.textContent.trim() === 'You · Accepted'),
+      };
 
       await accepted('add a photo');
       const transfer = new DataTransfer();
@@ -158,8 +164,9 @@ export async function verifyComposerFeedback(page) {
     'otherSession', 'returnedSession', 'historicalSuccess']) {
     assert.equal(observed[key], '', `${key} must not show stale acceptance`);
   }
-  assert.deepEqual(observed.lateAcceptance, {status: '', draft: 'keep this newer draft'},
-    'an acknowledgement for an earlier draft must not label the current draft as accepted');
+  assert.deepEqual(observed.lateAcceptance, {
+    status: '', draft: 'keep this newer draft', acceptedVisible: true,
+  }, 'an acknowledgement for an earlier draft keeps its content visible without labeling the current draft');
   assert.equal(observed.submittingPastOldExpiry, 'Submitting', 'an old success timer must not clear a newer send');
   assert.deepEqual(observed.failurePastOldExpiry, {status: 'Delivery uncertain', draft: 'held failure'},
     'delivery uncertainty and its recoverable draft must survive an old success timer');

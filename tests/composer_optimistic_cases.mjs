@@ -105,10 +105,14 @@ export async function verifyComposerOptimism(page) {
       await waitFor(() => heldMessages === 1, 'delivery after clear');
       const duringDelivery = snapshot();
       heldDelivery.release();
-      await waitFor(() => pending().length === 0, 'accepted bubble removal');
+      await waitFor(() => pending().length === 0, 'accepted bubble styling');
+      const acceptedBubble = el.activity.querySelector('.event.user:not(.pending)');
       const accepted = {
         pending: pending().length,
-        controls: el.activity.querySelectorAll('.delivery-controls').length,
+        title: acceptedBubble?.querySelector('.event-title')?.textContent.trim() || '',
+        text: acceptedBubble?.querySelector('.event-detail')?.textContent.trim() || '',
+        images: acceptedBubble?.querySelectorAll('.message-attachments img').length || 0,
+        controls: acceptedBubble?.querySelectorAll('.delivery-controls').length || 0,
       };
 
       let failedMessages = 0;
@@ -248,8 +252,9 @@ export async function verifyComposerOptimism(page) {
   assert.deepEqual(result.duringDelivery, {
     count: 1, text: 'Visible before clear', images: 1, controls: 0,
   }, 'the same pending bubble remains while the message request is held');
-  assert.deepEqual(result.accepted, {pending: 0, controls: 0},
-    'accepted delivery leaves neither a ghost bubble nor receipt controls');
+  assert.deepEqual(result.accepted, {
+    pending: 0, title: 'You · Accepted', text: 'Visible before clear', images: 1, controls: 1,
+  }, 'accepted image delivery remains visible as an honest, dismissible receipt until a native echo exists');
   assert.deepEqual(result.failed, {
     bubble: 0, text: 'Keep failed draft', images: 1, messages: 0,
   }, 'failed saved-draft clearing withdraws the bubble and preserves the draft and image');

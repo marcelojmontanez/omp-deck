@@ -5,11 +5,14 @@ import hashlib
 import json
 import threading
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any
+from weakref import WeakValueDictionary
 
 from ._rpc_errors import AdapterError
+from ._thinking import normalized_thinking
 from .fleet_model import FleetModel
-from .projects import create_project_directory, resolve_project_path
+from .projects import create_project_directory, resolve_project_path, resolve_project_reference
 from .request_ledger import RequestLedger
 from .settings import Settings
 
@@ -26,6 +29,16 @@ def _fingerprint(value: Mapping[str, Any]) -> str:
     ).hexdigest()
 
 
+class FreshSessionMismatchError(RuntimeError):
+    pass
+
+
+class _FreshSourceError(ValueError):
+    def __init__(self, error_code: str) -> None:
+        super().__init__(error_code)
+        self.error_code = error_code
+
+
 class RpcRequestCoordinator:
     """Reserves durable request IDs before RPC launches and commands mutate state."""
 
@@ -38,6 +51,7 @@ class RpcRequestCoordinator:
         self._command_locks: dict[str, threading.Lock] = {}
         self._priority_command_locks: dict[str, threading.Lock] = {}
         self._shutdown_command_locks: dict[str, threading.Lock] = {}
+        self._fresh_locks: WeakValueDictionary[str, threading.Lock] = WeakValueDictionary()
 
     def launch(
         self,
@@ -98,6 +112,111 @@ class RpcRequestCoordinator:
                     durable = dict(result)
                 self.ledger.complete("rpc-launch", request_id, fingerprint, durable)
                 return result
+
+    def fresh(
+        self,
+        source_session_id: str,
+        request_id: str,
+        *,
+        start: Callable[..., dict[str, Any]],
+    ) -> dict[str, Any]:
+        scope = f"rpc-fresh:{source_session_id}"
+        fingerprint = _fingerprint({"action": "startFresh", "sourceSessionId": source_session_id})
+        with self._lock:
+            operation_lock = self._fresh_locks.setdefault(source_session_id, threading.Lock())
+        with operation_lock:
+            persisted = self.ledger.lookup(scope, request_id, fingerprint)
+            if persisted is not None:
+                return self._fresh_result(persisted)
+            source = self.model.get(source_session_id)
+            with self.ledger.admission(scope, request_id, fingerprint) as persisted:
+                if persisted is not None:
+                    return self._fresh_result(persisted)
+                try:
+                    project_name, project_path, provider, model_id, thinking, omp_session_id = (
+                        self._fresh_source_settings(source)
+                    )
+                    session = start(
+                        project_name,
+                        project_path,
+                        provider=provider,
+                        model=model_id,
+                        thinking=thinking,
+                        source_session_id=source_session_id,
+                        source_omp_session_id=omp_session_id,
+                    )
+                    result = {
+                        "requestId": request_id,
+                        "status": "accepted",
+                        "session": session,
+                    }
+                    durable = {
+                        "requestId": request_id,
+                        "status": "accepted",
+                        "sessionId": session["id"],
+                    }
+                except _FreshSourceError as error:
+                    result = {
+                        "requestId": request_id,
+                        "status": "failed",
+                        "errorCode": error.error_code,
+                    }
+                    durable = dict(result)
+                except FreshSessionMismatchError:
+                    result = {
+                        "requestId": request_id,
+                        "status": "failed",
+                        "errorCode": "settings_mismatch",
+                    }
+                    durable = dict(result)
+                except Exception:
+                    result = {
+                        "requestId": request_id,
+                        "status": "failed",
+                        "errorCode": "launch_failed",
+                    }
+                    durable = dict(result)
+                self.ledger.complete(scope, request_id, fingerprint, durable)
+                return result
+
+    def _fresh_source_settings(self, source: Mapping[str, Any]) -> tuple[str, Path, str, str, str, str]:
+        capabilities = source.get("capabilities")
+        model = source.get("model")
+        thinking = normalized_thinking(source.get("thinking"))
+        omp_session_id = source.get("ompSessionId")
+        if (
+            not isinstance(capabilities, Mapping)
+            or capabilities.get("startFresh") is not True
+            or not isinstance(model, Mapping)
+            or not isinstance(model.get("provider"), str)
+            or not model["provider"]
+            or not isinstance(model.get("id"), str)
+            or not model["id"]
+            or thinking is None
+            or not isinstance(omp_session_id, str)
+            or not omp_session_id
+        ):
+            raise _FreshSourceError("source_settings_unavailable")
+        project = source.get("project")
+        if not isinstance(project, Mapping):
+            raise _FreshSourceError("invalid_project")
+        try:
+            project_name, project_path = resolve_project_reference(
+                self.settings.project_root,
+                project.get("path"),
+            )
+        except ValueError:
+            raise _FreshSourceError("invalid_project") from None
+        return project_name, project_path, model["provider"], model["id"], thinking, omp_session_id
+
+    def _fresh_result(self, persisted: Mapping[str, Any]) -> dict[str, Any]:
+        if persisted["status"] != "accepted":
+            return dict(persisted)
+        return {
+            "requestId": persisted["requestId"],
+            "status": "accepted",
+            "session": self.model.get(persisted["sessionId"]),
+        }
 
     def dispatch(
         self,

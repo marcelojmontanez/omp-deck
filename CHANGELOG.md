@@ -17,6 +17,7 @@
 - Show installed Deck build identities for the dashboard and enrolled machines in Deck settings, with an on-demand refresh.
 - Add one-command guarded fleet releases for existing macOS/Linux nodes and a Linux coordinator, with resumable progress, automatic verification and credential cleanup, and independent rollback protection. Terminal-owned OMP sessions are never automatically restarted.
 - Save session drafts and selected images automatically on the owning machine, with reload and restart recovery, explicit cross-device conflict resolution, and no automatic sending. Disable saving with the node's `save_drafts` configuration instead of a composer control. Saved content expires after seven days; browser-only clearing and logout do not delete server copies.
+- Add **Start fresh session…** to the session menu: open a separate empty managed session in the same project with the same provider, model, and thinking level, while preserving the original session and text/image draft. Terminal-owned sessions remain untouched, and uncertain retries reuse the original creation request.
 
 ### Changed
 

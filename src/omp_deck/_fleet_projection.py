@@ -52,6 +52,19 @@ def _model_identity(state: Mapping[str, Any]) -> dict[str, Any] | None:
     return result or None
 
 
+def _fresh_settings_known(model: object, thinking: object, omp_session_id: object) -> bool:
+    return (
+        isinstance(model, Mapping)
+        and isinstance(model.get("provider"), str)
+        and bool(model["provider"])
+        and isinstance(model.get("id"), str)
+        and bool(model["id"])
+        and normalized_thinking(thinking) is not None
+        and isinstance(omp_session_id, str)
+        and bool(omp_session_id)
+    )
+
+
 def _message_content(message: Mapping[str, Any]) -> list[Any]:
     content = message.get("content")
     if isinstance(content, str):
@@ -293,6 +306,11 @@ def rpc_projection(
     thinking_levels = thinking_levels_for_model(state.get("model"))
     capabilities = platform_capabilities("rpc")
     capabilities["setThinking"] = bool(thinking_levels)
+    capabilities["startFresh"] = _fresh_settings_known(
+        state.get("model"),
+        state.get("thinking_level"),
+        state.get("session_id") or session.get("ompSessionId"),
+    )
     public_state = (
         "disconnected"
         if snapshot.transport_status != "connected"
@@ -355,6 +373,11 @@ def collab_projection(
     pending = _collab_pending(snapshot.pending_ui_requests[-1] if snapshot.pending_ui_requests else None)
     state = snapshot.state
     capabilities = platform_capabilities("collab")
+    capabilities["startFresh"] = _fresh_settings_known(
+        state.get("model"),
+        state.get("thinkingLevel"),
+        snapshot.header.get("id") or session.get("ompSessionId"),
+    )
     if snapshot.read_only:
         for capability in ("sendMessage", "interrupt", "answerUiRequest", "cancelUiRequest", "attachments"):
             capabilities[capability] = False
@@ -428,6 +451,11 @@ def extension_projection(
     capabilities["setThinking"] = thinking_control and bool(thinking_levels)
     capabilities["attachments"] = (
         registration.capabilities.get("attachments") is True and snapshot.transport_status == "connected"
+    )
+    capabilities["startFresh"] = thinking_control and _fresh_settings_known(
+        snapshot.model,
+        snapshot.thinking,
+        registration.session_id,
     )
     subagents = normalize_async_jobs(snapshot.async_jobs)
     pending = None if snapshot.idle else session.get("pendingUiRequest")

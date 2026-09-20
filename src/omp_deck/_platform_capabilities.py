@@ -16,6 +16,7 @@ CAPABILITIES: dict[str, dict[str, bool]] = {
         "switch": True,
         "resume": True,
         "compact": True,
+        "startFresh": True,
     },
     "collab": {
         "sendMessage": True,
@@ -34,6 +35,7 @@ CAPABILITIES: dict[str, dict[str, bool]] = {
         "switch": False,
         "resume": False,
         "compact": False,
+        "startFresh": True,
     },
     "extension": {
         "sendMessage": True,
@@ -52,6 +54,7 @@ CAPABILITIES: dict[str, dict[str, bool]] = {
         "switch": False,
         "resume": False,
         "compact": False,
+        "startFresh": True,
     },
 }
 

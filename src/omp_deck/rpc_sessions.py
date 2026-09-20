@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import dataclasses
-import os
-import sys
 import threading
 import time
 import uuid
@@ -10,10 +8,10 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from omp_rpc import RpcClient
-
 from . import _rpc_dispatch
+from ._rpc_client_factory import create_rpc_client
 from ._rpc_errors import AdapterDisconnectedError
+from ._rpc_fresh import launch_fresh_session, persist_fresh_settings
 from ._rpc_recovery import (
     RpcRecoverySupervisor,
     persist_rpc_identity,
@@ -80,7 +78,16 @@ class RpcSessionManager:
             if record["adapterKind"] == "rpc":
                 self.model.load_record(record)
 
-    def launch(self, project_name: str, project_path: Path, *, title: str | None = None) -> dict[str, Any]:
+    def launch(
+        self,
+        project_name: str,
+        project_path: Path,
+        *,
+        title: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        thinking: str | None = None,
+    ) -> dict[str, Any]:
         record = self.registry.create(
             adapter_kind="rpc",
             project_name=project_name,
@@ -91,7 +98,7 @@ class RpcSessionManager:
         with self._operation_lock(record["id"]):
             self.model.load_record(record)
             try:
-                self._connect(record)
+                self._connect(record, provider=provider, model=model, thinking=thinking)
             except Exception as error:
                 failed = self.registry.update(record["id"], desired_rpc_running=False)
                 self.model.load_record(failed)
@@ -123,6 +130,16 @@ class RpcSessionManager:
             )
         except RequestConflictError:
             raise _rpc_dispatch.SessionCommandConflictError("requestId was already used for another launch") from None
+
+    def fresh_request(self, source_session_id: str, request_id: str) -> dict[str, Any]:
+        try:
+            return self._requests.fresh(
+                source_session_id,
+                request_id,
+                start=lambda *args, **kwargs: launch_fresh_session(self, *args, **kwargs),
+            )
+        except RequestConflictError:
+            raise _rpc_dispatch.SessionCommandConflictError("requestId was reused for a fresh session") from None
 
     def refresh(self, session_id: str) -> dict[str, Any]:
         runtime = self._runtime(session_id)
@@ -280,7 +297,14 @@ class RpcSessionManager:
             if runtime.supervisor is not None:
                 runtime.supervisor.join(max(0.0, deadline - time.monotonic()))
 
-    def _connect(self, record: Mapping[str, Any]) -> None:
+    def _connect(
+        self,
+        record: Mapping[str, Any],
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        thinking: str | None = None,
+    ) -> None:
         runtime = _Runtime(
             session_id=record["id"],
             instance_id=uuid.uuid4().hex,
@@ -310,25 +334,15 @@ class RpcSessionManager:
             )
             self.model.load_record(updated)
 
-            def client_factory() -> RpcClient:
-                extra_args = ("--resume", resume_file) if resume_file else ()
-                options = {
-                    "cwd": project_path,
-                    "max_event_history": 512,
-                    "max_stderr_chunks": 128,
-                }
-                client = RpcClient(
+            def client_factory():
+                return create_rpc_client(
                     executable=self.settings.omp_bin,
-                    session_dir=self.settings.session_root,
-                    extra_args=extra_args,
-                    **options,
-                )
-                command = getattr(client, "command", None)
-                if os.name != "nt" or not isinstance(command, tuple):
-                    return client
-                return RpcClient(
-                    command=(sys.executable, "-m", "omp_deck._windows_job", *command),
-                    **options,
+                    session_root=self.settings.session_root,
+                    project_path=project_path,
+                    resume_file=resume_file,
+                    provider=provider,
+                    model=model,
+                    thinking=thinking,
                 )
 
             adapter = SessionAdapter(
@@ -343,6 +357,7 @@ class RpcSessionManager:
                 materialized = adapter.new_session()
                 if getattr(materialized, "cancelled", False):
                     raise RuntimeError("OMP cancelled fresh RPC session materialization")
+                persist_fresh_settings(adapter, provider, model, thinking)
             with self._lock:
                 if (
                     self._closed

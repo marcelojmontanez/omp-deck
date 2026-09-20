@@ -76,6 +76,29 @@ def resolve_project_path(root, project, *, must_exist=True):
     return candidate
 
 
+def resolve_project_reference(root, project_path):
+    """Return the canonical relative project name for a normalized absolute path."""
+    if not isinstance(project_path, str) or not project_path or "\x00" in project_path:
+        raise ValueError("invalid project")
+    candidate = Path(project_path)
+    if not candidate.is_absolute():
+        raise ValueError("invalid project")
+    resolved_root = _resolved_project_root(root)
+    if _has_link_like_component(candidate):
+        raise ValueError("invalid project")
+    try:
+        resolved = candidate.resolve(strict=True)
+        relative = resolved.relative_to(resolved_root)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise ValueError("invalid project") from error
+    if candidate != resolved or not relative.parts or not resolved.is_dir():
+        raise ValueError("invalid project")
+    project = relative.as_posix()
+    if resolve_project_path(resolved_root, project, must_exist=True) != resolved:
+        raise ValueError("invalid project")
+    return project, resolved
+
+
 def create_project_directory(root, project):
     candidate = resolve_project_path(root, project, must_exist=False)
     resolved_root = _resolved_project_root(root)

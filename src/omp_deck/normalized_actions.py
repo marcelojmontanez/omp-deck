@@ -30,6 +30,7 @@ _PROJECT_ROUTE = re.compile(r"/api/projects/(.+)/sessions")
 _READ_ROUTE = re.compile(r"/api/sessions/([^/]+)/read")
 _REMOVE_ROUTE = re.compile(r"/api/sessions/([^/]+)/remove")
 _PRESENTATION_ROUTE = re.compile(r"/api/sessions/([^/]+)/presentation")
+_FRESH_ROUTE = re.compile(r"/api/sessions/([^/]+)/fresh")
 
 _DELIVERY_ROUTE = re.compile(r"/api/sessions/([^/]+)/deliveries")
 _DELIVERY_DISMISS_ROUTE = re.compile(r"/api/sessions/([^/]+)/deliveries/([^/]+)/dismiss")
@@ -44,6 +45,7 @@ class NormalizedActionDispatcher:
         session_root,
         launch_project,
         dispatch_command,
+        start_fresh,
         terminal_manager,
         delivery_recoveries,
         dismiss_delivery,
@@ -53,6 +55,7 @@ class NormalizedActionDispatcher:
         self.session_root = session_root
         self.launch_project = launch_project
         self.dispatch_command = dispatch_command
+        self.start_fresh = start_fresh
         self.terminal_manager = terminal_manager
         self.delivery_recoveries = delivery_recoveries
         self.dismiss_delivery = dismiss_delivery
@@ -75,6 +78,9 @@ class NormalizedActionDispatcher:
         match = _READ_ROUTE.fullmatch(request_path)
         if match:
             return self._mark_read(match, data)
+        match = _FRESH_ROUTE.fullmatch(request_path)
+        if match:
+            return self._fresh(match, data)
         match = _UI_ROUTE.fullmatch(request_path)
         if match:
             return self._ui_action(match, data)
@@ -154,6 +160,18 @@ class NormalizedActionDispatcher:
             raise ValueError("create must be boolean")
         result = self.launch_project(project, request_id, create, _optional_title(data))
         return (201 if result["status"] == "accepted" else 502), result
+
+    def _fresh(self, match, data):
+        if set(data) != {"requestId"}:
+            raise ValueError("request body must contain only requestId")
+        session_id = decoded_segment(match.group(1), "session")
+        request_id = client_request_id(data)
+        result = self.start_fresh(session_id, request_id)
+        if result["status"] == "accepted":
+            return 201, result
+        if result.get("errorCode") in {"source_settings_unavailable", "invalid_project"}:
+            return 409, result
+        return 502, result
 
     def _mark_read(self, match, data):
         session_id = decoded_segment(match.group(1), "session")

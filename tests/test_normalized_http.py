@@ -24,6 +24,7 @@ class _Manager:
         self.calls = []
         self.removals = []
         self.imports = []
+        self.freshes = []
         self.import_error = None
         self._requests = {}
 
@@ -44,6 +45,14 @@ class _Manager:
 
     def command(self, session_id, request_id, action, payload):
         return self._dispatch(session_id, request_id, action, payload)
+
+    def fresh_request(self, source_session_id, request_id):
+        self.freshes.append((source_session_id, request_id))
+        return {
+            "requestId": request_id,
+            "status": "accepted",
+            "session": {"id": "fresh-session", "messages": []},
+        }
 
     def add_collab_request(self, request_id, link, title=None):
         self.imports.append((request_id, link, title))
@@ -237,6 +246,43 @@ class NormalizedHttpTests(unittest.TestCase):
             (status, forbidden),
             (403, {"error": "authentication and CSRF token required"}),
         )
+
+    def test_start_fresh_route_returns_new_normalized_session_and_rejects_extra_input(self):
+        status, _, payload = self.post(
+            "/api/sessions/terminal-1/fresh",
+            {"requestId": "fresh-terminal"},
+        )
+
+        self.assertEqual(status, 201)
+        self.assertEqual(
+            payload,
+            {
+                "requestId": "fresh-terminal",
+                "status": "accepted",
+                "session": {"id": "fresh-session", "messages": []},
+            },
+        )
+
+        status, _, _ = self.post(
+            "/api/sessions/terminal-1/fresh",
+            {"requestId": "fresh-terminal", "title": "not accepted"},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(len(self.rpc.freshes), 1)
+        for headers in (
+            {"Origin": self.origin, "Sec-Fetch-Site": "same-origin"},
+            {"Cookie": self.cookie, "Origin": self.origin, "Sec-Fetch-Site": "same-origin"},
+            {"Cookie": self.cookie, "Origin": "https://hostile.example", "Sec-Fetch-Site": "cross-site"},
+        ):
+            with self.subTest(headers=headers):
+                status, _, _ = self.request(
+                    "POST",
+                    "/api/sessions/terminal-1/fresh",
+                    {"requestId": "unauthorized-fresh"},
+                    headers,
+                )
+                self.assertEqual(status, 403)
+        self.assertEqual(len(self.rpc.freshes), 1)
 
     def test_invalid_titles_return_validation_errors_without_dispatch(self):
         for route in ("/api/projects/demo/sessions", "/api/terminal-sessions/collab"):

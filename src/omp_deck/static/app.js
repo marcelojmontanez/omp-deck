@@ -7,6 +7,7 @@ const state = {
   nodes: new Map(),
   reloadRequiredMachines: new Set(),
   selectedId: null,
+  navigationRevision: 0,
   selectedMachineId: null,
   coordinatorAvailable: true,
   pendingSelection: initialSession,

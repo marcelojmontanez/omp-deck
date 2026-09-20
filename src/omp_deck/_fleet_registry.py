@@ -15,6 +15,8 @@ def registry_session(record: Mapping[str, Any], existing: Mapping[str, Any] | No
         raise ValueError("registry project must be an object")
     adapter_kind = str(record["adapterKind"])
     live = existing is not None and existing["transport"]["instanceId"] is not None
+    capabilities = platform_capabilities(adapter_kind)
+    capabilities["startFresh"] = False
     session = {
         "id": str(record["id"]),
         "ompSessionId": record.get("ompSessionId"),
@@ -23,7 +25,7 @@ def registry_session(record: Mapping[str, Any], existing: Mapping[str, Any] | No
         "state": "disconnected",
         "transport": _disconnected_transport(adapter_kind),
         "historyError": None,
-        "capabilities": platform_capabilities(adapter_kind),
+        "capabilities": capabilities,
         "attachmentLimits": platform_attachment_limits(adapter_kind),
         "messages": [],
         "streamingMessage": None,
@@ -49,6 +51,8 @@ def registry_session(record: Mapping[str, Any], existing: Mapping[str, Any] | No
         "_readRevision": 0,
         "_readCursor": None,
     }
+    if live:
+        session["capabilities"]["startFresh"] = bool(existing.get("capabilities", {}).get("startFresh", False))
     if existing is not None:
         session.update(_retained_session_state(existing))
     if live:

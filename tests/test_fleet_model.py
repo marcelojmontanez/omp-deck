@@ -181,6 +181,7 @@ class FleetModelTests(unittest.TestCase):
         self.assertEqual(session["thinking"], "high")
         self.assertEqual(session["thinkingLevels"], ["off", "low", "medium", "high", "xhigh"])
         self.assertTrue(session["capabilities"]["setThinking"])
+        self.assertTrue(session["capabilities"]["startFresh"])
         self.assertEqual(session["messages"][0]["role"], "user")
         self.assertEqual(session["messages"][0]["content"], [{"type": "text", "text": "hello"}])
         self.assertIn("id", session["messages"][0])
@@ -215,6 +216,7 @@ class FleetModelTests(unittest.TestCase):
         session = model.get("deck-1")
         self.assertIsNone(session["thinking"])
         self.assertEqual(session["thinkingLevels"], ["off", "low", "high"])
+        self.assertFalse(session["capabilities"]["startFresh"])
 
     def test_lifecycle_uses_runtime_ownership_and_managed_intent(self):
         model = FleetModel()

@@ -126,6 +126,10 @@ def launch_rpc_project(project, request_id, create=False, title=None):
     )
 
 
+def start_fresh_session(source_session_id, request_id):
+    return rpc_manager().fresh_request(source_session_id, request_id)
+
+
 def dispatch_session_command(session_id, request_id, action, payload):
     session = _fleet_model.get(session_id)
     if session["transport"]["kind"] == "rpc":
@@ -172,6 +176,7 @@ def action_dispatcher():
         session_root=SESSION_ROOT,
         launch_project=launch_rpc_project,
         dispatch_command=dispatch_session_command,
+        start_fresh=start_fresh_session,
         terminal_manager=terminal_manager,
         delivery_recoveries=lambda session_id: delivery_manager(session_id).deliveries(session_id),
         dismiss_delivery=lambda session_id, request_id: delivery_manager(session_id).dismiss_delivery(

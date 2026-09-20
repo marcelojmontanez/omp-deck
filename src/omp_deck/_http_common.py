@@ -31,7 +31,7 @@ def node_preflight_route_known(path, method):
         path == "/api/terminal-sessions/collab"
         or re.fullmatch(r"/api/projects/.+/sessions", path) is not None
         or re.fullmatch(
-            r"/api/sessions/[^/]+/(messages|follow-ups|interrupt|shutdown|model|thinking|branch|switch|resume|compact|read|remove|presentation|draft)",
+            r"/api/sessions/[^/]+/(messages|follow-ups|interrupt|shutdown|model|thinking|branch|switch|resume|compact|fresh|read|remove|presentation|draft)",
             path,
         )
         is not None

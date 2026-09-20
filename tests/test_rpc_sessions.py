@@ -30,6 +30,7 @@ class _OfficialState:
     message_count: int = 0
     queued_message_count: int = 0
     thinking_level: str = "medium"
+    model: object = None
 
 
 class _Outcome(enum.Enum):
@@ -75,6 +76,12 @@ class FakeRpcClient:
         self.state = _OfficialState(
             session_file=str(self.session_root / f"lazy_omp-transient-{self.instance_number}.jsonl")
         )
+        if isinstance(kwargs.get("provider"), str) and isinstance(kwargs.get("model"), str):
+            self.state = dataclasses.replace(
+                self.state,
+                model={"provider": kwargs["provider"], "id": kwargs["model"]},
+                thinking_level=kwargs.get("thinking"),
+            )
         type(self).instances.append(self)
         self.get_state_entered: Event | None = None
         self.get_state_release: Event | None = None
@@ -303,7 +310,7 @@ class TestRpcSessionManager(unittest.TestCase):
         FakeRpcClient.branch_entered = None
         FakeRpcClient.ui_response_entered = None
         FakeRpcClient.branch_release = None
-        self.rpc_patch = patch("omp_deck.rpc_sessions.RpcClient", FakeRpcClient)
+        self.rpc_patch = patch("omp_deck._rpc_client_factory.RpcClient", FakeRpcClient)
         self.rpc_patch.start()
         self.addCleanup(self.rpc_patch.stop)
         self.manager = RpcSessionManager(self.settings, self.model, self.registry)
@@ -312,6 +319,16 @@ class TestRpcSessionManager(unittest.TestCase):
 
     def launch(self):
         return self.manager.launch("project", self.project, title="RPC test")
+
+    def configured_source(self, *, provider="ollama", model="omp-devstral:latest", thinking="high"):
+        source = self.launch()
+        client = FakeRpcClient.instances[-1]
+        client.state = dataclasses.replace(
+            client.state,
+            model={"provider": provider, "id": model},
+            thinking_level=thinking,
+        )
+        return self.manager.refresh(source["id"])
 
     def recover(self, manager, model, timeout=2):
         desired = [
@@ -326,7 +343,7 @@ class TestRpcSessionManager(unittest.TestCase):
         while desired:
             transports = {session_id: model.get(session_id)["transport"] for session_id in desired}
             if all(
-                session_id in updated and transport["status"] != "reconnecting"
+                session_id in updated and transport["status"] not in {"connecting", "reconnecting"}
                 for session_id, transport in transports.items()
             ):
                 return transports
@@ -370,6 +387,216 @@ class TestRpcSessionManager(unittest.TestCase):
         self.assertEqual(FakeRpcClient.instances[-1].new_session_calls, 1)
         self.assertTrue(record["desiredRpcRunning"])
         self.assertEqual(session["transport"]["status"], "connected")
+
+    def test_start_fresh_preserves_settings_and_source_and_replays_duplicate(self):
+        source = self.configured_source()
+        source_client = FakeRpcClient.instances[-1]
+        source_client.state = dataclasses.replace(source_client.state, message_count=1)
+        source_before = self.manager.refresh(source["id"])
+
+        first = self.manager.fresh_request(source["id"], "fresh-request")
+        duplicate = self.manager.fresh_request(source["id"], "fresh-request")
+
+        fresh = first["session"]
+        self.assertEqual(first["status"], "accepted")
+        self.assertEqual(duplicate["session"]["id"], fresh["id"])
+        self.assertNotEqual(fresh["id"], source["id"])
+        self.assertNotEqual(fresh["ompSessionId"], source["ompSessionId"])
+        self.assertEqual(fresh["project"], source["project"])
+        self.assertEqual(fresh["model"], source["model"])
+        self.assertEqual(fresh["thinking"], source["thinking"])
+        self.assertEqual(fresh["messages"], [])
+        self.assertEqual(self.model.get(source["id"]), source_before)
+        self.assertEqual(len(FakeRpcClient.instances), 2)
+
+    def test_concurrent_fresh_retry_launches_once(self):
+        source = self.configured_source()
+        entered, release = Event(), Event()
+        original_start = FakeRpcClient.start
+        outcomes, errors = [], []
+
+        def delayed_start(client):
+            if client.instance_number == 2:
+                entered.set()
+                if not release.wait(3):
+                    raise TimeoutError("fresh launch was not released")
+            return original_start(client)
+
+        def fresh():
+            try:
+                outcomes.append(self.manager.fresh_request(source["id"], "concurrent-fresh"))
+            except Exception as error:
+                errors.append(error)
+
+        first = Thread(target=fresh)
+        second = Thread(target=fresh)
+        with patch.object(FakeRpcClient, "start", delayed_start):
+            first.start()
+            self.assertTrue(entered.wait(2))
+            second.start()
+            source_client = FakeRpcClient.instances[0]
+            source_client.state = dataclasses.replace(
+                source_client.state,
+                model={"provider": "changed", "id": "later-model"},
+                thinking_level="low",
+            )
+            self.manager.refresh(source["id"])
+            release.set()
+            first.join(4)
+            second.join(4)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(outcomes), 2)
+        self.assertEqual(outcomes[0]["session"]["id"], outcomes[1]["session"]["id"])
+        self.assertEqual(len(FakeRpcClient.instances), 2)
+        self.assertEqual(
+            outcomes[0]["session"]["model"],
+            {"provider": "ollama", "id": "omp-devstral:latest"},
+        )
+        self.assertEqual(outcomes[0]["session"]["thinking"], "high")
+        self.assertEqual(
+            self.model.get(source["id"])["model"],
+            {"provider": "changed", "id": "later-model"},
+        )
+
+    def test_empty_fresh_session_recovers_native_model_and_thinking(self):
+        persisted = {}
+        start = FakeRpcClient.start
+
+        def set_model(client, provider, model):
+            client.state = dataclasses.replace(client.state, model={"provider": provider, "id": model})
+            persisted[client.state.session_file] = client.state
+
+        def set_thinking(client, level):
+            client.state = dataclasses.replace(client.state, thinking_level=level)
+            persisted[client.state.session_file] = client.state
+
+        def resume(client):
+            extra_args = client.kwargs.get("extra_args", ())
+            if extra_args:
+                saved = persisted.get(str(Path(extra_args[1]).resolve()))
+                client.state = dataclasses.replace(
+                    client.state,
+                    model=saved.model if saved else {"provider": "default", "id": "fallback"},
+                    thinking_level=saved.thinking_level if saved else "medium",
+                )
+            return start(client)
+
+        with (
+            patch.object(FakeRpcClient, "set_model", set_model),
+            patch.object(FakeRpcClient, "set_thinking_level", set_thinking),
+            patch.object(FakeRpcClient, "start", resume),
+        ):
+            source = self.configured_source(thinking="low")
+            fresh = self.manager.fresh_request(source["id"], "durable-fresh")["session"]
+            self.manager.close()
+            recovered_model = FleetModel()
+            self.manager = RpcSessionManager(self.settings, recovered_model, self.registry)
+            self.recover(self.manager, recovered_model)
+            recovered = self.manager.refresh(fresh["id"])
+
+        self.assertEqual(recovered["transport"]["status"], "connected", recovered["transport"])
+        self.assertEqual(recovered["ompSessionId"], fresh["ompSessionId"])
+        self.assertEqual(recovered["model"], source["model"])
+        self.assertEqual(recovered["thinking"], "low")
+        self.assertEqual(recovered["messages"], [])
+
+    def test_fresh_replay_survives_manager_restart_and_source_removal(self):
+        source = self.configured_source()
+        accepted = self.manager.fresh_request(source["id"], "restart-fresh")
+        self.manager.close()
+        self.registry.remove(source["id"])
+        restarted_model = FleetModel()
+        self.manager = RpcSessionManager(self.settings, restarted_model, self.registry)
+
+        replay = self.manager.fresh_request(source["id"], "restart-fresh")
+
+        self.assertEqual(replay["status"], "accepted")
+        self.assertEqual(replay["session"]["id"], accepted["session"]["id"])
+        self.assertEqual(len(FakeRpcClient.instances), 2)
+
+    def test_fresh_rejects_unknown_settings_without_starting_native_process(self):
+        source = self.launch()
+
+        first = self.manager.fresh_request(source["id"], "missing-settings")
+        duplicate = self.manager.fresh_request(source["id"], "missing-settings")
+
+        expected = {
+            "requestId": "missing-settings",
+            "status": "failed",
+            "errorCode": "source_settings_unavailable",
+        }
+        self.assertEqual(first, expected)
+        self.assertEqual(duplicate, expected)
+        self.assertEqual(len(FakeRpcClient.instances), 1)
+
+    def test_fresh_rejects_project_outside_configured_root(self):
+        source = self.configured_source()
+        outside = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        with self.model._lock:
+            self.model._sessions[source["id"]]["project"] = {
+                "name": "outside",
+                "path": str(outside),
+            }
+
+        result = self.manager.fresh_request(source["id"], "escaped-project")
+
+        self.assertEqual(
+            result,
+            {
+                "requestId": "escaped-project",
+                "status": "failed",
+                "errorCode": "invalid_project",
+            },
+        )
+        self.assertEqual(len(FakeRpcClient.instances), 1)
+
+    def test_fresh_closes_and_removes_native_session_with_mismatched_settings(self):
+        source = self.configured_source()
+        original_state = FakeRpcClient.get_state
+
+        def mismatched_state(client):
+            state = original_state(client)
+            if client.instance_number == 2:
+                return dataclasses.replace(
+                    state,
+                    model={"provider": "fallback", "id": "other-model"},
+                )
+            return state
+
+        with patch.object(FakeRpcClient, "get_state", mismatched_state):
+            result = self.manager.fresh_request(source["id"], "mismatched-fresh")
+
+        self.assertEqual(
+            result,
+            {
+                "requestId": "mismatched-fresh",
+                "status": "failed",
+                "errorCode": "settings_mismatch",
+            },
+        )
+        self.assertTrue(FakeRpcClient.instances[-1].stopped)
+        self.assertEqual([record["id"] for record in self.registry.load()], [source["id"]])
+        with self.assertRaises(KeyError):
+            self.model.get("deck-second-id")
+
+    def test_fresh_native_startup_failure_is_closed_and_durably_replayed(self):
+        source = self.configured_source()
+        FakeRpcClient.fail_start = True
+
+        first = self.manager.fresh_request(source["id"], "failed-fresh-start")
+        duplicate = self.manager.fresh_request(source["id"], "failed-fresh-start")
+
+        expected = {
+            "requestId": "failed-fresh-start",
+            "status": "failed",
+            "errorCode": "launch_failed",
+        }
+        self.assertEqual(first, expected)
+        self.assertEqual(duplicate, expected)
+        self.assertTrue(FakeRpcClient.instances[-1].stopped)
+        self.assertEqual(len(FakeRpcClient.instances), 2)
+        self.assertIsNone(self.manager._runtime_or_none("deck-second-id"))
 
     def test_refresh_during_startup_does_not_stop_or_replace_the_launching_process(self):
         start_entered, release_start, started, refresh_entered = (Event() for _ in range(4))

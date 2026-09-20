@@ -9,6 +9,7 @@ import test from 'node:test';
 import puppeteer from 'puppeteer';
 import {verifyComposerParity} from './composer_parity_cases.mjs';
 import {verifySessionActions} from './session_action_cases.mjs';
+import {verifyFreshSessionAction} from './fresh_session_cases.mjs';
 import {verifyComposerDeliveryModes} from './composer_delivery_mode_cases.mjs';
 import {verifyComposerFeedback} from './composer_feedback_cases.mjs';
 import {verifyComposerDrafts} from './composer_draft_cases.mjs';
@@ -327,6 +328,7 @@ test('pairs a real Chromium client and refreshes authenticated project data', as
   }
 
   await verifyComposerParity(page);
+  await verifyFreshSessionAction(page);
   await verifyComposerDeliveryModes(page);
   await verifyComposerFeedback(page);
   await verifyComposerDrafts(page);

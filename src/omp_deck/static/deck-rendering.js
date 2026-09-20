@@ -377,6 +377,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
   function selectAgent(id, {pushHistory = true} = {}) {
     const agent = state.agents.find(candidate => candidate.id === id);
     if (!canOpen(agent)) return false;
+    if (state.selectedId !== id) state.navigationRevision += 1;
     state.showArchive = false;
     state.selectedId = id;
     state.pendingSelection = null;
@@ -394,6 +395,7 @@ function createDeckRendering({state, el, thinkingOverrides, getComposer}) {
   }
 
   function showMenu() {
+    if (state.selectedId) state.navigationRevision += 1;
     if (state.selectedId) ompDeckImages.releaseOwner(state.selectedId);
     state.selectedId = null;
     getComposer().select(null);

@@ -7,6 +7,7 @@ from omp_deck.projects import (
     create_project_directory,
     list_launchable_projects,
     resolve_project_path,
+    resolve_project_reference,
 )
 
 
@@ -97,6 +98,34 @@ class ProjectPathTests(unittest.TestCase):
             created.symlink_to(root, target_is_directory=True)
             with self.assertRaisesRegex(ValueError, "invalid project|already exists"):
                 create_project_directory(root, "parent/new")
+
+    def test_absolute_project_reference_derives_nested_name_and_rejects_escape(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / "projects"
+            nested = root / "team" / "service"
+            outside = base / "outside"
+            nested.mkdir(parents=True)
+            outside.mkdir()
+
+            self.assertEqual(
+                resolve_project_reference(root, str(nested)),
+                ("team/service", nested),
+            )
+            with self.assertRaisesRegex(ValueError, "invalid project"):
+                resolve_project_reference(root, str(outside))
+
+    @unittest.skipIf(os.name == "nt", "creating symlinks requires Windows developer mode")
+    def test_absolute_project_reference_rejects_symlink_alias(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            project = root / "project"
+            alias = root / "alias"
+            project.mkdir()
+            alias.symlink_to(project, target_is_directory=True)
+
+            with self.assertRaisesRegex(ValueError, "invalid project"):
+                resolve_project_reference(root, str(alias))
 
     def test_discovery_depth_bounds_nested_project_search(self):
         with tempfile.TemporaryDirectory() as directory:

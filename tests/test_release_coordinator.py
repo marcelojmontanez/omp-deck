@@ -5,9 +5,12 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from tools.release_lib import coordinator, coordinator_prepare
@@ -15,6 +18,33 @@ from tools.release_lib import coordinator, coordinator_prepare
 
 @unittest.skipIf(os.name == "nt", "coordinator release guard targets Linux services")
 class CoordinatorReleaseTests(unittest.TestCase):
+    def test_health_waits_for_service_readiness_after_restart(self) -> None:
+        statuses = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                status = 503 if not statuses else 200
+                statuses.append(status)
+                self.send_response(status)
+                self.end_headers()
+                self.wfile.write(b'{"ok":true,"configuration":true,"authentication":true}')
+
+            def log_message(self, *_args) -> None:
+                pass
+
+        with HTTPServer(("127.0.0.1", 0), Handler) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                with mock.patch.object(
+                    coordinator, "_native_profile", return_value=SimpleNamespace(port=server.server_port)
+                ):
+                    coordinator._health({"port": server.server_port})
+                self.assertEqual(statuses, [503, 200])
+            finally:
+                server.shutdown()
+                thread.join(timeout=2)
+
     def test_unit_parser_requires_one_exact_execstart(self) -> None:
         expected = [
             "/srv/releases/old/bin/python",

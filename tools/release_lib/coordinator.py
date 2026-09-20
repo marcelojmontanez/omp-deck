@@ -386,19 +386,10 @@ def _systemctl(profile: dict[str, Any], *arguments: str) -> None:
 
 
 def _health(profile: dict[str, Any]) -> None:
-    request = urllib.request.Request(
-        f"http://127.0.0.1:{profile['port']}/healthz",
-        headers={"Host": f"127.0.0.1:{profile['port']}"},
-    )
     try:
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(request, timeout=10) as response:
-            value = json.loads(response.read(64 * 1024))
-            status = response.status
-    except Exception as error:
+        node_common.health(_native_profile(profile))
+    except node_common.ReleaseError as error:
         raise CoordinatorError("coordinator health check failed") from error
-    if status != 200 or not isinstance(value, dict) or value.get("ok") is not True:
-        raise CoordinatorError("coordinator health check failed")
 
 
 def _deploy(

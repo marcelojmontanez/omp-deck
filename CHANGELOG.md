@@ -37,6 +37,7 @@
 ### Fixed
 
 - Fix coordinator upgrades failing while preparing a new release environment.
+- Wait for coordinator health during startup and rollback instead of treating an initial unavailable response as a failed release.
 - Preserve combined restored drafts, wait for selected images before sending, retain image-read failures across redraws, and clear the visible composer when local drafts are cleared.
 - Bound stalled Ask submissions, restore their controls after uncertainty, and preserve native Collab single-checkbox behavior and remaining pending requests.
 - Refresh usage on normal dashboard recovery; preserve structured task text, linked inline code, conversation selection, accessible unread labels, and image previews at cache capacity.

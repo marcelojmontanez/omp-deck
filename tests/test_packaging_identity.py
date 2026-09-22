@@ -13,7 +13,7 @@ from packaging.version import Version
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN_PACKAGING_TESTS = os.environ.get("OMP_DECK_PACKAGING_TESTS") == "1"
-PRODUCTION_VERSION_BASELINE = "464a4e093b9e2665796a521fecb4f6a9be4668f3"
+PRODUCTION_VERSION_BASELINE = "fe1754b15098937b6bb82610a782782dcf58bfa6"
 
 
 @unittest.skipUnless(RUN_PACKAGING_TESTS, "set OMP_DECK_PACKAGING_TESTS=1 to exercise isolated artifact builds")

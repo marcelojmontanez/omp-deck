@@ -21,7 +21,7 @@ _IDENTITY_FILE = _ROOT / "src" / "omp_deck" / "_build_identity.py"
 _PACKAGE_ROOT = _ROOT / "src" / "omp_deck"
 _SOURCE_MANIFEST = _ROOT / "_source_manifest.json"
 _FULL_REVISION = re.compile(r"[0-9a-f]{40}")
-_VERSION_BASELINE_REVISION = "464a4e093b9e2665796a521fecb4f6a9be4668f3"
+_VERSION_BASELINE_REVISION = "fe1754b15098937b6bb82610a782782dcf58bfa6"
 _VERSION_FAMILY = "1.5"
 _FORBIDDEN_OVERRIDE_PREFIXES = (
     "SETUPTOOLS_SCM_PRETEND_",

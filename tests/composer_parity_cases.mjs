@@ -22,6 +22,9 @@ export async function verifyComposerParity(page) {
       detailScroll: el.detail.scrollTop,
       activityScroll: el.activity.scrollTop,
     };
+    // Native dialogs emit window focus on Linux. This fixture owns synthetic
+    // sessions; foreground recovery is exercised against real servers elsewhere.
+    window.removeEventListener('focus', recoverVisibleConnections);
 
     const agent = {
       id: fixtureId,
@@ -232,7 +235,13 @@ export async function verifyComposerParity(page) {
     await page.evaluate(() => {
       const request = ompDeckApi.request;
       ompDeckApi.request = (path, options) => path.endsWith('/compact')
-        ? new Promise(resolve => { globalThis.__finishCommand = resolve; })
+        ? new Promise(resolve => {
+          const {requestId} = JSON.parse(options.body);
+          globalThis.__finishCommand = () => resolve({
+            ok: true, status: 202,
+            json: async () => ({requestId, status: 'accepted'}),
+          });
+        })
         : request(path, options);
     });
     page.once('dialog', dialog => { void dialog.accept(); });
@@ -242,8 +251,9 @@ export async function verifyComposerParity(page) {
     await page.keyboard.press('End');
     await page.keyboard.type('x');
     await page.keyboard.press('Backspace');
-    await page.evaluate(() => globalThis.__finishCommand({ok: true, status: 202}));
-    await nextPaint(page);
+    await page.evaluate(() => globalThis.__finishCommand());
+    await page.waitForFunction(() => document.querySelector('[data-session-action="compact"]')
+      .textContent.includes('accepted'));
     assert.equal(await page.$eval('#message', node => node.value), '/compact',
       'delayed acceptance must not clear a newer edit, even when its text matches');
 
@@ -276,6 +286,7 @@ export async function verifyComposerParity(page) {
       const saved = globalThis.__composerParityRestore;
       if (!saved) return;
       ompDeckApi.request = saved.request;
+      window.addEventListener('focus', recoverVisibleConnections);
       const validIds = saved.state.agents.map(agent => agent.id);
       composer.prune(validIds);
       Object.assign(state, saved.state);

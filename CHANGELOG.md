@@ -38,6 +38,8 @@
 
 ### Fixed
 
+- Fix Git-based installation with uv failing before setup. Installation instructions now select Python 3.12 explicitly and list Git as a prerequisite.
+- Restrict package metadata to the supported Python 3.11 and 3.12 versions. Reinstall with `--python 3.12` if an existing tool environment uses a newer interpreter.
 - Require `packaging` 24.2 or newer for source builds and development checks, preventing license-metadata failures in environments with older packaging tools.
 - Reduce mobile conversation lag by keeping unchanged messages and visible images stable during updates, and unloading off-screen thumbnails without losing their scroll position or cached download.
 - Restore immediate greyed-out message previews after Send, including while saved drafts are being cleared. Failed preparation preserves unsent text and images.

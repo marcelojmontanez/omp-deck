@@ -8,6 +8,7 @@ Deck is not a Collab replacement. It does not expose rooms, invite links, partic
 
 - Linux with a systemd user session, macOS with a logged-in graphical user session, or native Windows 11 with Task Scheduler, for managed background service operation
 - Python 3.11 or 3.12
+- Git on `PATH`, required to install Deck and its pinned OMP RPC dependency
 - stock OMP on `PATH` or in its official per-user install location; compatibility is checked through its documented protocols and advertised capabilities, not an exact-version allowlist
 - Bun 1.3.14 or newer for Linux and macOS OMP extension installation and removal
 - Tailscale only for the optional supported phone-access path
@@ -51,12 +52,12 @@ An older extension already loaded in a terminal may disconnect while synchronizi
 
 ### Linux and macOS
 
-Install through a standard isolated Python tool manager:
+Install through a standard isolated Python tool manager. These commands select Python 3.12 explicitly; Python 3.11 is also supported. Install Git first, and install Python 3.12 separately when using `pipx`:
 
 ```bash
-uv tool install 'git+https://github.com/marcelojmontanez/omp-deck.git'
+uv tool install --python 3.12 'git+https://github.com/marcelojmontanez/omp-deck.git'
 # or
-pipx install 'git+https://github.com/marcelojmontanez/omp-deck.git'
+pipx install --python 3.12 'git+https://github.com/marcelojmontanez/omp-deck.git'
 omp-deck setup
 ```
 
@@ -84,10 +85,12 @@ Managed RPC, Collab, Unix-socket terminal discovery, image attachments, setup ro
 
 ### Native Windows
 
-Install from PowerShell with `uv tool` or `pipx`, then run setup:
+Install Git first, then install from PowerShell with `uv tool` or `pipx` using Python 3.12:
 
 ```powershell
-uv tool install 'git+https://github.com/marcelojmontanez/omp-deck.git'
+uv tool install --python 3.12 'git+https://github.com/marcelojmontanez/omp-deck.git'
+# or, with Python 3.12 already installed:
+pipx install --python 3.12 'git+https://github.com/marcelojmontanez/omp-deck.git'
 omp-deck setup
 ```
 
@@ -482,8 +485,8 @@ uv tool upgrade omp-deck
 omp-deck setup
 
 # If setup reports rollback, restore a schema-compatible previous package:
-uv tool install --force 'git+https://github.com/marcelojmontanez/omp-deck.git@PREVIOUS_REVISION'
-# or: pipx install --force 'git+https://github.com/marcelojmontanez/omp-deck.git@PREVIOUS_REVISION'
+uv tool install --python 3.12 --force 'git+https://github.com/marcelojmontanez/omp-deck.git@PREVIOUS_REVISION'
+# or: pipx install --python 3.12 --force 'git+https://github.com/marcelojmontanez/omp-deck.git@PREVIOUS_REVISION'
 ```
 
 `service remove` removes only Deck's generated user service. `purge` removes the service, official plugin registration, configuration, and state only after strict ownership and path checks:

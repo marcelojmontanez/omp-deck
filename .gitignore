@@ -9,3 +9,5 @@ node_modules/
 .DS_Store
 src/omp_deck/_build_identity.py
 _source_manifest.json
+# uv's VCS checkout marker is not a source input.
+/.ok

@@ -120,7 +120,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python3 -m pip install build 'packaging>=24.2' 'setuptools>=77.0.3'
+      - run: python3 -m pip install build 'packaging>=24.2' 'setuptools>=77.0.3' uv==0.12.10
       - name: Seed excluded plugin dependencies
         run: mkdir -p src/omp_deck/plugin/node_modules/injected && printf 'SHOULD_NOT_SHIP = True\n' > src/omp_deck/plugin/node_modules/injected/sentinel.py
       - run: python3 -m build
@@ -144,6 +144,16 @@ jobs:
           python3 -m pip install --force-reinstall --no-deps dist/*.whl
           python3 -m pip uninstall --yes omp-deck
           python3 -c "import importlib.util; assert importlib.util.find_spec('omp_deck') is None"
+      - name: Exercise documented uv Git installation
+        env:
+          UV_CACHE_DIR: ${{ runner.temp }}/deck-uv-cache
+          UV_TOOL_DIR: ${{ runner.temp }}/deck-uv-tools
+          UV_TOOL_BIN_DIR: ${{ runner.temp }}/deck-uv-bin
+        run: |
+          uv tool install --python 3.12 "git+file://$GITHUB_WORKSPACE"
+          "$UV_TOOL_BIN_DIR/omp-deck" --help
+          "$UV_TOOL_DIR/omp-deck/bin/python" -c "import os, omp_deck; identity = omp_deck.build_identity(); assert identity['revision'] == os.environ['GITHUB_SHA'], identity"
+          uv tool uninstall omp-deck
 
   plugin:
     name: OMP plugin gate

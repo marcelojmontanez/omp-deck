@@ -409,7 +409,7 @@ class WindowsTaskIntegrationTests(unittest.TestCase):
 class WindowsRpcIntegrationTests(unittest.TestCase):
     def test_managed_rpc_starts_and_stops_official_omp(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             project_root = root / "projects"
             project = project_root / "smoke"
             project.mkdir(parents=True)

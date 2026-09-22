@@ -4,7 +4,6 @@ import base64
 import json
 import os
 import threading
-import time
 import unittest
 from collections import deque
 from unittest import mock
@@ -434,24 +433,31 @@ class CollabAdapterTests(unittest.TestCase):
         adapter.close()
 
     def test_startup_wait_extends_for_timely_snapshot_progress(self):
-        class DelayedSocket(Socket):
-            def recv(self, timeout=None):
-                if self.incoming:
-                    time.sleep(0.02)
-                return super().recv(timeout)
+        frames = iter(
+            [
+                producer_host({**WELCOME, "entryCount": 0}),
+                producer_host({"t": "snapshot-chunk", "entries": [], "final": False}),
+                producer_host({"t": "snapshot-chunk", "entries": [], "final": False}),
+                producer_host({"t": "snapshot-chunk", "entries": [], "final": True}),
+            ]
+        )
+        adapter, _ = self.make([])
+        elapsed = 0.0
 
-        frames = [
-            producer_host({**WELCOME, "entryCount": 0}),
-            producer_host({"t": "snapshot-chunk", "entries": [], "final": False}),
-            producer_host({"t": "snapshot-chunk", "entries": [], "final": False}),
-            producer_host({"t": "snapshot-chunk", "entries": [], "final": True}),
-        ]
-        sock = DelayedSocket(frames)
-        adapter = CollabAdapter(link(), "guest", connector=lambda url, **opts: sock)
-        with mock.patch("omp_deck.collab_adapter.WELCOME_TIMEOUT", 0.05):
-            adapter.start()
-            self.assertEqual(adapter.transport_status, "connected")
-            adapter.close()
+        def deliver_frame(timeout=None):
+            nonlocal elapsed
+            elapsed += 0.02
+            adapter._receive(next(frames))
+            return True
+
+        # Advance the condition's clock and deliver real frames without depending
+        # on a CI runner scheduling its reader thread inside a 50 ms idle window.
+        with (
+            mock.patch("threading._time", side_effect=lambda: elapsed),
+            mock.patch.object(adapter._startup._condition, "wait", side_effect=deliver_frame),
+        ):
+            self.assertTrue(adapter._startup.wait(0.05))
+        self.assertEqual(adapter.transport_status, "connected")
 
     def test_backoff_jitter_range_and_snapshot_resets_delay(self):
         class StopAfterWaits:

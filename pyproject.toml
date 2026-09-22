@@ -1,5 +1,5 @@
 [build-system]
-requires = ["packaging>=24", "setuptools>=77.0.3"]
+requires = ["packaging>=24.2", "setuptools>=77.0.3"]
 build-backend = "_build_backend"
 backend-path = ["."]
 
@@ -31,7 +31,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-dev = ["build>=1.2,<2", "packaging>=24", "ruff>=0.13", "setuptools>=77.0.3"]
+dev = ["build>=1.2,<2", "packaging>=24.2", "ruff>=0.13", "setuptools>=77.0.3"]
 
 [project.urls]
 Homepage = "https://github.com/marcelojmontanez/omp-deck"

@@ -130,6 +130,11 @@ class BlobDirectoryResolutionTests(unittest.TestCase):
         candidate = root / f"{self.digest}.png"
         candidate.write_bytes(self.payload)
         candidate.chmod(0o600)
+        if os.name == "nt":
+            from omp_deck._windows_security import secure_created_path
+
+            secure_created_path(root)
+            secure_created_path(candidate)
 
     def test_reads_blob_from_official_named_profile_directory(self):
         blobs = self.root / ".omp" / "profiles" / "work" / "agent" / "blobs"
@@ -150,6 +155,7 @@ class BlobDirectoryResolutionTests(unittest.TestCase):
         self._write_blob(blobs)
         with (
             patch.object(attachments, "BLOB_ROOT", None),
+            patch.object(attachments.sys, "platform", "linux"),
             patch.object(attachments.Path, "home", return_value=self.root),
             patch.dict(os.environ, {"XDG_DATA_HOME": str(data_home)}, clear=True),
         ):

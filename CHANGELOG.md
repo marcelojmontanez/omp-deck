@@ -38,6 +38,7 @@
 
 ### Fixed
 
+- Require `packaging` 24.2 or newer for source builds and development checks, preventing license-metadata failures in environments with older packaging tools.
 - Reduce mobile conversation lag by keeping unchanged messages and visible images stable during updates, and unloading off-screen thumbnails without losing their scroll position or cached download.
 - Restore immediate greyed-out message previews after Send, including while saved drafts are being cleared. Failed preparation preserves unsent text and images.
 - Keep accepted Send and Steer previews visible until the corresponding native text entry appears, avoiding the disappearance between acknowledgement and conversation refresh. Preserve separate previews for repeated identical sends.

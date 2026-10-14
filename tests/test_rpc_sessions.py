@@ -1223,8 +1223,11 @@ class TestRpcSessionManager(unittest.TestCase):
         self.assertTrue(original.lifecycle_checked.wait(timeout=1))
 
         original.lifecycle_failure = RpcProcessExitError("RPC reader terminated")
+        # The replacement client exists before its connection is published.
         deadline = time.monotonic() + 2
-        while len(FakeRpcClient.instances) < 2 and time.monotonic() < deadline:
+        while time.monotonic() < deadline and (
+            len(FakeRpcClient.instances) < 2 or self.model.get(session_id)["transport"]["status"] != "connected"
+        ):
             time.sleep(0.01)
 
         replacement = self.manager._runtime(session_id)
